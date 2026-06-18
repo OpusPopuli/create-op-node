@@ -4,6 +4,7 @@ import pc from 'picocolors';
 import { initCommand } from './commands/init.js';
 import { bootstrapCommand } from './commands/bootstrap.js';
 import { verifyCommand } from './commands/verify.js';
+import { regionCommand } from './commands/region.js';
 
 // Bumped manually; published version comes from package.json.
 const VERSION = '0.0.1';
@@ -21,6 +22,7 @@ program
 program.addCommand(initCommand);
 program.addCommand(bootstrapCommand);
 program.addCommand(verifyCommand);
+program.addCommand(regionCommand);
 
 // When invoked with no subcommand, default to `init` — the create-* convention
 // is that `npx create-op-node` "just works" without specifying a subcommand.

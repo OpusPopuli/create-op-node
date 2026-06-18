@@ -32,6 +32,36 @@ npx create-op-node verify --domain your-domain.example
 
 Off-LAN health probe of a live node — TLS, GraphQL reachability, cosign signature check on the running images.
 
+## Bootstrapping a region config
+
+A node serves data; **what** data it serves is defined by a declarative region
+config in [`OpusPopuli/opuspopuli-regions`](https://github.com/OpusPopuli/opuspopuli-regions).
+Hand-writing one of those JSON files against the schema is the same kind of
+fiddly, error-prone step the rest of this CLI exists to remove — so there's a
+subcommand for it. Run it from the root of your `opuspopuli-regions` checkout:
+
+```bash
+npx create-op-node region
+```
+
+The wizard walks you through level (state or county), names, the two-letter
+state code, FIPS code, timezone, and at least one data source (URL, data type,
+source type, content goal). It then:
+
+1. Derives the `regionId` and keeps `name === config.regionId` (the invariant
+   the regions repo enforces).
+2. Re-checks every rule the regions repo's `pnpm test` enforces — semver,
+   FIPS length per level, county-id-prefixed-by-parent, no duplicate data
+   sources — **before** writing, so the file lands green instead of bouncing
+   off CI.
+3. Writes it to the canonical path
+   (`regions/<state>/<state>.json` or
+   `regions/<state>/counties/<county>/<county>.json`).
+
+Then it's just `pnpm test` + a PR. Non-interactive flags (`--level`, `--name`,
+`--parent`, `--state-code`, `--fips`, `--timezone`, `--out-dir`, `--force`) are
+available for scripting; run `create-op-node region --help` for the list.
+
 ## Why this exists
 
 Each Opus Populi region is operated independently by a local maintainer — its own Cloudflare account, its own Mac Studio, its own domain. The full bootstrap is a few hours of manual steps across Cloudflare, GitHub, Terraform Cloud, macOS Setup Assistant, Docker Desktop, Tailscale, Ollama, and the node's own Docker Compose stack. Doable from the runbook, but error-prone.
@@ -48,8 +78,9 @@ The CLI itself never holds any credentials beyond the scope of a single command 
                        │                                      │
    npx create-op-node ─┤  ┌─ init  ──────► Cloudflare API     │
                        │  ├─ bootstrap     GitHub API         │
-                       │  └─ verify        Terraform Cloud    │
-                       │                   `op` CLI (optional)│
+                       │  ├─ verify        Terraform Cloud    │
+                       │  └─ region        `op` CLI (optional)│
+                       │     (writes a regions repo config)   │
                        └──────────────────────────────────────┘
                                             │
                                             ▼
@@ -117,5 +148,6 @@ node dist/cli.js --help     # test the built binary
 ## Related
 
 - [`OpusPopuli/opuspopuli-node`](https://github.com/OpusPopuli/opuspopuli-node) — the per-region deployment template this CLI creates from.
+- [`OpusPopuli/opuspopuli-regions`](https://github.com/OpusPopuli/opuspopuli-regions) — declarative region configs; `create-op-node region` scaffolds one.
 - [`OpusPopuli/opuspopuli`](https://github.com/OpusPopuli/opuspopuli) — the central monorepo that builds + publishes `ghcr.io/opuspopuli/*` images.
 - [`OpusPopuli/prompt-service`](https://github.com/OpusPopuli/prompt-service) — private prompt-template service consumed by every node.
