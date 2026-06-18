@@ -62,6 +62,111 @@ Then it's just `pnpm test` + a PR. Non-interactive flags (`--level`, `--name`,
 `--parent`, `--state-code`, `--fips`, `--timezone`, `--out-dir`, `--force`) are
 available for scripting; run `create-op-node region --help` for the list.
 
+### What it looks like
+
+```text
+┌  create-op-node region
+
+◇  What level is this region?
+│  County
+
+◇  County name?
+│  Alameda
+
+◇  Parent state slug?
+│  california
+
+◇  Display name?
+│  Alameda County
+
+◇  One-line description of the data coverage?
+│  Civic data for Alameda County, California
+
+◇  Two-letter state code?
+│  CA
+
+◇  County FIPS (5 digits)?
+│  06001
+
+◇  IANA timezone?
+│  America/Los_Angeles
+
+◇  Data source #1 — URL?
+│  https://bos.acgov.org/
+
+◇  Data type?
+│  meetings
+
+◇  Source type?
+│  html_scrape
+
+◇  Content goal (what should the scraper extract)?
+│  Fetch Board of Supervisors agendas, minutes, and votes
+
+◇  Category label (optional)?
+│  Board of Supervisors
+
+◇  Add another data source?
+│  No
+
+◆  regions/california/counties/alameda/alameda.json (preview) ──────────╮
+│  {                                                                     │
+│    "name": "california-alameda",                                       │
+│    "displayName": "Alameda County",                                    │
+│    "description": "Civic data for Alameda County, California",         │
+│    "version": "0.1.0",                                                 │
+│    "config": {                                                         │
+│      "regionId": "california-alameda",                                 │
+│      "regionName": "Alameda County",                                   │
+│      "description": "Civic data for Alameda County, California",       │
+│      "timezone": "America/Los_Angeles",                                │
+│      "stateCode": "CA",                                                │
+│      "fipsCode": "06001",                                              │
+│      "dataSources": [                                                  │
+│        {                                                               │
+│          "url": "https://bos.acgov.org/",                              │
+│          "dataType": "meetings",                                       │
+│          "sourceType": "html_scrape",                                  │
+│          "contentGoal": "Fetch Board of Supervisors agendas, ...",     │
+│          "category": "Board of Supervisors"                            │
+│        }                                                               │
+│      ]                                                                 │
+│    },                                                                  │
+│    "parentRegionId": "california"                                      │
+│  }                                                                     │
+├────────────────────────────────────────────────────────────────────────╯
+
+◇  Write regions/california/counties/alameda/alameda.json?
+│  Yes
+
+◆  Done ────────────────────────────────────────────────────╮
+│  ✓ Wrote regions/california/counties/alameda/alameda.json  │
+│                                                            │
+│  Next steps in your opuspopuli-regions checkout:           │
+│    pnpm test                 # schema + hierarchy          │
+│    pnpm test:connectivity    # URL reachability            │
+│    git add … && git commit && open a PR                    │
+├──────────────────────────────────────────────────────────────╯
+
+└  Region scaffolded: california-alameda
+```
+
+### Caveats
+
+A couple of honest sharp edges, since this command lives in the *node* CLI
+rather than in the regions repo itself:
+
+- **Run it from a `opuspopuli-regions` checkout.** The file is written relative
+  to `--out-dir` (default: current directory) at the canonical `regions/…`
+  path. Run it anywhere else and the file lands in the wrong tree.
+- **The validation here mirrors the regions schema; it does not import it.**
+  `create-op-node` can't see `region-plugin.schema.json` at runtime, so its
+  pre-write checks are a hand-maintained copy of the rules. They can drift if
+  the schema changes. The regions repo's own `pnpm test` is the source of
+  truth — **always run it after scaffolding**; treat a green run there, not a
+  green run here, as the real signal. If the two ever disagree, the schema
+  wins and this command needs updating.
+
 ## Why this exists
 
 Each Opus Populi region is operated independently by a local maintainer — its own Cloudflare account, its own Mac Studio, its own domain. The full bootstrap is a few hours of manual steps across Cloudflare, GitHub, Terraform Cloud, macOS Setup Assistant, Docker Desktop, Tailscale, Ollama, and the node's own Docker Compose stack. Doable from the runbook, but error-prone.
