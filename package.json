@@ -1,0 +1,67 @@
+{
+  "name": "create-op-node",
+  "version": "0.0.1",
+  "description": "Interactive bootstrap for an Opus Populi node — Cloudflare infrastructure, Mac Studio, ghcr.io image pull. From sealed box to public API in one command.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "create-op-node": "./dist/cli.js"
+  },
+  "exports": "./dist/cli.js",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
+    "lint:eslint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.9.0",
+    "@octokit/rest": "^22.0.0",
+    "cloudflare": "^4.0.0",
+    "commander": "^13.1.0",
+    "execa": "^9.5.2",
+    "picocolors": "^1.1.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.6",
+    "eslint": "^9.18.0",
+    "oxlint": "^0.16.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.0"
+  },
+  "keywords": [
+    "opuspopuli",
+    "civic-tech",
+    "federation",
+    "cli",
+    "bootstrap",
+    "mac-studio",
+    "cloudflare-tunnel"
+  ],
+  "author": "OpusPopuli",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OpusPopuli/create-op-node.git"
+  },
+  "homepage": "https://github.com/OpusPopuli/create-op-node#readme",
+  "bugs": "https://github.com/OpusPopuli/create-op-node/issues",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
