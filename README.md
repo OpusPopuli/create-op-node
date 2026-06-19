@@ -226,16 +226,18 @@ The CLI itself never holds any credentials beyond the scope of a single command 
 
 ## Status
 
-**`init` — fully wired.** The full Phase 1 bootstrap runs end to end: prompts → Cloudflare 5-scope probe → Terraform Cloud verify → GitHub template clone → 5 repo secrets seeded → branch + prod.tfvars committed → PR opened → pgsodium key generated → (after operator merges PR) Terraform apply polled → Tunnel token retrieved + saved to 1Password.
+**`init` — fully wired.** Full Phase 1 of the runbook: prompts → Cloudflare 5-scope probe → Terraform Cloud verify → GitHub template clone → 5 repo secrets seeded → branch + prod.tfvars committed → PR opened → pgsodium key generated → (after operator merges PR) Terraform apply polled → Tunnel token retrieved + saved to 1Password.
 
-**`bootstrap`, `verify` — scaffold stubs.** Type-safe argument parsing only; print roadmap-style messages and exit.
+**`bootstrap` — fully wired.** Phase 2 on the Mac Studio: macOS sanity (auto-restart, disk sleep), Homebrew + tool installs (gh, pnpm, jq, cloudflared, rclone, ollama, docker, tailscale), GitHub + Tailscale signin prompts, pgsodium key + Tunnel token read from 1Password, LaunchAgent written + loaded, ghcr.io login, Ollama models pulled + warmed, region repo located or cloned, `docker compose pull && up -d`, health-check loop until everything reports `(healthy)`.
+
+**`verify` — scaffold stub.** Type-safe argument parsing only; prints a roadmap-style message and exits.
 
 **`region`** — fully wired. Scaffolds schema-valid region configs for the `OpusPopuli/opuspopuli-regions` repo.
 
 ### Roadmap
 
 - **v0.1.0** ✅ `init` end-to-end + `region` scaffolder.
-- **v0.2.0** — `bootstrap` fully wired: macOS config, brew installs, Docker Desktop setup, Tailscale, repo clone, LaunchAgent, ghcr.io login, Ollama, `docker compose up`.
+- **v0.2.0** ✅ `bootstrap` fully wired on the Studio side.
 - **v0.3.0** — `verify` fully wired: TLS + GraphQL + cosign signature checks.
 - **v0.4.0** — Resend domain + DKIM automation, drift detection, automated backup-restore drill.
 
