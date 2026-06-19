@@ -87,6 +87,23 @@ describe('renderLaunchAgentPlist', () => {
     });
     expect(out).toContain('cat /some/path/key');
   });
+
+  it('omits TUNNEL_TOKEN setenv when tunnelToken is undefined (local-only mode)', () => {
+    const out = renderLaunchAgentPlist({
+      keyFilePath: '/Users/op/.config/opuspopuli/pgsodium_root_key',
+      // tunnelToken intentionally omitted
+    });
+    expect(out).toContain('launchctl setenv PGSODIUM_ROOT_KEY');
+    expect(out).not.toContain('TUNNEL_TOKEN');
+    // The trailing `; ` from joining shouldn't leak — only one setenv line.
+    expect(out.match(/launchctl setenv/g) ?? []).toHaveLength(1);
+  });
+
+  it('still validates keyFilePath in local-only mode', () => {
+    expect(() =>
+      renderLaunchAgentPlist({ keyFilePath: '/tmp/key;rm -rf $HOME' }),
+    ).toThrow(/launchd path interpolation/);
+  });
 });
 
 describe('writePgsodiumKeyFile', () => {

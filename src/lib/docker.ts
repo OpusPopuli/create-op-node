@@ -83,12 +83,18 @@ export interface ComposeOptions {
   cwd: string;
   /** Optional env-file flag, in the same convention as `--env-file`. */
   envFile?: string;
+  /** Compose profiles to activate. Repeats as `--profile X --profile Y`. The
+   *  template's `cloudflared` service is gated behind the `public` profile;
+   *  bootstrap in local-only mode passes an empty array so cloudflared
+   *  stays down. */
+  profiles?: ReadonlyArray<string>;
 }
 
 function composeArgs(opts: ComposeOptions, sub: string[]): string[] {
   const files = opts.files.flatMap((f) => ['-f', f]);
   const env = opts.envFile ? ['--env-file', opts.envFile] : [];
-  return ['compose', ...files, ...env, ...sub];
+  const profiles = (opts.profiles ?? []).flatMap((pr) => ['--profile', pr]);
+  return ['compose', ...files, ...env, ...profiles, ...sub];
 }
 
 export interface ComposeResult {
@@ -106,6 +112,24 @@ export async function composePull(opts: ComposeOptions): Promise<ComposeResult> 
 export async function composeUp(opts: ComposeOptions): Promise<ComposeResult> {
   const res = await safeExeca('docker', composeArgs(opts, ['up', '-d', '--remove-orphans']));
   return result(res, 'compose up');
+}
+
+/**
+ * `docker compose -f … rm -sfv <service>`. Stops + removes a single service +
+ * its anonymous volumes. Used by `bootstrap --local-only` to evict a
+ * cloudflared container left over from a prior public bootstrap; otherwise it
+ * lingers in `compose ps` and the health-check loop demands it reach healthy.
+ *
+ * Returns ok=true when the service doesn't exist (compose treats "rm a
+ * service that isn't there" as a no-op exit 0), so callers can call this
+ * unconditionally.
+ */
+export async function composeRemoveService(
+  opts: ComposeOptions,
+  service: string,
+): Promise<ComposeResult> {
+  const res = await safeExeca('docker', composeArgs(opts, ['rm', '-sfv', service]));
+  return result(res, `compose rm ${service}`);
 }
 
 export interface ComposeDownOptions extends ComposeOptions {

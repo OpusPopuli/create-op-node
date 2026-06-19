@@ -22,7 +22,40 @@ Then on the Mac Studio itself:
 npx create-op-node bootstrap
 ```
 
-Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, reads the pgsodium key + Tunnel token from the Studio's Keychain (or prompts you to paste them once, then persists for re-runs), writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, and finally `docker compose pull && up -d` brings the whole stack online. Health-check loop waits until all 10 containers are `(healthy)`.
+Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, reads the pgsodium key + Tunnel token from the Studio's Keychain (or prompts you to paste them once, then persists for re-runs), writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, and finally `docker compose --profile public pull && up -d` brings the whole stack online. Health-check loop waits until all containers are `(healthy)`.
+
+### Local-only mode (no Cloudflare)
+
+```bash
+npx create-op-node bootstrap --region us-ca --local-only
+```
+
+Brings the Studio up for local dev / testing — frontend on your laptop
+hits the Studio over Tailscale, no public exposure. Differences from
+the standard run:
+
+- **No Tunnel token required.** `init` is unnecessary; if the pgsodium
+  key isn't in Keychain, bootstrap generates one inline and persists it.
+- **`cloudflared` stays down.** It's gated behind the `public` compose
+  profile, which `--local-only` doesn't activate. Bootstrap also evicts
+  any leftover cloudflared from a prior public run so it doesn't strand
+  in `compose ps`.
+- **Backup stack skipped by default.** `docker-compose-backup.yml`
+  isn't loaded; pass `--compose-file docker-compose-backup.yml` to
+  include it explicitly.
+- **LaunchAgent omits `TUNNEL_TOKEN`.** Only `PGSODIUM_ROOT_KEY` is
+  exported into the launchd session.
+- **Outro tells you to use Tailscale**, not `npx create-op-node verify`.
+
+When you're ready to go public, re-run `bootstrap` without `--local-only`
+and the same Studio promotes to the full production-shaped deploy.
+
+> **Template version**: this mode depends on the `opuspopuli-node`
+> template having `profiles: [public]` on its cloudflared service. If
+> you cloned the template before that landed, refresh your fork
+> (or recreate from template) before using `--local-only` — otherwise
+> cloudflared starts regardless and will restart-loop without a
+> TUNNEL_TOKEN.
 
 > **Secret transport between laptop and Studio**
 >

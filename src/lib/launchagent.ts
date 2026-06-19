@@ -81,8 +81,10 @@ export interface PlistInput {
   /** Path the plist will exec — sourced from defaultPaths() unless an operator
    *  overrides on the command line. */
   keyFilePath: string;
-  /** Literal Cloudflare Tunnel token; embedded in the plist. */
-  tunnelToken: string;
+  /** Literal Cloudflare Tunnel token; embedded in the plist. Omit for
+   *  `bootstrap --local-only` flows where no Tunnel is provisioned — the
+   *  rendered plist will only set PGSODIUM_ROOT_KEY. */
+  tunnelToken?: string;
 }
 
 /**
@@ -92,9 +94,12 @@ export interface PlistInput {
  * each var. `launchctl setenv` exports into the running launchd session,
  * not just the agent's own env, so anything Docker Desktop launches
  * downstream sees the same values.
+ *
+ * When `tunnelToken` is omitted, the plist sets ONLY `PGSODIUM_ROOT_KEY`
+ * (for local-only / no-Cloudflare flows). When present, it sets both.
  */
 export function renderLaunchAgentPlist(input: PlistInput): string {
-  if (!TUNNEL_TOKEN_RE.test(input.tunnelToken)) {
+  if (input.tunnelToken !== undefined && !TUNNEL_TOKEN_RE.test(input.tunnelToken)) {
     // JWT-style base64-url alphabet. Anything outside it would either break
     // the XML string content (`<`, `>`, `&`) or inject shell metacharacters
     // into the `sh -c` body downstream. Throw rather than silently emit
@@ -110,9 +115,13 @@ export function renderLaunchAgentPlist(input: PlistInput): string {
       `keyFilePath ${JSON.stringify(input.keyFilePath)} contains characters not allowed in a launchd path interpolation`,
     );
   }
-  const command =
-    `launchctl setenv PGSODIUM_ROOT_KEY "$(cat ${input.keyFilePath})"; ` +
-    `launchctl setenv TUNNEL_TOKEN "${input.tunnelToken}"`;
+  const setenvLines = [
+    `launchctl setenv PGSODIUM_ROOT_KEY "$(cat ${input.keyFilePath})"`,
+    ...(input.tunnelToken !== undefined
+      ? [`launchctl setenv TUNNEL_TOKEN "${input.tunnelToken}"`]
+      : []),
+  ];
+  const command = setenvLines.join('; ');
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -169,7 +178,9 @@ export async function loadLaunchAgent(plistFile: string): Promise<WriteResult> {
 
 export interface SetupInput {
   pgsodiumKey: string;
-  tunnelToken: string;
+  /** Omit for `bootstrap --local-only` flows — the rendered plist will only
+   *  set `PGSODIUM_ROOT_KEY`. */
+  tunnelToken?: string;
   paths?: LaunchAgentPaths;
 }
 
@@ -197,7 +208,7 @@ export async function setupLaunchAgent(input: SetupInput): Promise<SetupReport> 
   try {
     plistContent = renderLaunchAgentPlist({
       keyFilePath: paths.keyFile,
-      tunnelToken: input.tunnelToken,
+      ...(input.tunnelToken !== undefined ? { tunnelToken: input.tunnelToken } : {}),
     });
   } catch (err) {
     return { ok: false, paths, step: 'plist', reason: (err as Error).message };

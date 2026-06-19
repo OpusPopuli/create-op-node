@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-06-19
+
+### Added
+
+- **`bootstrap --local-only`** — runs the Studio for local dev / testing
+  without Cloudflare. No Tunnel token required; the LaunchAgent omits
+  `TUNNEL_TOKEN`; `cloudflared` stays down (it's now gated behind the
+  `public` compose profile, which `--local-only` doesn't activate); the
+  pgsodium key is auto-generated inline if not already in Keychain
+  (so `init` is unnecessary). Designed for the "frontend on laptop +
+  Studio on LAN/Tailscale, sync data while iterating" workflow. The
+  same Studio promotes to a full public deploy by re-running `bootstrap`
+  without the flag.
+- `composeOptions.profiles` — pass-through to `docker compose --profile`,
+  defaulted to `['public']` in production mode and `[]` in local-only.
+
+### Changed
+
+- `renderLaunchAgentPlist` and `setupLaunchAgent` now accept an optional
+  `tunnelToken`. When omitted, the plist sets only `PGSODIUM_ROOT_KEY`.
+  Existing production callers (which always pass a token) are unaffected.
+
+### Requires
+
+- `OpusPopuli/opuspopuli-node` template with `profiles: [public]` on the
+  cloudflared service in `docker-compose-prod.yml`. Operators who cloned
+  the template before that landed will see cloudflared start regardless
+  of the CLI flag — pull the latest from the template (`gh repo sync`
+  against your fork, or re-create from template) before using
+  `--local-only`. Future template releases (when we cut them) will be
+  pinned by version here.
+
 ## [0.3.0] — 2026-06-19
 
 ### Changed
@@ -97,6 +129,7 @@ testable from `npx create-op-node`.
   a hostile path becoming shell injection in launchd's `sh -c` body.
 - `pnpm audit`, `trivy`, `gitleaks` all clean.
 
+[0.4.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.4.0
 [0.3.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.3.0
 [0.2.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.2.0
 [0.1.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.1.0
