@@ -30,7 +30,49 @@ And at any time after that:
 npx create-op-node verify --domain your-domain.example
 ```
 
-Off-LAN health probe of a live node — TLS, GraphQL reachability, cosign signature check on the running images.
+Off-LAN health probe of a live node, runnable from anywhere with internet
+access. Five phases:
+
+1. **TLS handshake** to `api.<domain>:443` — surfaces cert subject, issuer,
+   and days-to-expiry. Warns when the cert is within `--cert-warn-days`
+   of expiring (default 14d). Negative expiries render as
+   `expired Nd ago`.
+2. **`GET https://api.<domain>/health`** must return 200.
+3. **`POST https://api.<domain>/api`** with `{ __typename }` must return a
+   valid GraphQL envelope (catches the "TLS green, but a misconfigured
+   proxy returns HTML" case).
+4. **Cloudflare Tunnel status** (optional) — looks up `connections` via
+   the CF API. Zero connectors registered → warning that cloudflared on
+   the Studio is offline. Requires all three of `--cf-token` (or
+   `--cf-token-file`), `--cf-account-id`, `--tunnel-id`; partial
+   configuration warns + names the missing flag.
+5. **`cosign verify`** (optional, repeatable `--image`) — keyless
+   verification against the GitHub Actions OIDC issuer + Fulcio +
+   the Rekor transparency log. Silently skipped when `cosign` isn't on
+   `PATH` (install with `brew install cosign` to enable).
+
+No phase short-circuits the others — verify always runs the full pass so
+the operator sees the whole landscape in one report. Exits non-zero only
+when at least one phase failed; warnings are reported but don't fail the
+run. Skipped phases are hidden by default; add `--show-skipped` to see them.
+
+Full flag set:
+
+```bash
+npx create-op-node verify \
+  --domain yournode.example.org \
+  --cf-token-file ~/.config/opuspopuli/cf-token \
+  --cf-account-id $CF_ACCOUNT_ID \
+  --tunnel-id $TUNNEL_ID \
+  --image ghcr.io/opuspopuli/api:latest \
+  --image ghcr.io/opuspopuli/users:latest \
+  --cert-warn-days 21
+```
+
+`--cf-token-file` is preferred over `--cf-token` for cron / systemd
+invocations — the latter ends up in `ps` output, the former doesn't.
+Use `--api-host <host>` to override the default `api.<domain>`
+construction when your node exposes the API at a different subdomain.
 
 ## Bootstrapping a region config
 
