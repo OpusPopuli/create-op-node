@@ -16,9 +16,16 @@ import {
   enableAutoRestartOnPowerFailure,
   inspectSystem,
 } from '../lib/macos.js';
-import { detectKeychain, readSecret, saveSecret } from '../lib/keychain.js';
+import { detectKeychain, readSecret, saveSecret, type SecretAccount } from '../lib/keychain.js';
+import { generatePgsodiumRootKey } from '../lib/secrets.js';
 import { setupLaunchAgent } from '../lib/launchagent.js';
-import { loginToGhcr, composePull, composeUp, waitForHealthy } from '../lib/docker.js';
+import {
+  composePull,
+  composeRemoveService,
+  composeUp,
+  loginToGhcr,
+  waitForHealthy,
+} from '../lib/docker.js';
 import {
   DEFAULT_MODELS,
   checkOllamaHealth,
@@ -30,6 +37,12 @@ import { locateOrCloneRepo, type LocateOutcome } from '../lib/noderepo.js';
 import { safeExeca } from '../lib/exec.js';
 import { unwrap } from '../lib/prompts.js';
 
+/** Compose profile set used in production mode — activates cloudflared. */
+const PUBLIC_PROFILES = ['public'] as const;
+/** Compose profile set used in --local-only mode — keeps cloudflared down
+ *  via the template's profile gating. */
+const LOCAL_PROFILES = [] as const;
+
 interface BootstrapOptions {
   region?: string;
   owner?: string;
@@ -40,6 +53,7 @@ interface BootstrapOptions {
   skipLaunchAgent?: boolean;
   skipOllama?: boolean;
   skipStack?: boolean;
+  localOnly?: boolean;
   yes?: boolean;
 }
 
@@ -53,8 +67,8 @@ export const bootstrapCommand = new Command('bootstrap')
   .addOption(
     new Option(
       '--compose-file <path>',
-      'Repeatable. Compose file relative to repo root. Default: docker-compose-prod.yml + docker-compose-backup.yml',
-    ).default(['docker-compose-prod.yml', 'docker-compose-backup.yml'] as string[]),
+      'Repeatable. Compose file relative to repo root. Default: prod + backup (production), prod only (--local-only).',
+    ),
   )
   .addOption(new Option('--env-file <path>', 'Compose --env-file. Default: .env.production'))
   .addOption(new Option('--skip-brew', "Skip the Homebrew package install pass").default(false))
@@ -66,6 +80,12 @@ export const bootstrapCommand = new Command('bootstrap')
   )
   .addOption(new Option('--skip-ollama', "Skip the Ollama model pull + warm").default(false))
   .addOption(new Option('--skip-stack', "Stop before `docker compose pull && up`").default(false))
+  .addOption(
+    new Option(
+      '--local-only',
+      "Run for local dev / testing: no Tunnel token required, cloudflared stays down. Auto-generates the pgsodium key if not in Keychain (init unnecessary).",
+    ).default(false),
+  )
   .addOption(new Option('-y, --yes', 'Skip confirmation prompts').default(false))
   .action(async (opts: BootstrapOptions) => {
     p.intro(pc.bgCyan(pc.black(' create-op-node bootstrap ')));
@@ -84,6 +104,16 @@ export const bootstrapCommand = new Command('bootstrap')
 
     const owner = opts.owner ?? 'OpusPopuli';
     const repoName = `opuspopuli-node-${region}`;
+
+    // Default compose file set by mode (review S4): production runs the
+    // backup stack (restic / rclone) alongside the main stack; local-only
+    // skips it (don't burn dev-machine disk on backups; don't try to push
+    // to an R2 bucket that may not exist). Operator can still override
+    // with explicit --compose-file flags.
+    const composeFileDefault = opts.localOnly
+      ? ['docker-compose-prod.yml']
+      : ['docker-compose-prod.yml', 'docker-compose-backup.yml'];
+    const composeFile = opts.composeFile ?? composeFileDefault;
 
     // ---- Phase 1: macOS sanity ----
     const sysSpin = p.spinner();
@@ -220,6 +250,11 @@ export const bootstrapCommand = new Command('bootstrap')
     // the laptop). On a fresh Studio, both items will be missing on first
     // run — bootstrap prompts the operator to paste, validates the format,
     // and writes to the Studio's local Keychain for re-runs.
+    //
+    // In --local-only mode there's no Tunnel token at all (cloudflared
+    // stays down via compose profile gating). The pgsodium key is still
+    // required since the data services use it; if missing, we generate
+    // a fresh one inline rather than requiring an `init` call first.
     const keychain = await detectKeychain();
     if (!keychain.available) {
       p.cancel(
@@ -228,34 +263,44 @@ export const bootstrapCommand = new Command('bootstrap')
       process.exit(1);
     }
 
-    const pgsodiumKey = await loadOrPromptSecret({
+    const pgsodiumKey = await loadSecret({
       region,
       account: 'pgsodium-root-key',
       label: 'pgsodium master key',
-      placeholder: '64 lowercase hex characters',
       validate: (v) =>
         PGSODIUM_KEY_RE.test(v) ? undefined : 'must be exactly 64 lowercase hex characters',
+      ...(opts.localOnly ? { generate: generatePgsodiumRootKey } : {}),
     });
-    const tunnelToken = await loadOrPromptSecret({
-      region,
-      account: 'tunnel-token',
-      label: 'Cloudflare Tunnel token',
-      placeholder: 'JWT-style base64url string from `terraform output tunnel_token`',
-      validate: (v) =>
-        TUNNEL_TOKEN_RE.test(v) ? undefined : 'tunnel token must be a base64-url JWT',
-    });
+
+    const tunnelToken = opts.localOnly
+      ? undefined
+      : await loadSecret({
+          region,
+          account: 'tunnel-token',
+          label: 'Cloudflare Tunnel token',
+          placeholder: 'JWT-style base64url string from `terraform output tunnel_token`',
+          validate: (v) =>
+            TUNNEL_TOKEN_RE.test(v) ? undefined : 'tunnel token must be a base64-url JWT',
+        });
 
     // ---- Phase 6: LaunchAgent ----
     if (!opts.skipLaunchAgent) {
       const laSpin = p.spinner();
       laSpin.start('Writing pgsodium key file + LaunchAgent plist…');
-      const la = await setupLaunchAgent({ pgsodiumKey, tunnelToken });
+      const la = await setupLaunchAgent({
+        pgsodiumKey,
+        ...(tunnelToken !== undefined ? { tunnelToken } : {}),
+      });
       if (!la.ok) {
         laSpin.stop(pc.red(`✗ LaunchAgent step ${la.step} failed.`));
         p.cancel(la.reason ?? 'LaunchAgent setup failed.');
         process.exit(1);
       }
-      laSpin.stop(pc.green(`✓ LaunchAgent loaded (${la.paths.plistFile}).`));
+      laSpin.stop(
+        pc.green(
+          `✓ LaunchAgent loaded (${la.paths.plistFile})${opts.localOnly ? ' — local-only mode, no TUNNEL_TOKEN set' : ''}.`,
+        ),
+      );
     }
 
     // ---- Phase 7: ghcr.io login ----
@@ -320,20 +365,43 @@ export const bootstrapCommand = new Command('bootstrap')
     // ---- Phase 9: docker compose pull + up ----
     // (Phase 4 already located the repo.)
     if (opts.skipStack) {
+      const profileFlag = opts.localOnly ? '' : '--profile public ';
       p.outro(
         pc.cyan(
-          `Stack-up skipped. Run \`docker compose -f ${(opts.composeFile ?? ['docker-compose-prod.yml']).join(' -f ')} pull && up -d\` from ${repoPath} when ready.`,
+          `Stack-up skipped. Run \`docker compose -f ${composeFile.join(' -f ')} ${profileFlag}pull && docker compose -f ${composeFile.join(' -f ')} ${profileFlag}up -d\` from ${repoPath} when ready.`,
         ),
       );
       return;
     }
 
-    const composeFiles = resolveComposeFiles(repoPath, opts.composeFile);
+    const composeFiles = resolveComposeFiles(repoPath, composeFile);
+    // In production mode, activate the `public` compose profile so cloudflared
+    // starts. In --local-only mode pass no profiles — the template gates
+    // cloudflared behind `public`, so an empty profiles array keeps it down.
     const composeOpts = {
       files: composeFiles,
       cwd: repoPath,
       ...(opts.envFile ? { envFile: opts.envFile } : {}),
+      profiles: opts.localOnly ? LOCAL_PROFILES : PUBLIC_PROFILES,
     };
+
+    // In --local-only mode, evict any cloudflared container left over from a
+    // prior public bootstrap on this Studio. Without this, `compose ps` would
+    // still list cloudflared and the health-check loop would demand it reach
+    // healthy with no TUNNEL_TOKEN — hanging until timeout. (review S3)
+    if (opts.localOnly) {
+      const evict = p.spinner();
+      evict.start('Evicting any cloudflared from a prior public bootstrap…');
+      const rm = await composeRemoveService(
+        { ...composeOpts, profiles: PUBLIC_PROFILES },
+        'cloudflared',
+      );
+      evict.stop(
+        rm.ok
+          ? pc.green('✓ cloudflared not present (or removed).')
+          : pc.yellow(`⚠ cloudflared eviction reported: ${rm.reason ?? 'unknown'} — continuing.`),
+      );
+    }
 
     const pullSpin = p.spinner();
     pullSpin.start('Pulling images from ghcr.io…');
@@ -369,11 +437,23 @@ export const bootstrapCommand = new Command('bootstrap')
     switch (outcome.kind) {
       case 'healthy':
         healthSpin.stop(pc.green(`✓ All ${outcome.snapshots.length} containers healthy.`));
-        p.outro(
-          pc.cyan(
-            `Region ${region} is up. Next: verify off-LAN with \`npx create-op-node verify --domain <your-domain>\`.`,
-          ),
-        );
+        if (opts.localOnly) {
+          p.outro(
+            pc.cyan(
+              [
+                `Region ${region} is up locally (no public Cloudflare Tunnel — cloudflared stays down).`,
+                `Access from your laptop over Tailscale at this Studio's tailnet IP.`,
+                `When you're ready to expose publicly, re-run \`bootstrap\` without --local-only.`,
+              ].join('\n'),
+            ),
+          );
+        } else {
+          p.outro(
+            pc.cyan(
+              `Region ${region} is up. Next: verify off-LAN with \`npx create-op-node verify --domain <your-domain>\`.`,
+            ),
+          );
+        }
         return;
       case 'unhealthy':
         healthSpin.stop(pc.red(`✗ ${outcome.problem}`));
@@ -557,25 +637,43 @@ async function promptTailscaleSignin(): Promise<void> {
   unwrap(await p.confirm({ message: 'Tailscale signed in (or skipped)?', initialValue: true }));
 }
 
-interface LoadOrPromptInput {
+interface LoadSecretInput {
   region: string;
-  account: 'pgsodium-root-key' | 'tunnel-token';
+  account: SecretAccount;
   /** Friendly name for prompts and notes. */
   label: string;
-  /** Placeholder hint shown in the paste prompt. */
-  placeholder: string;
+  /** Placeholder hint shown in the paste prompt. Ignored when `generate` is set. */
+  placeholder?: string;
   /** Format check applied to both Keychain reads (so a stale-bad value is
    *  treated as missing) and operator paste input. */
   validate: (v: string) => string | undefined;
+  /** When set, on Keychain miss / validate-fail, generate a fresh value
+   *  instead of prompting. Used by `--local-only` for the pgsodium key —
+   *  no `init` needed.
+   *
+   *  CRITICAL: when `generate` is set we MUST be able to persist the
+   *  generated value to Keychain. Otherwise the next bootstrap re-run
+   *  generates a different fresh key and silently destroys any data
+   *  encrypted under the previous key. So save failure in the generate
+   *  path is a hard exit, not a warning. (review B1) */
+  generate?: () => string;
 }
 
 /**
- * Read a secret from the local Keychain. If absent or format-invalid,
- * prompt the operator to paste, validate, persist back to the Studio's
- * Keychain so subsequent re-runs find it. Always returns a valid value
- * or `process.exit(0)` (operator cancelled).
+ * Materialize a secret. Three paths, in order:
+ *
+ *   1. Keychain hit + valid → return it.
+ *   2. Else if `generate` is set → generate fresh, MUST persist (hard fail
+ *      if save fails), return. The Keychain item is the durable record;
+ *      losing it later means losing whatever it encrypted.
+ *   3. Else → prompt operator to paste, validate, persist with a warning
+ *      on save failure (the operator can paste again next time).
+ *
+ * If `validate` rejects an existing Keychain item, we surface the swap
+ * explicitly before regenerating/reprompting — destructive overwrites
+ * shouldn't be invisible. (review S1)
  */
-async function loadOrPromptSecret(input: LoadOrPromptInput): Promise<string> {
+async function loadSecret(input: LoadSecretInput): Promise<string> {
   const coords = { region: input.region, account: input.account };
   const spin = p.spinner();
   spin.start(`Reading ${input.label} from Keychain…`);
@@ -584,11 +682,34 @@ async function loadOrPromptSecret(input: LoadOrPromptInput): Promise<string> {
     spin.stop(pc.green(`✓ ${input.label} read from Keychain.`));
     return existing;
   }
+
+  // Differentiate "missing" from "present-but-bad-format" — the latter is a
+  // destructive replacement so we say so out loud.
   spin.stop(
     existing
-      ? pc.yellow(`⚠ ${input.label} in Keychain failed validation — will re-prompt.`)
-      : pc.dim(`· ${input.label} not in Keychain — will prompt.`),
+      ? pc.yellow(`⚠ ${input.label} in Keychain failed format validation — will replace.`)
+      : pc.dim(`· ${input.label} not in Keychain.`),
   );
+
+  if (input.generate) {
+    const fresh = input.generate();
+    const save = await saveSecret(coords, fresh);
+    if (!save.written) {
+      // Hard fail (review B1) — we generated a fresh value but couldn't
+      // persist it. If we continued, the next bootstrap re-run would
+      // generate a DIFFERENT fresh value and destroy whatever this one
+      // encrypted. Better to bail loudly and let the operator fix the
+      // underlying Keychain issue.
+      p.cancel(
+        `Generated a fresh ${input.label} but couldn't persist it to Keychain: ${save.reason ?? 'unknown'}. ` +
+          `Continuing would risk silent key rotation on the next re-run. ` +
+          `Resolve the Keychain access (re-grant via Keychain Access.app or check the security CLI) and re-run.`,
+      );
+      process.exit(1);
+    }
+    p.note(`${pc.green('✓')} Generated fresh ${input.label} and stored in Keychain.`, 'Keychain');
+    return fresh;
+  }
 
   const pasted = unwrap(
     await p.password({
@@ -596,10 +717,14 @@ async function loadOrPromptSecret(input: LoadOrPromptInput): Promise<string> {
       validate: (v) => input.validate(v ?? ''),
     }),
   );
-
   const save = await saveSecret(coords, pasted);
   if (!save.written) {
-    p.note(`${pc.yellow('⚠')} Couldn't persist to Keychain: ${save.reason ?? 'unknown'}. Continuing anyway.`, 'Keychain');
+    // Paste path: warning is fine since the operator can paste again on the
+    // next run. The value isn't lost — it's still wherever they pasted from.
+    p.note(
+      `${pc.yellow('⚠')} Couldn't persist to Keychain: ${save.reason ?? 'unknown'}. You'll need to paste it again next run.`,
+      'Keychain',
+    );
   } else {
     p.note(`${pc.green('✓')} Stored ${input.label} in Keychain for re-runs.`, 'Keychain');
   }

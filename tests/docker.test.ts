@@ -11,6 +11,7 @@ import {
   composeDown,
   composePs,
   composePull,
+  composeRemoveService,
   composeUp,
   dockerLogout,
   GHCR_REGISTRY,
@@ -98,6 +99,28 @@ describe('composePull / composeUp', () => {
     expect(args).toEqual(['compose', '-f', 'a.yml', '--env-file', '.env.prod', 'up', '-d', '--remove-orphans']);
   });
 
+  it('inserts --profile flags between files and the subcommand', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    await composeUp({
+      files: ['a.yml'],
+      cwd: '/tmp',
+      profiles: ['public', 'observability'],
+    });
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual([
+      'compose', '-f', 'a.yml',
+      '--profile', 'public', '--profile', 'observability',
+      'up', '-d', '--remove-orphans',
+    ]);
+  });
+
+  it('omits --profile flags entirely when profiles is empty / absent (local-only)', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    await composeUp({ files: ['a.yml'], cwd: '/tmp', profiles: [] });
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).not.toContain('--profile');
+  });
+
   it('reports clean reason when docker is missing', async () => {
     const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     execaMock.mockRejectedValueOnce(err);
@@ -142,6 +165,44 @@ describe('composeDown', () => {
     expect(r.ok).toBe(false);
     expect(r.reason).toContain('compose down -v');
     expect(r.reason).toContain('volume in use');
+  });
+});
+
+describe('composeRemoveService', () => {
+  it('builds `docker compose -f X rm -sfv <service>`', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    const r = await composeRemoveService({ files: ['a.yml'], cwd: '/tmp' }, 'cloudflared');
+    expect(r.ok).toBe(true);
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual(['compose', '-f', 'a.yml', 'rm', '-sfv', 'cloudflared']);
+  });
+
+  it('passes through env-file + profiles in the args order', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    await composeRemoveService(
+      {
+        files: ['a.yml'],
+        cwd: '/tmp',
+        envFile: '.env.prod',
+        profiles: ['public'],
+      },
+      'cloudflared',
+    );
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual([
+      'compose', '-f', 'a.yml',
+      '--env-file', '.env.prod',
+      '--profile', 'public',
+      'rm', '-sfv', 'cloudflared',
+    ]);
+  });
+
+  it('reports failure cleanly', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: 'no such service' });
+    const r = await composeRemoveService({ files: ['a.yml'], cwd: '/tmp' }, 'nope');
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('compose rm nope');
+    expect(r.reason).toContain('no such service');
   });
 });
 
