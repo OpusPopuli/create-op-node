@@ -98,15 +98,13 @@ export interface ComposeResult {
 
 /** `docker compose -f … pull`. Idempotent on first run; pulls new image tags. */
 export async function composePull(opts: ComposeOptions): Promise<ComposeResult> {
-  const res = await safeExeca('docker', composeArgs(opts, ['pull']), { input: undefined });
+  const res = await safeExeca('docker', composeArgs(opts, ['pull']));
   return result(res, 'compose pull');
 }
 
 /** `docker compose -f … up -d --remove-orphans`. */
 export async function composeUp(opts: ComposeOptions): Promise<ComposeResult> {
-  const res = await safeExeca('docker', composeArgs(opts, ['up', '-d', '--remove-orphans']), {
-    input: undefined,
-  });
+  const res = await safeExeca('docker', composeArgs(opts, ['up', '-d', '--remove-orphans']));
   return result(res, 'compose up');
 }
 
