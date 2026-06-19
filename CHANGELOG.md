@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-06-19
+
+### Changed
+
+- **Secret store: 1Password → macOS Keychain.** `init` writes the pgsodium
+  master key + Cloudflare Tunnel token to the operator's login keychain via
+  the built-in `security` CLI. `bootstrap` reads from the Studio's local
+  Keychain; on a first-run miss, it prompts the operator to paste the value
+  (with format validation), then persists locally so re-runs read straight
+  through. Removes the 1Password CLI dependency + paid-sub assumption.
+
+### Removed
+
+- `--vault` flag on `init` and `bootstrap` (no concept of vaults in Keychain).
+- `src/lib/onepassword.ts` and its tests.
+
+### Notes
+
+- macOS Keychain items written via the `security` CLI don't sync to
+  iCloud Keychain (no `kSecAttrSynchronizable` flag exposed). Operators
+  ferry the secret to the Studio once via AirDrop / `security find-generic-
+  password` output / scp. The paste prompt in bootstrap handles the
+  transport step.
+
 ## [0.2.0] — 2026-06-19
 
 ### Added
@@ -73,5 +97,6 @@ testable from `npx create-op-node`.
   a hostile path becoming shell injection in launchd's `sh -c` body.
 - `pnpm audit`, `trivy`, `gitleaks` all clean.
 
+[0.3.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.3.0
 [0.2.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.2.0
 [0.1.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.1.0

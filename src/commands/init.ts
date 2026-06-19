@@ -4,7 +4,7 @@ import pc from 'picocolors';
 
 import { probeCloudflareToken } from '../lib/cloudflare.js';
 import { probeTfcToken } from '../lib/tfc.js';
-import { detectOp, readSecretFromOp, saveSecretToOp } from '../lib/onepassword.js';
+import { detectKeychain, readSecret, saveSecret } from '../lib/keychain.js';
 import { safeExeca } from '../lib/exec.js';
 import { unwrap } from '../lib/prompts.js';
 import {
@@ -30,7 +30,6 @@ interface InitOptions {
   tfToken?: string;
   tfOrg?: string;
   ghToken?: string;
-  vault?: string;
   overwrite?: boolean;
   useExistingRepo?: boolean;
   skipWait?: boolean;
@@ -66,11 +65,10 @@ export const initCommand = new Command('init')
   .addOption(new Option('--tf-token <token>', 'Terraform Cloud user/team token').env('TF_API_TOKEN'))
   .addOption(new Option('--tf-org <org>', 'Terraform Cloud organization').env('TF_CLOUD_ORGANIZATION'))
   .addOption(new Option('--gh-token <token>', 'GitHub Personal Access Token (else gh CLI)').env('GH_TOKEN'))
-  .addOption(new Option('--vault <vault>', '1Password vault for secrets').default('Private'))
   .addOption(
     new Option(
       '--overwrite',
-      'Overwrite existing 1Password items (pgsodium key, Tunnel token) on a re-run',
+      'Overwrite existing Keychain items (pgsodium key, Tunnel token) on a re-run',
     ).default(false),
   )
   .addOption(
@@ -100,7 +98,7 @@ export const initCommand = new Command('init')
       ? opts.region
       : unwrap(
           await p.text({
-            message: 'Short region label (used as a prefix in 1Password + R2)?',
+            message: 'Short region label (used as the Keychain service suffix + R2 prefix)?',
             placeholder: 'us-ca',
             validate: (v) =>
               /^[a-z0-9-]{2,32}$/.test(v ?? '') ? undefined : 'lowercase letters, digits, hyphens; 2–32 chars',
@@ -197,14 +195,14 @@ export const initCommand = new Command('init')
       );
     }
 
-    // ---- 1Password detection --------------------------------------------
-    const op = await detectOp();
-    const opNote = op.installed
-      ? op.signedIn
-        ? `✓ 1Password CLI signed in${op.email ? ` (${op.email})` : ''} — pgsodium key + Tunnel token will be saved automatically.`
-        : `⚠ 1Password CLI installed but not signed in. Run \`op signin\` in another shell, or you'll be prompted to paste secrets.`
-      : `⚠ 1Password CLI not installed. Secrets will be printed for you to paste into 1Password by hand.`;
-    p.note(opNote, '1Password');
+    // ---- Keychain availability -----------------------------------------
+    const keychain = await detectKeychain();
+    const kcNote = keychain.available
+      ? `✓ macOS Keychain available — pgsodium key + Tunnel token will be saved to your login keychain.\n` +
+        pc.dim('Note: items don\'t sync to iCloud Keychain via the security CLI.\n') +
+        pc.dim('On the Studio, bootstrap will read locally and prompt you to paste if missing.')
+      : `⚠ ${keychain.reason ?? 'Keychain unavailable'}. Secrets will be printed for manual stash.`;
+    p.note(kcNote, 'Secret store');
 
     // ---- Plan summary + confirm ----------------------------------------
     p.note(
@@ -385,51 +383,38 @@ export const initCommand = new Command('init')
 
     // ---- pgsodium master key (read existing OR generate fresh) ----------
     //
-    // Three branches to handle cleanly:
-    //   1. Op installed + signed in + key already in 1P + no --overwrite →
-    //      surface the existing key (and use it, not a freshly-generated one).
-    //   2. Op installed + signed in + no key OR --overwrite → generate fresh,
-    //      save to 1P.
-    //   3. Op unavailable → generate fresh, print for manual paste.
-    const keyTitle = `opuspopuli-${region}-pgsodium-root-key`;
-    const vaultArg = opts.vault ? { vault: opts.vault } : {};
+    // Three branches:
+    //   1. Keychain available + key already present + no --overwrite →
+    //      surface the existing key (don't generate a fresh one and
+    //      silently drop it).
+    //   2. Keychain available + no key OR --overwrite → generate fresh,
+    //      save to Keychain.
+    //   3. Keychain unavailable → generate fresh, print for manual stash.
+    const pgsodiumCoords = { region, account: 'pgsodium-root-key' as const };
+    const keyLabel = `org.opuspopuli.${region}/pgsodium-root-key`;
 
-    if (op.installed && op.signedIn) {
-      const existing = opts.overwrite
-        ? null
-        : await readSecretFromOp({ title: keyTitle, ...vaultArg });
+    if (keychain.available) {
+      const existing = opts.overwrite ? null : await readSecret(pgsodiumCoords);
       if (existing && /^[a-f0-9]{64}$/.test(existing)) {
         p.note(
-          `${pc.green('✓')} Re-using existing pgsodium master key from 1Password (${pc.cyan(keyTitle)}). Pass --overwrite to rotate.`,
+          `${pc.green('✓')} Re-using existing pgsodium master key from Keychain (${pc.cyan(keyLabel)}). Pass --overwrite to rotate.`,
           'Secret',
         );
       } else {
         const fresh = generatePgsodiumRootKey();
-        const r = await saveSecretToOp({
-          title: keyTitle,
-          value: fresh,
-          overwrite: opts.overwrite ?? false,
-          ...vaultArg,
-        });
+        const r = await saveSecret(pgsodiumCoords, fresh);
         if (r.written) {
           p.note(
-            `${pc.green('✓')} pgsodium master key${r.alreadyExisted ? ' rotated' : ' saved'} to 1Password as ${pc.cyan(keyTitle)}.`,
-            'Secret',
-          );
-        } else if (r.alreadyExisted) {
-          // Existed but didn't parse as 64-hex AND no --overwrite. Surface this
-          // clearly rather than silently leaving the bad item in place.
-          p.note(
-            `${pc.yellow('!')} 1Password has an item titled ${pc.cyan(keyTitle)} but its value is NOT a 64-hex pgsodium key. Inspect it in 1Password; re-run with --overwrite to replace.`,
+            `${pc.green('✓')} pgsodium master key${r.updated ? ' rotated' : ' saved'} to Keychain as ${pc.cyan(keyLabel)}.`,
             'Secret',
           );
         } else {
-          await printKeyForManualSave(fresh, keyTitle, r.reason);
+          await printKeyForManualSave(fresh, keyLabel, r.reason);
         }
       }
     } else {
       const fresh = generatePgsodiumRootKey();
-      await printKeyForManualSave(fresh, keyTitle);
+      await printKeyForManualSave(fresh, keyLabel);
     }
 
     // ---- Pause for operator to merge PR --------------------------------
@@ -489,24 +474,20 @@ export const initCommand = new Command('init')
     }
 
     // ---- Save Tunnel token ----------------------------------------------
-    const tunnelTitle = `opuspopuli-${region}-tunnel-token`;
-    if (op.installed && op.signedIn) {
-      const r = await saveSecretToOp({
-        title: tunnelTitle,
-        value: tunnelToken,
-        ...(opts.vault ? { vault: opts.vault } : {}),
-        overwrite: true,
-      });
+    const tunnelCoords = { region, account: 'tunnel-token' as const };
+    const tunnelLabel = `org.opuspopuli.${region}/tunnel-token`;
+    if (keychain.available) {
+      const r = await saveSecret(tunnelCoords, tunnelToken);
       if (r.written) {
         p.note(
-          `${pc.green('✓')} Tunnel token saved to 1Password as ${pc.cyan(tunnelTitle)}.`,
+          `${pc.green('✓')} Tunnel token saved to Keychain as ${pc.cyan(tunnelLabel)}.`,
           'Secret',
         );
       } else {
-        await printKeyForManualSave(tunnelToken, tunnelTitle, r.reason);
+        await printKeyForManualSave(tunnelToken, tunnelLabel, r.reason);
       }
     } else {
-      await printKeyForManualSave(tunnelToken, tunnelTitle);
+      await printKeyForManualSave(tunnelToken, tunnelLabel);
     }
 
     // ---- Done -----------------------------------------------------------
@@ -566,28 +547,26 @@ async function collectId(preset: string | undefined, message: string): Promise<s
 
 async function printKeyForManualSave(
   value: string,
-  title: string,
+  label: string,
   reason?: string,
 ): Promise<void> {
   p.note(
     [
       reason ? `${pc.red('✗')} ${reason}` : '',
-      `Save this value to 1Password as ${pc.cyan(title)}:`,
+      `Save this value to your secret store as ${pc.cyan(label)}:`,
       '',
       pc.yellow(value),
       '',
       pc.dim('It will not be shown again.'),
+      pc.dim('On the Studio, bootstrap will prompt you to paste it back.'),
     ]
       .filter((line) => line.length > 0)
       .join('\n'),
     'Manual save',
   );
-  // Actually wait for the operator to confirm they've stashed it — previously
-  // the doc said "Press Enter when stashed" but nothing paused. Operators
-  // following the prompt literally would have hit a paradox.
   unwrap(
     await p.confirm({
-      message: 'Value stashed in 1Password?',
+      message: 'Value stashed?',
       initialValue: true,
     }),
   );

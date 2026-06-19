@@ -6,8 +6,9 @@
  * confirmation.
  *
  * Reset does NOT touch cloud-side state (Cloudflare resources, the GitHub
- * repo, the TFC workspace, 1Password items). Those are mostly idempotent
- * on `init` re-run, and destroying them is irreversible — out of scope.
+ * repo, the TFC workspace). It also leaves the Keychain items in place —
+ * delete those manually via Keychain Access or `security delete-generic-
+ * password` if you want a truly clean slate.
  */
 
 import { access } from 'node:fs/promises';

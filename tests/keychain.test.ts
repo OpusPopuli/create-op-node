@@ -1,0 +1,164 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const execaMock = vi.hoisted(() => vi.fn());
+vi.mock('execa', () => ({
+  execa: execaMock,
+  ExecaError: class {},
+}));
+
+import {
+  _internal,
+  deleteSecret,
+  detectKeychain,
+  readSecret,
+  saveSecret,
+} from '../src/lib/keychain.js';
+
+beforeEach(() => execaMock.mockReset());
+afterEach(() => vi.restoreAllMocks());
+
+const coords = { region: 'us-ca', account: 'pgsodium-root-key' as const };
+const VALID_KEY = 'a'.repeat(64);
+
+describe('_internal naming', () => {
+  it('uses reverse-DNS service prefix scoped by region', () => {
+    expect(_internal.serviceFor('us-ca')).toBe('org.opuspopuli.us-ca');
+    expect(_internal.serviceFor('ny-nyc')).toBe('org.opuspopuli.ny-nyc');
+  });
+
+  it('produces a human-readable label per secret kind', () => {
+    expect(_internal.labelFor({ region: 'us-ca', account: 'pgsodium-root-key' })).toContain(
+      'pgsodium',
+    );
+    expect(_internal.labelFor({ region: 'us-ca', account: 'tunnel-token' })).toContain('Tunnel');
+  });
+});
+
+describe('detectKeychain', () => {
+  it('returns available=true when `security -h` runs', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    const r = await detectKeychain();
+    expect(r.available).toBe(true);
+  });
+
+  it('returns available=false with reason when `security` is missing', async () => {
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+    const r = await detectKeychain();
+    expect(r.available).toBe(false);
+    expect(r.reason).toContain('not on PATH');
+  });
+});
+
+describe('saveSecret', () => {
+  it('upserts with -U and reports written=true on success', async () => {
+    execaMock
+      // find: not found
+      .mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: '' })
+      // add: success
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    const r = await saveSecret(coords, VALID_KEY);
+    expect(r.written).toBe(true);
+    expect(r.updated).toBe(false);
+
+    const addCall = execaMock.mock.calls[1] as [string, string[]];
+    expect(addCall[0]).toBe('security');
+    const args = addCall[1];
+    expect(args).toContain('add-generic-password');
+    expect(args).toContain('-U');
+    expect(args).toContain('-s');
+    expect(args).toContain('org.opuspopuli.us-ca');
+    expect(args).toContain('-a');
+    expect(args).toContain('pgsodium-root-key');
+    expect(args).toContain('-w');
+    expect(args).toContain(VALID_KEY);
+  });
+
+  it('reports updated=true when the item already existed', async () => {
+    execaMock
+      .mockResolvedValueOnce({ exitCode: 0, stdout: 'existing', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    const r = await saveSecret(coords, VALID_KEY);
+    expect(r.written).toBe(true);
+    expect(r.updated).toBe(true);
+  });
+
+  it('reports written=false with reason on add failure', async () => {
+    execaMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: '' })
+      .mockResolvedValueOnce({ exitCode: 36, stdout: '', stderr: 'errSecAuthFailed' });
+    const r = await saveSecret(coords, VALID_KEY);
+    expect(r.written).toBe(false);
+    expect(r.reason).toContain('errSecAuthFailed');
+  });
+
+  it('reports `security` not on PATH cleanly', async () => {
+    execaMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: '' });
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+    const r = await saveSecret(coords, VALID_KEY);
+    expect(r.written).toBe(false);
+    expect(r.reason).toContain('not on PATH');
+  });
+});
+
+describe('readSecret', () => {
+  it('returns the trimmed value on success', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: `${VALID_KEY}\n`, stderr: '' });
+    const v = await readSecret(coords);
+    expect(v).toBe(VALID_KEY);
+
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toContain('find-generic-password');
+    expect(args).toContain('-s');
+    expect(args).toContain('org.opuspopuli.us-ca');
+    expect(args).toContain('-a');
+    expect(args).toContain('pgsodium-root-key');
+    expect(args[args.length - 1]).toBe('-w');
+  });
+
+  it('returns null when the item does not exist (errSecItemNotFound)', async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 44,
+      stdout: '',
+      stderr: 'The specified item could not be found in the keychain.',
+    });
+    const v = await readSecret(coords);
+    expect(v).toBeNull();
+  });
+
+  it('returns null when `security` is missing', async () => {
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+    const v = await readSecret(coords);
+    expect(v).toBeNull();
+  });
+
+  it('returns null on an empty body (treats as not present)', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '   \n', stderr: '' });
+    const v = await readSecret(coords);
+    expect(v).toBeNull();
+  });
+});
+
+describe('deleteSecret', () => {
+  it('returns ok=true on exit 0', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    const r = await deleteSecret(coords);
+    expect(r.ok).toBe(true);
+  });
+
+  it('treats errSecItemNotFound (44) as ok — idempotent', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 44, stdout: '', stderr: '' });
+    const r = await deleteSecret(coords);
+    expect(r.ok).toBe(true);
+  });
+
+  it('reports failure cleanly on other exit codes', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 36, stdout: '', stderr: 'errSecAuthFailed' });
+    const r = await deleteSecret(coords);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('errSecAuthFailed');
+  });
+});

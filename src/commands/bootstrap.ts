@@ -4,7 +4,7 @@ import { Command, Option } from 'commander';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 
-import { PGSODIUM_KEY_RE } from '../lib/constants.js';
+import { PGSODIUM_KEY_RE, TUNNEL_TOKEN_RE } from '../lib/constants.js';
 import {
   detectBrew,
   HOMEBREW_INSTALL_COMMAND,
@@ -16,7 +16,7 @@ import {
   enableAutoRestartOnPowerFailure,
   inspectSystem,
 } from '../lib/macos.js';
-import { detectOp, readSecretFromOp } from '../lib/onepassword.js';
+import { detectKeychain, readSecret, saveSecret } from '../lib/keychain.js';
 import { setupLaunchAgent } from '../lib/launchagent.js';
 import { loginToGhcr, composePull, composeUp, waitForHealthy } from '../lib/docker.js';
 import {
@@ -33,7 +33,6 @@ import { unwrap } from '../lib/prompts.js';
 interface BootstrapOptions {
   region?: string;
   owner?: string;
-  vault?: string;
   repoDir?: string;
   composeFile?: string[];
   envFile?: string;
@@ -50,7 +49,6 @@ export const bootstrapCommand = new Command('bootstrap')
   )
   .addOption(new Option('--region <slug>', 'Region label set during init (e.g. us-ca)'))
   .addOption(new Option('--owner <owner>', 'GitHub owner for the node repo').default('OpusPopuli'))
-  .addOption(new Option('--vault <vault>', '1Password vault to read secrets from').default('Private'))
   .addOption(new Option('--repo-dir <path>', 'Explicit path to a checked-out node repo (overrides cwd + clone)'))
   .addOption(
     new Option(
@@ -72,7 +70,7 @@ export const bootstrapCommand = new Command('bootstrap')
   .action(async (opts: BootstrapOptions) => {
     p.intro(pc.bgCyan(pc.black(' create-op-node bootstrap ')));
 
-    // ---- Region label (required to find 1Password items + repo name) ------
+    // ---- Region label (required to find Keychain items + repo name) ------
     const region = opts.region
       ? opts.region
       : unwrap(
@@ -216,41 +214,36 @@ export const bootstrapCommand = new Command('bootstrap')
         : pc.green(`✓ Found region repo at ${repoPath}`),
     );
 
-    // ---- Phase 5: 1Password secrets ----
-    const op = await detectOp();
-    if (!op.installed || !op.signedIn) {
+    // ---- Phase 5: secrets (Keychain → paste fallback → persist) ----
+    //
+    // The Keychain item is local to the machine that wrote it (`init` on
+    // the laptop). On a fresh Studio, both items will be missing on first
+    // run — bootstrap prompts the operator to paste, validates the format,
+    // and writes to the Studio's local Keychain for re-runs.
+    const keychain = await detectKeychain();
+    if (!keychain.available) {
       p.cancel(
-        '1Password CLI not installed or not signed in. Run `op signin` and re-run bootstrap. ' +
-          '(Or paste pgsodium key + Tunnel token by hand — manual path not in v0.1.)',
+        `${keychain.reason ?? 'Keychain unavailable'}. Bootstrap requires the macOS Keychain.`,
       );
       process.exit(1);
     }
-    const keyTitle = `opuspopuli-${region}-pgsodium-root-key`;
-    const tunnelTitle = `opuspopuli-${region}-tunnel-token`;
-    const vaultArg = opts.vault ? { vault: opts.vault } : {};
 
-    const opSpin = p.spinner();
-    opSpin.start('Reading pgsodium key + Tunnel token from 1Password…');
-    const pgsodiumKey = await readSecretFromOp({ title: keyTitle, ...vaultArg });
-    const tunnelToken = await readSecretFromOp({ title: tunnelTitle, ...vaultArg });
-    if (!pgsodiumKey || !tunnelToken) {
-      opSpin.stop(pc.red('✗ Required 1Password items missing.'));
-      const missing = [
-        pgsodiumKey ? null : keyTitle,
-        tunnelToken ? null : tunnelTitle,
-      ].filter(Boolean) as string[];
-      p.cancel(
-        `Missing in 1Password (vault: ${opts.vault ?? 'Private'}): ${missing.join(', ')}. ` +
-          `Run \`create-op-node init\` first, or pass --vault if your items live elsewhere.`,
-      );
-      process.exit(1);
-    }
-    if (!PGSODIUM_KEY_RE.test(pgsodiumKey)) {
-      opSpin.stop(pc.red('✗ pgsodium item exists but isn\'t a 64-hex key.'));
-      p.cancel('Inspect the item in 1Password; it should be 64 lowercase hex characters.');
-      process.exit(1);
-    }
-    opSpin.stop(pc.green('✓ Secrets read from 1Password.'));
+    const pgsodiumKey = await loadOrPromptSecret({
+      region,
+      account: 'pgsodium-root-key',
+      label: 'pgsodium master key',
+      placeholder: '64 lowercase hex characters',
+      validate: (v) =>
+        PGSODIUM_KEY_RE.test(v) ? undefined : 'must be exactly 64 lowercase hex characters',
+    });
+    const tunnelToken = await loadOrPromptSecret({
+      region,
+      account: 'tunnel-token',
+      label: 'Cloudflare Tunnel token',
+      placeholder: 'JWT-style base64url string from `terraform output tunnel_token`',
+      validate: (v) =>
+        TUNNEL_TOKEN_RE.test(v) ? undefined : 'tunnel token must be a base64-url JWT',
+    });
 
     // ---- Phase 6: LaunchAgent ----
     if (!opts.skipLaunchAgent) {
@@ -562,4 +555,53 @@ async function promptTailscaleSignin(): Promise<void> {
     'Manual step',
   );
   unwrap(await p.confirm({ message: 'Tailscale signed in (or skipped)?', initialValue: true }));
+}
+
+interface LoadOrPromptInput {
+  region: string;
+  account: 'pgsodium-root-key' | 'tunnel-token';
+  /** Friendly name for prompts and notes. */
+  label: string;
+  /** Placeholder hint shown in the paste prompt. */
+  placeholder: string;
+  /** Format check applied to both Keychain reads (so a stale-bad value is
+   *  treated as missing) and operator paste input. */
+  validate: (v: string) => string | undefined;
+}
+
+/**
+ * Read a secret from the local Keychain. If absent or format-invalid,
+ * prompt the operator to paste, validate, persist back to the Studio's
+ * Keychain so subsequent re-runs find it. Always returns a valid value
+ * or `process.exit(0)` (operator cancelled).
+ */
+async function loadOrPromptSecret(input: LoadOrPromptInput): Promise<string> {
+  const coords = { region: input.region, account: input.account };
+  const spin = p.spinner();
+  spin.start(`Reading ${input.label} from Keychain…`);
+  const existing = await readSecret(coords);
+  if (existing && input.validate(existing) === undefined) {
+    spin.stop(pc.green(`✓ ${input.label} read from Keychain.`));
+    return existing;
+  }
+  spin.stop(
+    existing
+      ? pc.yellow(`⚠ ${input.label} in Keychain failed validation — will re-prompt.`)
+      : pc.dim(`· ${input.label} not in Keychain — will prompt.`),
+  );
+
+  const pasted = unwrap(
+    await p.password({
+      message: `Paste the ${input.label} for region ${input.region}:`,
+      validate: (v) => input.validate(v ?? ''),
+    }),
+  );
+
+  const save = await saveSecret(coords, pasted);
+  if (!save.written) {
+    p.note(`${pc.yellow('⚠')} Couldn't persist to Keychain: ${save.reason ?? 'unknown'}. Continuing anyway.`, 'Keychain');
+  } else {
+    p.note(`${pc.green('✓')} Stored ${input.label} in Keychain for re-runs.`, 'Keychain');
+  }
+  return pasted;
 }

@@ -13,8 +13,8 @@ That's it. The wizard walks you through:
 2. **GitHub** — creates your region's node repo from the [`OpusPopuli/opuspopuli-node`](https://github.com/OpusPopuli/opuspopuli-node) template via the GitHub API. Seeds the 5 required GitHub Secrets (Cloudflare token, account ID, zone ID, Terraform Cloud token, TFC org) for you.
 3. **Terraform Cloud** — verifies your TFC token, prepares the workspace.
 4. **First PR** — writes `environments/prod.tfvars` from your answers, commits, opens the first PR. The node repo's `cloudflare-infra.yml` workflow runs `terraform plan` against the PR; on merge to `main` it applies — Tunnel, DNS, R2 buckets, and Pages project come up automatically.
-5. **pgsodium master key** — generates a fresh 64-hex root key, stores it in 1Password (via the `op` CLI if available, otherwise prompts you to paste it once).
-6. **Tunnel token retrieval** — after `terraform apply` lands, fetches the Tunnel token from Terraform Cloud outputs and stores it in 1Password alongside the pgsodium key.
+5. **pgsodium master key** — generates a fresh 64-hex root key, stores it in your **macOS login Keychain** as `org.opuspopuli.<region>/pgsodium-root-key`. No third-party password manager required.
+6. **Tunnel token retrieval** — after `terraform apply` lands, fetches the Tunnel token from Terraform Cloud outputs and stores it alongside the pgsodium key in your Keychain.
 
 Then on the Mac Studio itself:
 
@@ -22,7 +22,17 @@ Then on the Mac Studio itself:
 npx create-op-node bootstrap
 ```
 
-Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, materializes the pgsodium key from 1Password, writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, and finally `docker compose pull && up -d` brings the whole stack online. Health-check loop waits until all 10 containers are `(healthy)`.
+Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, reads the pgsodium key + Tunnel token from the Studio's Keychain (or prompts you to paste them once, then persists for re-runs), writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, and finally `docker compose pull && up -d` brings the whole stack online. Health-check loop waits until all 10 containers are `(healthy)`.
+
+> **Secret transport between laptop and Studio**
+>
+> The macOS `security` CLI writes to the local login keychain — items
+> don't sync to iCloud Keychain automatically. On the Studio's first
+> bootstrap, the operator pastes the pgsodium key + Tunnel token once
+> (from the laptop's Keychain Access, or wherever you copied them); the
+> Studio bootstrap validates the format and persists locally so re-runs
+> read straight through. Use AirDrop / `security find-generic-password`
+> output / Tailscale `scp` to ferry the values.
 
 ## Resetting the Studio
 
@@ -52,7 +62,10 @@ with `bootstrap` without losing data.
    those need separate cleanup.
 
 Reset does **not** touch cloud-side state: the Cloudflare resources,
-the GitHub repo, the TFC workspace, and the 1Password items remain.
+the GitHub repo, and the TFC workspace remain. Keychain items on the
+Studio are also left in place — `security delete-generic-password -s
+org.opuspopuli.<region> -a pgsodium-root-key` etc. if you want them
+gone.
 `init` is idempotent against existing cloud setup, so re-running it
 won't duplicate anything.
 
@@ -280,13 +293,63 @@ rather than in the regions repo itself:
   green run here, as the real signal. If the two ever disagree, the schema
   wins and this command needs updating.
 
+## What lands where
+
+`create-op-node` touches several secret stores. Here's the full map of
+what we own (the two macOS Keychain items) vs. what we just route to its
+destination.
+
+### Stored by `create-op-node` in macOS Keychain
+
+Two items per region, both generic-password class
+(`kSecClassGenericPassword`). Visible in **Keychain Access.app**
+(`/System/Applications/Utilities/Keychain Access.app`) — **not** in the
+new Passwords.app, which is filtered to website-login items only.
+
+| # | Service | Account | Label (GUI display)                                              | Value format               | Written by                       | Read by                  |
+|---|---|---|---|---|---|---|
+| 1 | `org.opuspopuli.<region>` | `pgsodium-root-key` | `Opus Populi (<region>) — pgsodium root key`             | 64 lowercase hex chars     | `init` on laptop                 | `bootstrap` on Studio    |
+| 2 | `org.opuspopuli.<region>` | `tunnel-token`      | `Opus Populi (<region>) — Cloudflare Tunnel token`       | JWT-style base64url string | `init` on laptop (after TFC apply) | `bootstrap` on Studio    |
+
+Both items also carry `-D 'Opus Populi secret'` (the "Kind" column in
+Keychain Access) so you can filter for them at a glance.
+
+Inspect from a shell:
+
+```bash
+# Metadata only (safe to share output):
+security find-generic-password -s org.opuspopuli.us-ca -a pgsodium-root-key
+
+# Reveal the value (you'll be prompted to allow access on first call):
+security find-generic-password -s org.opuspopuli.us-ca -a pgsodium-root-key -w
+```
+
+### Stored elsewhere (we don't put these in Keychain)
+
+Everything else flows through transiently or lives in its destination
+system's own credential store.
+
+| Secret                              | Where it lives                                                                          | Why not in Keychain                                                                                                              |
+|---|---|---|
+| Cloudflare API token                | Pasted into `init` prompt → forwarded to **GitHub Secrets** + **Terraform Cloud** vars  | One-shot during init. Re-runs prompt again. We could store it; adds risk vs benefit.                                             |
+| Cloudflare account ID, zone ID      | Same as above                                                                            | Not really a "secret" but flow alongside the token                                                                              |
+| Terraform Cloud token               | Pasted, used to verify + poll runs                                                       | Same one-shot pattern                                                                                                            |
+| GitHub PAT                          | Read from `gh auth token` if available, else pasted                                      | `gh` already manages it                                                                                                          |
+| pgsodium key (Studio runtime form)  | `~/.config/opuspopuli/pgsodium_root_key` (mode `0400`)                                  | LaunchAgent reads it at every login → interpolates into the `PGSODIUM_ROOT_KEY` env var. Same value as in Keychain; file is runtime form. |
+| Cloudflare Tunnel token (Studio runtime form) | Baked into `~/Library/LaunchAgents/org.opuspopuli.envloader.plist` (mode `0600`) | launchd's `launchctl setenv TUNNEL_TOKEN` injects it into the session at every boot. Same value as in Keychain; plist is runtime form. |
+| ghcr.io credentials                 | `~/.docker/config.json` or `docker-credential-osxkeychain`                              | Docker manages its own credential store — it actually saves the ghcr token to a separate Keychain item under service `ghcr.io`. We just call `docker login`. |
+
+Per region, the **only** persistent secrets `create-op-node` owns are
+the two Keychain items above. Everything else is either transient
+(prompted, used, forgotten) or lives in its destination system.
+
 ## Why this exists
 
 Each Opus Populi region is operated independently by a local maintainer — its own Cloudflare account, its own Mac Studio, its own domain. The full bootstrap is a few hours of manual steps across Cloudflare, GitHub, Terraform Cloud, macOS Setup Assistant, Docker Desktop, Tailscale, Ollama, and the node's own Docker Compose stack. Doable from the runbook, but error-prone.
 
 This CLI exists to make that bootstrap **foolproof** — every prompt validates immediately, every secret is retrieved from a secure source (never echoed, never written to disk in plaintext), and every step has an explicit "what happens next" message. The goal is zero documentation reading required to get a node running.
 
-The CLI itself never holds any credentials beyond the scope of a single command — secrets flow from your 1Password vault → through the CLI → directly into the destination (GitHub Secrets, Terraform Cloud workspace variables, Mac Studio LaunchAgent). Nothing persists in this process.
+The CLI itself never holds any credentials beyond the scope of a single command — secrets flow from your macOS Keychain → through the CLI → directly into the destination (GitHub Secrets, Terraform Cloud workspace variables, Mac Studio LaunchAgent). Nothing persists in this process.
 
 ## Architecture
 
@@ -322,9 +385,9 @@ The CLI itself never holds any credentials beyond the scope of a single command 
 
 ## Status
 
-**`init` — fully wired.** Full Phase 1 of the runbook: prompts → Cloudflare 5-scope probe → Terraform Cloud verify → GitHub template clone → 5 repo secrets seeded → branch + prod.tfvars committed → PR opened → pgsodium key generated → (after operator merges PR) Terraform apply polled → Tunnel token retrieved + saved to 1Password.
+**`init` — fully wired.** Full Phase 1 of the runbook: prompts → Cloudflare 5-scope probe → Terraform Cloud verify → GitHub template clone → 5 repo secrets seeded → branch + prod.tfvars committed → PR opened → pgsodium key generated → (after operator merges PR) Terraform apply polled → Tunnel token retrieved + saved to the macOS Keychain.
 
-**`bootstrap` — fully wired.** Phase 2 on the Mac Studio: macOS sanity (auto-restart, disk sleep), Homebrew + tool installs (gh, pnpm, jq, cloudflared, rclone, ollama, docker, tailscale), GitHub + Tailscale signin prompts, pgsodium key + Tunnel token read from 1Password, LaunchAgent written + loaded, ghcr.io login, Ollama models pulled + warmed, region repo located or cloned, `docker compose pull && up -d`, health-check loop until everything reports `(healthy)`.
+**`bootstrap` — fully wired.** Phase 2 on the Mac Studio: macOS sanity (auto-restart, disk sleep), Homebrew + tool installs (gh, pnpm, jq, cloudflared, rclone, ollama, docker, tailscale), GitHub + Tailscale signin prompts, pgsodium key + Tunnel token read from the Studio's Keychain (or pasted in once if first run on that machine, then persisted), LaunchAgent written + loaded, ghcr.io login, Ollama models pulled + warmed, region repo located or cloned, `docker compose pull && up -d`, health-check loop until everything reports `(healthy)`.
 
 **`verify` — scaffold stub.** Type-safe argument parsing only; prints a roadmap-style message and exits.
 
