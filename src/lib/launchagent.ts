@@ -1,0 +1,219 @@
+/**
+ * macOS LaunchAgent for the env-loader that the bootstrap puts in place.
+ *
+ * The plist's whole job is to inject two env vars into the launchd session at
+ * login so Docker Desktop + the container stack see them:
+ *
+ *   PGSODIUM_ROOT_KEY  — 64-hex pgsodium master key, read from a `0400` file
+ *                        outside the container so a `docker compose --build`
+ *                        can never wipe it (runbook gate / #791).
+ *   TUNNEL_TOKEN       — Cloudflare Tunnel token, baked into the plist literal.
+ *
+ * The pgsodium key is materialized as a separate `0400` file (not embedded in
+ * the plist) so it can be backed up out-of-band + rotated independently. The
+ * Tunnel token gets baked into the plist directly — it's a different rotation
+ * cadence (rotates with the Tunnel resource, not on pgsodium key churn).
+ *
+ * File modes match the runbook:
+ *   - pgsodium key file: 0400 (owner-read-only)
+ *   - plist file:        0600 (owner read+write; contains TUNNEL_TOKEN)
+ */
+
+import { mkdir, writeFile, chmod, rm } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import { homedir } from 'node:os';
+
+import { safeExeca } from './exec.js';
+
+export const LAUNCH_AGENT_LABEL = 'org.opuspopuli.envloader';
+
+export interface LaunchAgentPaths {
+  /** Absolute path to the 64-hex pgsodium master key file (mode 0400). */
+  keyFile: string;
+  /** Absolute path to the LaunchAgent plist (mode 0600). */
+  plistFile: string;
+}
+
+/** Default on-disk locations the runbook documents. Operators can override. */
+export function defaultPaths(home: string = homedir()): LaunchAgentPaths {
+  return {
+    keyFile: `${home}/.config/opuspopuli/pgsodium_root_key`,
+    plistFile: `${home}/Library/LaunchAgents/${LAUNCH_AGENT_LABEL}.plist`,
+  };
+}
+
+export interface WriteResult {
+  ok: boolean;
+  /** Set when ok=false. */
+  reason?: string;
+}
+
+/**
+ * Write the 64-hex pgsodium master key to `keyFile` with mode 0400. Creates
+ * the parent directory tree (mode 0700 on the immediate parent) and refuses
+ * non-64-hex input.
+ */
+export async function writePgsodiumKeyFile(
+  key: string,
+  keyFile: string,
+): Promise<WriteResult> {
+  if (!/^[a-f0-9]{64}$/.test(key)) {
+    return {
+      ok: false,
+      reason: `pgsodium key must be 64 lowercase hex characters (got ${key.length} chars)`,
+    };
+  }
+  try {
+    const dir = dirname(keyFile);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFile(keyFile, key, { mode: 0o400 });
+    // mkdir's mode option respects umask; chmod is the belt to the suspenders.
+    await chmod(dir, 0o700);
+    await chmod(keyFile, 0o400);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: `writing ${keyFile} failed: ${(err as Error).message}` };
+  }
+}
+
+export interface PlistInput {
+  /** Path the plist will exec — sourced from defaultPaths() unless an operator
+   *  overrides on the command line. */
+  keyFilePath: string;
+  /** Literal Cloudflare Tunnel token; embedded in the plist. */
+  tunnelToken: string;
+}
+
+/**
+ * Render the LaunchAgent plist XML. Pure function — caller writes it.
+ *
+ * The plist runs a `/bin/sh -c` at load that calls `launchctl setenv` for
+ * each var. `launchctl setenv` exports into the running launchd session,
+ * not just the agent's own env, so anything Docker Desktop launches
+ * downstream sees the same values.
+ */
+export function renderLaunchAgentPlist(input: PlistInput): string {
+  if (!/^[a-f0-9-/\w+.=:]+$/i.test(input.tunnelToken)) {
+    // Plist string content rejects unescaped XML special chars (`<`, `>`,
+    // `&`). Cloudflare Tunnel tokens are base64ish — no special chars —
+    // but we reject anything outside that alphabet so a future caller
+    // can't inject an attribute via a crafted token. Throw rather than
+    // silently emit broken XML.
+    throw new Error('Tunnel token contains characters outside the expected base64-url set');
+  }
+  const command =
+    `launchctl setenv PGSODIUM_ROOT_KEY "$(cat ${input.keyFilePath})"; ` +
+    `launchctl setenv TUNNEL_TOKEN "${input.tunnelToken}"`;
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    `  <key>Label</key><string>${LAUNCH_AGENT_LABEL}</string>`,
+    '  <key>ProgramArguments</key>',
+    '  <array>',
+    '    <string>/bin/sh</string>',
+    '    <string>-c</string>',
+    `    <string>${command}</string>`,
+    '  </array>',
+    '  <key>RunAtLoad</key><true/>',
+    '</dict>',
+    '</plist>',
+    '',
+  ].join('\n');
+}
+
+/** Write the plist file to disk at mode 0600. */
+export async function writeLaunchAgentPlist(
+  plistFile: string,
+  content: string,
+): Promise<WriteResult> {
+  try {
+    await mkdir(dirname(plistFile), { recursive: true });
+    await writeFile(plistFile, content, { mode: 0o600 });
+    await chmod(plistFile, 0o600);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: `writing ${plistFile} failed: ${(err as Error).message}` };
+  }
+}
+
+/**
+ * Load (or reload) the agent via `launchctl load`. Unload first to handle
+ * re-runs; ignore errors on unload since it could just not be loaded yet.
+ */
+export async function loadLaunchAgent(plistFile: string): Promise<WriteResult> {
+  await safeExeca('launchctl', ['unload', plistFile]); // ignore errors
+  const load = await safeExeca('launchctl', ['load', plistFile]);
+  if (load === null) {
+    return { ok: false, reason: '`launchctl` not on PATH' };
+  }
+  if (load.exitCode !== 0) {
+    return {
+      ok: false,
+      reason: `launchctl load failed (${load.exitCode ?? 'signal'}): ${load.stderr || load.stdout}`,
+    };
+  }
+  return { ok: true };
+}
+
+export interface SetupInput {
+  pgsodiumKey: string;
+  tunnelToken: string;
+  paths?: LaunchAgentPaths;
+}
+
+export interface SetupReport {
+  ok: boolean;
+  paths: LaunchAgentPaths;
+  step?: 'key-file' | 'plist' | 'load';
+  reason?: string;
+}
+
+/**
+ * One-shot: write the key file, render + write the plist, load the agent.
+ * Returns a report that names which step failed (if any) for clean operator
+ * messaging.
+ */
+export async function setupLaunchAgent(input: SetupInput): Promise<SetupReport> {
+  const paths = input.paths ?? defaultPaths();
+
+  const keyResult = await writePgsodiumKeyFile(input.pgsodiumKey, paths.keyFile);
+  if (!keyResult.ok) {
+    return { ok: false, paths, step: 'key-file', ...(keyResult.reason ? { reason: keyResult.reason } : {}) };
+  }
+
+  let plistContent: string;
+  try {
+    plistContent = renderLaunchAgentPlist({
+      keyFilePath: paths.keyFile,
+      tunnelToken: input.tunnelToken,
+    });
+  } catch (err) {
+    return { ok: false, paths, step: 'plist', reason: (err as Error).message };
+  }
+
+  const plistResult = await writeLaunchAgentPlist(paths.plistFile, plistContent);
+  if (!plistResult.ok) {
+    return { ok: false, paths, step: 'plist', ...(plistResult.reason ? { reason: plistResult.reason } : {}) };
+  }
+
+  const loadResult = await loadLaunchAgent(paths.plistFile);
+  if (!loadResult.ok) {
+    return { ok: false, paths, step: 'load', ...(loadResult.reason ? { reason: loadResult.reason } : {}) };
+  }
+
+  return { ok: true, paths };
+}
+
+/**
+ * Test seam: tear down a LaunchAgent + key file the wizard previously wrote.
+ * Used by integration tests; the bootstrap command doesn't expose it as a
+ * subcommand (operators clean up by hand).
+ */
+export async function teardownLaunchAgent(paths: LaunchAgentPaths): Promise<void> {
+  await safeExeca('launchctl', ['unload', paths.plistFile]);
+  await rm(paths.plistFile, { force: true });
+  await rm(paths.keyFile, { force: true });
+}
