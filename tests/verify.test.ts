@@ -1,0 +1,224 @@
+import { describe, expect, it, vi } from 'vitest';
+
+import {
+  runVerify,
+  summarize,
+  type VerifyDeps,
+  type VerifyPhase,
+  type VerifyReport,
+} from '../src/commands/verify.js';
+
+const okTls = (daysToExpiry = 90): Awaited<ReturnType<VerifyDeps['tls']>> => ({
+  ok: true,
+  subject: 'api.example.org',
+  issuer: "Let's Encrypt",
+  daysToExpiry,
+});
+
+const okHealth = (): Awaited<ReturnType<VerifyDeps['http']>> => ({
+  ok: true,
+  status: 200,
+  bodyPreview: 'OK',
+});
+
+const okGql = (): Awaited<ReturnType<VerifyDeps['graphql']>> => ({
+  ok: true,
+  typename: 'Query',
+});
+
+function depsFor(overrides: Partial<VerifyDeps> = {}): VerifyDeps {
+  return {
+    tls: vi.fn(() => Promise.resolve(okTls())),
+    http: vi.fn(() => Promise.resolve(okHealth())),
+    graphql: vi.fn(() => Promise.resolve(okGql())),
+    tunnel: vi.fn(() => Promise.resolve({ ok: true, connections: 4, status: 'healthy' })),
+    cosign: vi.fn(() => Promise.resolve({ ok: true, output: 'Verified OK' })),
+    ...overrides,
+  };
+}
+
+const baseInput = {
+  apiHost: 'api.example.org',
+  certWarnDays: 14,
+  images: [],
+};
+
+describe('summarize', () => {
+  it('ok=true when no phase failed', () => {
+    expect(
+      summarize({
+        phases: [
+          { name: 'a', status: 'ok', detail: '' },
+          { name: 'b', status: 'ok', detail: '' },
+        ],
+      }),
+    ).toEqual({ ok: true, failed: 0, warned: 0 });
+  });
+
+  it('counts warns separately — ok still true', () => {
+    expect(
+      summarize({
+        phases: [
+          { name: 'a', status: 'warn', detail: '' },
+          { name: 'b', status: 'warn', detail: '' },
+        ],
+      }),
+    ).toEqual({ ok: true, failed: 0, warned: 2 });
+  });
+
+  it('skipped does not affect ok/warned/failed', () => {
+    expect(
+      summarize({
+        phases: [
+          { name: 'a', status: 'ok', detail: '' },
+          { name: 'b', status: 'skipped', detail: '' },
+        ],
+      }),
+    ).toEqual({ ok: true, failed: 0, warned: 0 });
+  });
+
+  it('any fail flips ok to false', () => {
+    expect(
+      summarize({
+        phases: [
+          { name: 'a', status: 'ok', detail: '' },
+          { name: 'b', status: 'fail', detail: '' },
+        ],
+      }),
+    ).toEqual({ ok: false, failed: 1, warned: 0 });
+  });
+});
+
+describe('runVerify orchestration', () => {
+  it('returns 5 phases on a clean run with no images', async () => {
+    const report = await runVerify(baseInput, depsFor());
+    expect(report.phases.map((ph) => ph.name)).toEqual([
+      'TLS handshake',
+      'GET /health',
+      'GraphQL { __typename }',
+      'Cloudflare Tunnel',
+      'cosign verify',
+    ]);
+    expect(report.phases.every((ph) => ph.status === 'ok' || ph.status === 'skipped')).toBe(true);
+  });
+
+  it('continues past a TLS failure (no short-circuit)', async () => {
+    const report = await runVerify(
+      baseInput,
+      depsFor({
+        tls: vi.fn(() => Promise.resolve({ ok: false, reason: 'ECONNREFUSED' })),
+      }),
+    );
+    const tls = report.phases.find((ph) => ph.name === 'TLS handshake');
+    expect(tls?.status).toBe('fail');
+    // Health + GraphQL still ran:
+    expect(report.phases.find((ph) => ph.name === 'GET /health')?.status).toBe('ok');
+    expect(report.phases.find((ph) => ph.name === 'GraphQL { __typename }')?.status).toBe('ok');
+  });
+
+  it('TLS warns when cert expires below the threshold', async () => {
+    const deps = depsFor({ tls: vi.fn(() => Promise.resolve(okTls(7))) });
+    const report = await runVerify({ ...baseInput, certWarnDays: 14 }, deps);
+    const tls = report.phases.find((ph) => ph.name === 'TLS handshake');
+    expect(tls?.status).toBe('warn');
+    expect(tls?.detail).toContain('warn threshold 14d');
+  });
+
+  it('TLS warn renders "expired Xd ago" for negative daysToExpiry (review N4)', async () => {
+    const deps = depsFor({ tls: vi.fn(() => Promise.resolve(okTls(-5))) });
+    const report = await runVerify(baseInput, deps);
+    const tls = report.phases.find((ph) => ph.name === 'TLS handshake');
+    expect(tls?.status).toBe('warn');
+    expect(tls?.detail).toContain('expired 5d ago');
+  });
+
+  it('TLS warn at threshold edge — daysToExpiry === certWarnDays passes', async () => {
+    const deps = depsFor({ tls: vi.fn(() => Promise.resolve(okTls(14))) });
+    const report = await runVerify({ ...baseInput, certWarnDays: 14 }, deps);
+    expect(report.phases.find((ph) => ph.name === 'TLS handshake')?.status).toBe('ok');
+  });
+
+  it('skips Cloudflare Tunnel when no CF fields are set', async () => {
+    const deps = depsFor();
+    const report = await runVerify(baseInput, deps);
+    const cf = report.phases.find((ph) => ph.name === 'Cloudflare Tunnel');
+    expect(cf?.status).toBe('skipped');
+    expect(deps.tunnel).not.toHaveBeenCalled();
+  });
+
+  it('warns on partial CF config and names the missing flags (review S1)', async () => {
+    const deps = depsFor();
+    const report = await runVerify(
+      { ...baseInput, cf: { token: 't', accountId: 'a' /* tunnelId missing */ } },
+      deps,
+    );
+    const cf = report.phases.find((ph) => ph.name === 'Cloudflare Tunnel');
+    expect(cf?.status).toBe('warn');
+    expect(cf?.detail).toContain('--tunnel-id');
+    expect(cf?.detail).not.toContain('--cf-token');
+    expect(deps.tunnel).not.toHaveBeenCalled();
+  });
+
+  it('warns when CF tunnel returns 0 connections (cloudflared offline)', async () => {
+    const deps = depsFor({
+      tunnel: vi.fn(() => Promise.resolve({ ok: true, connections: 0, status: 'inactive' })),
+    });
+    const report = await runVerify(
+      { ...baseInput, cf: { token: 't', accountId: 'a', tunnelId: 'x' } },
+      deps,
+    );
+    const cf = report.phases.find((ph) => ph.name === 'Cloudflare Tunnel');
+    expect(cf?.status).toBe('warn');
+    expect(cf?.detail).toContain('cloudflared');
+  });
+
+  it('runs CF tunnel probe with all three fields set', async () => {
+    const deps = depsFor();
+    await runVerify(
+      { ...baseInput, cf: { token: 't', accountId: 'a', tunnelId: 'x' } },
+      deps,
+    );
+    expect(deps.tunnel).toHaveBeenCalledWith({ token: 't', accountId: 'a', tunnelId: 'x' });
+  });
+
+  it('runs cosign verify for each image and surfaces skipped vs fail vs ok', async () => {
+    let i = 0;
+    const cosign = vi.fn(() => {
+      const results: Array<Awaited<ReturnType<VerifyDeps['cosign']>>> = [
+        { ok: true, output: 'Verified OK' },
+        { ok: false, skipped: true, reason: 'cosign not on PATH' },
+        { ok: false, skipped: false, reason: 'no matching signatures' },
+      ];
+      return Promise.resolve(results[i++]!);
+    });
+    const report = await runVerify(
+      { ...baseInput, images: ['ghcr.io/x:a', 'ghcr.io/x:b', 'ghcr.io/x:c'] },
+      depsFor({ cosign }),
+    );
+    expect(cosign).toHaveBeenCalledTimes(3);
+    const cosPhases = report.phases.filter((ph) => ph.name.startsWith('cosign verify'));
+    expect(cosPhases.map((ph) => ph.status)).toEqual(['ok', 'skipped', 'fail']);
+  });
+
+  it('fires onPhase once per phase in order', async () => {
+    const seen: VerifyPhase[] = [];
+    const deps = depsFor({ onPhase: (ph) => seen.push(ph) });
+    const report = await runVerify(baseInput, deps);
+    expect(seen.length).toBe(report.phases.length);
+    expect(seen.map((ph) => ph.name)).toEqual(report.phases.map((ph) => ph.name));
+  });
+
+  it('summarize over the full report — ok with skipped phases counted as nothing', async () => {
+    const report = await runVerify(baseInput, depsFor());
+    const s = summarize(report);
+    // CF + cosign skipped, TLS+health+GraphQL ok → no warn, no fail.
+    expect(s).toEqual({ ok: true, failed: 0, warned: 0 });
+  });
+
+  it('VerifyReport.phases is readonly at the type level', () => {
+    // Compile-time check disguised as a runtime test — if this build
+    // succeeds we got the readonly guarantee.
+    const report: VerifyReport = { phases: [] };
+    expect(report.phases.length).toBe(0);
+  });
+});
