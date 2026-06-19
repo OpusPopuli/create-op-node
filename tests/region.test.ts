@@ -38,6 +38,7 @@ function countyInput(overrides: Partial<RegionInput> = {}): RegionInput {
   return {
     level: 'county',
     regionId: 'california-alameda',
+    countySlug: 'alameda',
     parentRegionId: 'california',
     displayName: 'Alameda County',
     regionName: 'Alameda County',
@@ -108,7 +109,6 @@ describe('buildRegionConfig', () => {
     const file = buildRegionConfig(stateInput());
     const src = file.config.dataSources[0]!;
     expect('category' in src).toBe(false);
-    expect('hints' in src).toBe(false);
   });
 });
 
@@ -119,14 +119,34 @@ describe('regionFilePath', () => {
     );
   });
 
-  it('computes the county path from the combined id', () => {
+  it('computes the county path from explicit countySlug', () => {
     expect(
       regionFilePath({
         level: 'county',
         regionId: 'california-alameda',
         parentRegionId: 'california',
+        countySlug: 'alameda',
       }),
     ).toBe('regions/california/counties/alameda/alameda.json');
+  });
+
+  it('handles hyphenated parent slugs without string-slicing ambiguity', () => {
+    // "new-jersey-cumberland" prefix-matches both "new" and "new-jersey";
+    // passing the explicit countySlug avoids guessing.
+    expect(
+      regionFilePath({
+        level: 'county',
+        regionId: 'new-jersey-cumberland',
+        parentRegionId: 'new-jersey',
+        countySlug: 'cumberland',
+      }),
+    ).toBe('regions/new-jersey/counties/cumberland/cumberland.json');
+  });
+
+  it('throws if a county is missing parentRegionId or countySlug', () => {
+    expect(() =>
+      regionFilePath({ level: 'county', regionId: 'california-alameda' }),
+    ).toThrow(/parentRegionId and countySlug/);
   });
 });
 
@@ -168,5 +188,15 @@ describe('validateRegionConfig', () => {
       buildRegionConfig(countyInput({ regionId: 'alameda' })),
     );
     expect(issues.some((i) => i.includes('prefixed with its parent'))).toBe(true);
+  });
+
+  it('catches schema-only violations the friendly checks would miss', () => {
+    // Add an unknown top-level field. The schema has `additionalProperties:
+    // false`, so this should be rejected by the JSON Schema layer — none of
+    // the cross-field rules cover unknown extras.
+    const file = buildRegionConfig(stateInput());
+    (file as Record<string, unknown>).someExtraField = 'not in the schema';
+    const issues = validateRegionConfig(file);
+    expect(issues.some((i) => i.startsWith('schema:'))).toBe(true);
   });
 });

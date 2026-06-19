@@ -4,17 +4,29 @@
  * repo.
  *
  * Region configs are declarative JSON files validated against
- * `schema/region-plugin.schema.json` in that repo. This module mirrors the
- * subset of that schema we generate, builds a `RegionPluginFile` object from
- * wizard answers, computes the canonical on-disk path, and re-checks the same
- * invariants the regions repo's `pnpm test` enforces — so a freshly scaffolded
- * file lands green rather than bouncing off CI.
+ * `schema/region-plugin.schema.json` in that repo. We vendor a copy of that
+ * schema at `./region-schema.json` so the wizard is self-contained and
+ * validates against the **canonical contract** rather than a hand-rolled
+ * approximation. Anything the schema enforces is enforced here; we layer a
+ * small set of cross-field invariants on top that the regions repo's
+ * `pnpm test` also checks (e.g. `name === config.regionId`).
  *
  * Everything here is side-effect free and unit tested. The interactive shell
  * and filesystem writes live in `src/commands/region.ts`.
  */
 
-/** `dataType` values the regions schema accepts on a data source. */
+// ESM-native JSON Schema validator. Picked over Ajv 8 because Ajv ships only
+// CJS, which forces a `.default` interop dance under `verbatimModuleSyntax`.
+// `@cfworker/json-schema` is a clean ESM module with no peer dep and supports
+// the Draft 7 / 2019-09 / 2020-12 schemas the regions repo uses.
+import { Validator, type Schema } from '@cfworker/json-schema';
+
+// Schema imported as JSON so tsup inlines it into the bundle — no need to
+// ship a separate file in dist/.
+import REGION_SCHEMA from './region-schema.json' with { type: 'json' };
+
+/** `dataType` values the regions schema accepts on a data source. Mirrors the
+ *  enum block in `region-plugin.schema.json` so the CLI prompt matches. */
 export const DATA_TYPES = [
   'propositions',
   'meetings',
@@ -46,13 +58,16 @@ export interface DataSourceInput {
   sourceType: SourceType;
   contentGoal: string;
   category?: string;
-  hints?: string[];
 }
 
 export interface RegionInput {
   level: RegionLevel;
   /** kebab-case; for a county this is the combined `state-county` id. */
   regionId: string;
+  /** kebab-case county slug only — the trailing segment of a county regionId.
+   *  Required for counties so we never have to re-derive it from string
+   *  prefixes; ignored for states. */
+  countySlug?: string;
   displayName: string;
   regionName: string;
   description: string;
@@ -89,7 +104,6 @@ export interface RegionPluginFile {
 }
 
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-export const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 const STATE_CODE_RE = /^[A-Z]{2}$/;
 
 /** Lower-cases, strips accents, and collapses anything non-alphanumeric into
@@ -97,7 +111,7 @@ const STATE_CODE_RE = /^[A-Z]{2}$/;
 export function slugify(input: string): string {
   return input
     .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
@@ -178,7 +192,6 @@ function normalizeDataSource(src: DataSourceInput): DataSourceInput {
     contentGoal: src.contentGoal,
   };
   if (src.category) out.category = src.category;
-  if (src.hints && src.hints.length > 0) out.hints = src.hints;
   return out;
 }
 
@@ -188,46 +201,77 @@ function normalizeDataSource(src: DataSourceInput): DataSourceInput {
  *   state  → `regions/<state>/<state>.json`
  *   county → `regions/<state>/counties/<county>/<county>.json`
  *
- * The county slug is the trailing segment of the combined `state-county` id.
+ * Counties pass `countySlug` explicitly so we never have to back out a slug
+ * from a string prefix — important when a parent state slug contains a hyphen
+ * (`new-jersey-cumberland` shouldn't be sliced on the first `-`).
  */
 export function regionFilePath(input: {
   level: RegionLevel;
   regionId: string;
   parentRegionId?: string;
+  countySlug?: string;
 }): string {
   if (input.level === 'state') {
     return `regions/${input.regionId}/${input.regionId}.json`;
   }
-  const parent = input.parentRegionId ?? '';
-  // "california-alameda" with parent "california" → county slug "alameda".
-  const countySlug = input.regionId.startsWith(`${parent}-`)
-    ? input.regionId.slice(parent.length + 1)
-    : input.regionId;
+  const parent = input.parentRegionId;
+  const countySlug = input.countySlug;
+  if (!parent || !countySlug) {
+    throw new Error(
+      'regionFilePath: county requires both parentRegionId and countySlug',
+    );
+  }
   return `regions/${parent}/counties/${countySlug}/${countySlug}.json`;
 }
 
+// ---------------------------------------------------------------------------
+// Schema-based validation (single source of truth)
+// ---------------------------------------------------------------------------
+
+// The JSON import resolves to a narrower literal type than `Schema` accepts
+// (e.g. `type: "object"` as a string literal vs the union enum). The cast is
+// a TS-only widening — runtime data is unchanged.
+const schemaValidator = new Validator(REGION_SCHEMA as unknown as Schema, '7');
+
 /**
  * Re-check the invariants the regions repo enforces in CI, returning a list of
- * human-readable problems (empty means valid). This is a guard against
- * generating a file that would fail `pnpm test` once dropped into the repo.
+ * human-readable problems (empty means valid). Two layers:
+ *
+ * 1. **JSON Schema** — run the vendored `region-plugin.schema.json` (the same
+ *    file `pnpm test` validates against). Catches every structural rule the
+ *    schema declares.
+ * 2. **Cross-field invariants** — checks the regions repo enforces in custom
+ *    test code that don't live in the schema: `name === config.regionId`,
+ *    county regionId prefixed by its parent, no duplicate data sources keyed by
+ *    `(dataType, url)`.
  */
 export function validateRegionConfig(file: RegionPluginFile): string[] {
   const issues: string[] = [];
   const { config } = file;
 
+  // Cross-field invariants run first so their human-friendlier messages
+  // ("not a valid semver", "must be 5 digits for a county", "name mismatch")
+  // surface ahead of the corresponding raw Ajv pattern errors.
+  if (!/^\d+\.\d+\.\d+$/.test(file.version)) {
+    issues.push(`version "${file.version}" is not a valid semver (expected MAJOR.MINOR.PATCH)`);
+  }
   if (file.name !== config.regionId) {
     issues.push(`name "${file.name}" must equal config.regionId "${config.regionId}"`);
-  }
-  if (!SEMVER_RE.test(file.version)) {
-    issues.push(`version "${file.version}" is not a valid semver (expected MAJOR.MINOR.PATCH)`);
   }
   if (!isValidSlug(config.regionId)) {
     issues.push(`regionId "${config.regionId}" must be kebab-case`);
   }
-  if (config.stateCode !== undefined && !isValidStateCode(config.stateCode)) {
-    issues.push(`stateCode "${config.stateCode}" must be two uppercase letters`);
+  if (
+    config.parentRegionId !== undefined &&
+    !config.regionId.startsWith(`${config.parentRegionId}-`)
+  ) {
+    issues.push(
+      `county regionId "${config.regionId}" should be prefixed with its parent "${config.parentRegionId}-"`,
+    );
   }
-
+  // The JSON schema only checks the FIPS shape (2–7 digits). Per-level lengths
+  // ("2 for state, 5 for county") are a cross-field rule the regions repo
+  // enforces in custom test code — re-checked here.
   const isCounty = config.parentRegionId !== undefined;
   if (config.fipsCode !== undefined) {
     const expected = isCounty ? 5 : 2;
@@ -235,29 +279,30 @@ export function validateRegionConfig(file: RegionPluginFile): string[] {
       issues.push(
         `fipsCode "${config.fipsCode}" must be ${expected} digits for a ${isCounty ? 'county' : 'state'}`,
       );
-    } else if (
-      isCounty &&
-      config.parentRegionId &&
-      !config.regionId.startsWith(`${config.parentRegionId}-`)
-    ) {
-      issues.push(
-        `county regionId "${config.regionId}" should be prefixed with its parent "${config.parentRegionId}-"`,
-      );
     }
   }
 
-  if (config.dataSources.length === 0) {
-    issues.push('at least one data source is required');
-  }
-  const seen = new Set<string>();
-  for (const src of config.dataSources) {
-    const key = `${src.dataType} ${src.url}`;
-    if (seen.has(key)) {
-      issues.push(`duplicate data source: ${src.dataType} ${src.url}`);
+  // dataSources is required by the schema — if it's missing the schema layer
+  // below will flag that, so we just skip the duplicate scan here rather than
+  // throwing on a malformed-but-not-yet-validated file.
+  if (Array.isArray(config.dataSources)) {
+    const seen = new Set<string>();
+    for (const src of config.dataSources) {
+      const key = `${src.dataType} ${src.url}`;
+      if (seen.has(key)) {
+        issues.push(`duplicate data source: ${src.dataType} ${src.url}`);
+      }
+      seen.add(key);
     }
-    seen.add(key);
-    if (!/^https?:\/\//.test(src.url)) {
-      issues.push(`data source url "${src.url}" must be an http(s) URL`);
+  }
+
+  // Layer the schema on last — catches anything the friendly checks didn't
+  // pre-empt (missing required fields, wrong types, unknown extras, etc.).
+  const result = schemaValidator.validate(file);
+  if (!result.valid) {
+    for (const err of result.errors) {
+      const path = err.instanceLocation || '<root>';
+      issues.push(`schema: ${path} ${err.error}`);
     }
   }
 

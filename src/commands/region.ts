@@ -1,5 +1,5 @@
 import { mkdir, writeFile, access } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import { Command, Option } from 'commander';
 import * as p from '@clack/prompts';
@@ -80,6 +80,22 @@ export const regionCommand = new Command('region')
       'Welcome',
     );
 
+    // ---- Step 0: sanity-check we're inside an opuspopuli-regions checkout ----
+    const targetDir = opts.outDir ?? process.cwd();
+    const looksRight = await looksLikeRegionsRepo(targetDir);
+    if (!looksRight) {
+      const proceed = unwrap(
+        await p.confirm({
+          message: `${targetDir} doesn't look like an opuspopuli-regions checkout (no schema/region-plugin.schema.json). Continue anyway?`,
+          initialValue: false,
+        }),
+      );
+      if (!proceed) {
+        p.cancel('Cancelled — run again from your opuspopuli-regions checkout, or pass --out-dir.');
+        process.exit(0);
+      }
+    }
+
     // ---- Step 1: level ----
     const level: RegionLevel =
       opts.level === 'state' || opts.level === 'county'
@@ -134,7 +150,6 @@ export const regionCommand = new Command('region')
       await p.text({
         message: 'Display name?',
         defaultValue: rawName,
-        placeholder: rawName,
       }),
     );
     const regionName = displayName || rawName;
@@ -253,12 +268,16 @@ export const regionCommand = new Command('region')
       displayName: regionName,
       regionName,
       description,
+      // New region configs start at 0.1.0 — the documented convention in the
+      // regions repo's CLAUDE.md. Bump to a higher version manually as the
+      // config matures.
       version: '0.1.0',
       timezone,
       stateCode,
       fipsCode,
       dataSources,
       ...(parentSlug ? { parentRegionId: parentSlug } : {}),
+      ...(level === 'county' ? { countySlug: ownSlug } : {}),
     };
 
     const file = buildRegionConfig(input);
@@ -269,8 +288,13 @@ export const regionCommand = new Command('region')
       process.exit(1);
     }
 
-    const relPath = regionFilePath({ level, regionId, ...(parentSlug ? { parentRegionId: parentSlug } : {}) });
-    const absPath = resolve(opts.outDir ?? process.cwd(), relPath);
+    const relPath = regionFilePath({
+      level,
+      regionId,
+      ...(parentSlug ? { parentRegionId: parentSlug } : {}),
+      ...(level === 'county' ? { countySlug: ownSlug } : {}),
+    });
+    const absPath = resolve(targetDir, relPath);
     const json = `${JSON.stringify(file, null, 2)}\n`;
 
     p.note(json, `${relPath} (preview)`);
@@ -313,4 +337,15 @@ async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Heuristic: the regions repo always has `schema/region-plugin.schema.json`
+ *  and a top-level `regions/` directory. If both are present we're confident
+ *  we're in the right checkout; if neither we warn before writing anywhere. */
+async function looksLikeRegionsRepo(dir: string): Promise<boolean> {
+  const [hasSchema, hasRegions] = await Promise.all([
+    fileExists(join(dir, 'schema', 'region-plugin.schema.json')),
+    fileExists(join(dir, 'regions')),
+  ]);
+  return hasSchema && hasRegions;
 }

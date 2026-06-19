@@ -50,13 +50,30 @@ source type, content goal). It then:
 
 1. Derives the `regionId` and keeps `name === config.regionId` (the invariant
    the regions repo enforces).
-2. Re-checks every rule the regions repo's `pnpm test` enforces — semver,
-   FIPS length per level, county-id-prefixed-by-parent, no duplicate data
-   sources — **before** writing, so the file lands green instead of bouncing
-   off CI.
+2. Validates the generated file against the **vendored copy of
+   `region-plugin.schema.json`** (the canonical contract) using an ESM-native
+   JSON Schema validator, then layers on the cross-field rules the repo's
+   `pnpm test` adds in code: semver shape, FIPS length per level
+   (2 digits for state, 5 for county), county-id-prefixed-by-parent, no
+   duplicate data sources keyed by `(dataType, url)`. All checks run **before**
+   writing, so the file lands green instead of bouncing off CI.
 3. Writes it to the canonical path
    (`regions/<state>/<state>.json` or
    `regions/<state>/counties/<county>/<county>.json`).
+
+> **Conventions you may not expect**
+>
+> - New configs are stamped at **version `0.1.0`** — the documented starting
+>   point in `opuspopuli-regions/CLAUDE.md`. Bump manually as the config
+>   matures (additions → minor, breaking changes → major).
+> - `boundarySources` is **not** prompted for. It's optional per the schema, so
+>   the scaffolded file is valid without it — but if your region has TIGER /
+>   ArcGIS boundary coverage and you want PostGIS point-in-polygon district
+>   lookups, you'll need to add the block by hand after scaffolding (see
+>   `regions/california/california.json` for a worked example).
+> - `civics_blocks` is **not** part of the region config schema. It's a
+>   per-region taxonomy that lives elsewhere in the platform — don't look for
+>   a prompt for it here.
 
 Then it's just `pnpm test` + a PR. Non-interactive flags (`--level`, `--name`,
 `--parent`, `--state-code`, `--fips`, `--timezone`, `--out-dir`, `--force`) are
