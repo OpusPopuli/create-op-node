@@ -167,14 +167,15 @@ export function parseComposePs(stdout: string): ContainerSnapshot[] {
 
 function normalize(raw: unknown): ContainerSnapshot {
   const r = (raw ?? {}) as Record<string, unknown>;
-  const name = (r.Name as string) ?? (r.Service as string) ?? '<unknown>';
-  const state = ((r.State as string) ?? 'unknown').toLowerCase();
-  const healthRaw = ((r.Health as string) ?? '').toLowerCase();
+  const name = (r['Name'] as string) ?? (r['Service'] as string) ?? '<unknown>';
+  const state = ((r['State'] as string) ?? 'unknown').toLowerCase();
+  const healthRaw = ((r['Health'] as string) ?? '').toLowerCase();
   const health: ContainerSnapshot['health'] =
     healthRaw === 'healthy' || healthRaw === 'unhealthy' || healthRaw === 'starting'
       ? healthRaw
       : 'none';
-  const exitCode = typeof r.ExitCode === 'number' ? r.ExitCode : null;
+  const exitCodeRaw = r['ExitCode'];
+  const exitCode = typeof exitCodeRaw === 'number' ? exitCodeRaw : null;
   return { name, state, health, exitCode };
 }
 
