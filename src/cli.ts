@@ -7,7 +7,7 @@ import { verifyCommand } from './commands/verify.js';
 import { regionCommand } from './commands/region.js';
 
 // Bumped manually; published version comes from package.json.
-const VERSION = '0.0.1';
+const VERSION = '0.1.0';
 
 const program = new Command();
 
