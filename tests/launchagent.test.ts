@@ -15,6 +15,7 @@ import {
   loadLaunchAgent,
   renderLaunchAgentPlist,
   setupLaunchAgent,
+  teardownLaunchAgent,
   writeLaunchAgentPlist,
   writePgsodiumKeyFile,
 } from '../src/lib/launchagent.js';
@@ -251,5 +252,77 @@ describe('setupLaunchAgent', () => {
     });
     expect(r.ok).toBe(false);
     expect(r.step).toBe('load');
+  });
+});
+
+describe('teardownLaunchAgent', () => {
+  it('unloads the agent and removes both files by default', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+
+    const tmp = await mkdtemp(join(tmpdir(), 'op-teardown-'));
+    const paths = { keyFile: join(tmp, 'key'), plistFile: join(tmp, 'plist.plist') };
+
+    // Pre-create both files so rm has something to delete.
+    await writePgsodiumKeyFile(VALID_KEY, paths.keyFile);
+    await writeLaunchAgentPlist(paths.plistFile, '<plist/>');
+
+    const r = await teardownLaunchAgent(paths);
+    expect(r.ok).toBe(true);
+    expect(r.steps.map((s) => s.step)).toEqual(['unload', 'rm-plist', 'rm-key-file']);
+
+    // Both files should be gone.
+    await expect(stat(paths.keyFile)).rejects.toThrow();
+    await expect(stat(paths.plistFile)).rejects.toThrow();
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it('keeps the key file when keepKeyFile=true', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+
+    const tmp = await mkdtemp(join(tmpdir(), 'op-teardown-'));
+    const paths = { keyFile: join(tmp, 'key'), plistFile: join(tmp, 'plist.plist') };
+    await writePgsodiumKeyFile(VALID_KEY, paths.keyFile);
+    await writeLaunchAgentPlist(paths.plistFile, '<plist/>');
+
+    const r = await teardownLaunchAgent(paths, { keepKeyFile: true });
+    expect(r.ok).toBe(true);
+    expect(r.steps.map((s) => s.step)).toEqual(['unload', 'rm-plist']);
+
+    // Plist gone, key file still there.
+    await expect(stat(paths.plistFile)).rejects.toThrow();
+    await expect(stat(paths.keyFile)).resolves.toBeTruthy();
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it('treats `rm` of missing files as success (idempotent)', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+
+    const tmp = await mkdtemp(join(tmpdir(), 'op-teardown-'));
+    const paths = { keyFile: join(tmp, 'never-existed'), plistFile: join(tmp, 'never-existed.plist') };
+
+    const r = await teardownLaunchAgent(paths);
+    expect(r.ok).toBe(true);
+    expect(r.steps.every((s) => s.ok)).toBe(true);
+
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  it('marks unload step with reason when launchctl is missing, but does not fail teardown', async () => {
+    // safeExeca returns null on ENOENT.
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+
+    const tmp = await mkdtemp(join(tmpdir(), 'op-teardown-'));
+    const paths = { keyFile: join(tmp, 'k'), plistFile: join(tmp, 'p.plist') };
+
+    const r = await teardownLaunchAgent(paths);
+    const unload = r.steps.find((s) => s.step === 'unload');
+    expect(unload?.ok).toBe(true);
+    expect(unload?.reason).toContain('not on PATH');
+    expect(r.ok).toBe(true);
+
+    await rm(tmp, { recursive: true, force: true });
   });
 });

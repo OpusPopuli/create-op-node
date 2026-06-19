@@ -6,6 +6,7 @@ import { probeCloudflareToken } from '../lib/cloudflare.js';
 import { probeTfcToken } from '../lib/tfc.js';
 import { detectOp, readSecretFromOp, saveSecretToOp } from '../lib/onepassword.js';
 import { safeExeca } from '../lib/exec.js';
+import { unwrap } from '../lib/prompts.js';
 import {
   commitFile,
   createBranch,
@@ -34,14 +35,6 @@ interface InitOptions {
   useExistingRepo?: boolean;
   skipWait?: boolean;
   yes?: boolean;
-}
-
-function unwrap<T>(value: T | symbol): T {
-  if (p.isCancel(value)) {
-    p.cancel('Cancelled.');
-    process.exit(0);
-  }
-  return value;
 }
 
 /** Pull the GitHub token from `gh auth token` if the CLI is signed in. Lets

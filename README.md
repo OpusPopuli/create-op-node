@@ -24,7 +24,61 @@ npx create-op-node bootstrap
 
 Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, materializes the pgsodium key from 1Password, writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, and finally `docker compose pull && up -d` brings the whole stack online. Health-check loop waits until all 10 containers are `(healthy)`.
 
-And at any time after that:
+## Resetting the Studio
+
+To start over (e.g. before rerunning `bootstrap` against a different
+region, or after a misconfiguration), reverse the Studio-side state:
+
+```bash
+npx create-op-node reset --region us-ca
+```
+
+Three phases run in reverse-bootstrap order. By default volumes are
+preserved — the database survives so you can bring the stack back up
+with `bootstrap` without losing data.
+
+1. **Stop the stack** — `docker compose down`. Pass `--wipe-data` to
+   add `-v` (destroys named volumes including the database). The wipe
+   mode requires retyping the region label as confirmation — and the
+   prompt deliberately doesn't pre-fill the answer, so you have to type
+   it from memory. `y` won't do it.
+2. **Unload + remove the LaunchAgent** — `launchctl unload` then `rm`
+   the plist and the pgsodium key file. `--keep-key-file` leaves the
+   key in place as a belt-and-suspenders backup before a wipe-data run.
+3. **`docker logout`** — clears the registry-credentials store entry
+   for `ghcr.io` (or override with `--registry`). This only clears the
+   store entry; if your credential helper caches the token elsewhere
+   (or `~/.docker/config.json` has stale entries from another host),
+   those need separate cleanup.
+
+Reset does **not** touch cloud-side state: the Cloudflare resources,
+the GitHub repo, the TFC workspace, and the 1Password items remain.
+`init` is idempotent against existing cloud setup, so re-running it
+won't duplicate anything.
+
+Useful flags:
+
+- `--dry-run` — print the plan without acting. Phases that would run
+  show with a `?` icon; phases that are skipped show with `·`.
+- `--skip-stack` / `--skip-launch-agent` / `--skip-docker-logout` —
+  surgical resets when only one piece needs cleaning.
+- `--no-remove-orphans` — drop `--remove-orphans` from `compose down`.
+  Useful when you ran bootstrap with a custom `--compose-file` set and
+  reset without it.
+- `--repo-dir <path>` — explicit path to the cloned node repo when
+  reset is run from outside the checkout. Passing a path that doesn't
+  look like a node repo is a hard error, not a silent skip.
+- `--registry <reg>` — log out of a registry other than `ghcr.io`.
+
+```bash
+# Try-before-you-buy: preview every step.
+npx create-op-node reset --region us-ca --dry-run
+
+# Nuke from orbit: containers + volumes + LaunchAgent + ghcr credentials.
+npx create-op-node reset --region us-ca --wipe-data
+```
+
+## Verifying a live node
 
 ```bash
 npx create-op-node verify --domain your-domain.example

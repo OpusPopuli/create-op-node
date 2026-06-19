@@ -28,6 +28,7 @@ import {
 } from '../lib/ollama.js';
 import { locateOrCloneRepo, type LocateOutcome } from '../lib/noderepo.js';
 import { safeExeca } from '../lib/exec.js';
+import { unwrap } from '../lib/prompts.js';
 
 interface BootstrapOptions {
   region?: string;
@@ -41,14 +42,6 @@ interface BootstrapOptions {
   skipOllama?: boolean;
   skipStack?: boolean;
   yes?: boolean;
-}
-
-function unwrap<T>(value: T | symbol): T {
-  if (p.isCancel(value)) {
-    p.cancel('Cancelled.');
-    process.exit(0);
-  }
-  return value;
 }
 
 export const bootstrapCommand = new Command('bootstrap')

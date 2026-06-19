@@ -22,6 +22,7 @@ import {
   type RegionLevel,
   type SourceType,
 } from '../lib/region.js';
+import { unwrap } from '../lib/prompts.js';
 
 interface RegionOptions {
   level?: string;
@@ -32,15 +33,6 @@ interface RegionOptions {
   timezone?: string;
   outDir?: string;
   force?: boolean;
-}
-
-/** Narrow a clack prompt result, bailing out cleanly on Ctrl-C. */
-function unwrap<T>(value: T | symbol): T {
-  if (p.isCancel(value)) {
-    p.cancel('Cancelled.');
-    process.exit(0);
-  }
-  return value;
 }
 
 export const regionCommand = new Command('region')
