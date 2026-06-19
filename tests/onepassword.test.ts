@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const execaMock = vi.hoisted(() => vi.fn());
 vi.mock('execa', () => ({ execa: execaMock }));
 
-import { detectOp, saveSecretToOp } from '../src/lib/onepassword.js';
+import { detectOp, readSecretFromOp, saveSecretToOp } from '../src/lib/onepassword.js';
 
 beforeEach(() => {
   execaMock.mockReset();
@@ -14,8 +14,9 @@ afterEach(() => {
 });
 
 describe('detectOp', () => {
-  it('reports installed=false when `op` is not on PATH', async () => {
-    execaMock.mockRejectedValueOnce(new Error('ENOENT'));
+  it('reports installed=false when `op` is not on PATH (ENOENT)', async () => {
+    const err = Object.assign(new Error('spawn op ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
     const r = await detectOp();
     expect(r).toEqual({ installed: false, signedIn: false });
   });
@@ -114,5 +115,38 @@ describe('saveSecretToOp', () => {
     expect(r.written).toBe(false);
     expect(r.alreadyExisted).toBe(false);
     expect(r.reason).toContain('vault permission denied');
+  });
+
+  it('reports a clean "op not installed" reason when execa raises ENOENT', async () => {
+    const err = Object.assign(new Error('spawn op ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+    const r = await saveSecretToOp({ title: 't', value: 'v' });
+    expect(r.written).toBe(false);
+    expect(r.reason).toContain('`op` CLI not installed');
+  });
+});
+
+describe('readSecretFromOp', () => {
+  it('returns the notesPlain value when the item exists', async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: 'aabbccdd1122334455',
+      stderr: '',
+    });
+    const v = await readSecretFromOp({ title: 'k' });
+    expect(v).toBe('aabbccdd1122334455');
+  });
+
+  it('returns null when `op` exits non-zero (item not found)', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: 'not found' });
+    const v = await readSecretFromOp({ title: 'missing' });
+    expect(v).toBeNull();
+  });
+
+  it('returns null when execa raises ENOENT', async () => {
+    const err = Object.assign(new Error('spawn op ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+    const v = await readSecretFromOp({ title: 'k' });
+    expect(v).toBeNull();
   });
 });

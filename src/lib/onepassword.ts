@@ -17,7 +17,29 @@
  * read helpers go alongside the write helpers.
  */
 
-import { execa } from 'execa';
+import { execa, ExecaError } from 'execa';
+
+/** Wraps execa in a way that "command not found" doesn't throw — neither
+ *  `reject: false` nor a normal catch suppresses ENOENT from the spawn step.
+ *  Returns `null` when the binary isn't on PATH at all. */
+async function safeExeca(
+  cmd: string,
+  args: string[],
+  options?: { input?: string },
+): Promise<{ exitCode: number; stdout: string; stderr: string } | null> {
+  try {
+    const result = await execa(cmd, args, { reject: false, ...options });
+    return {
+      exitCode: result.exitCode ?? 0,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    };
+  } catch (err) {
+    const e = err as ExecaError & NodeJS.ErrnoException;
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return null;
+    throw err;
+  }
+}
 
 export interface OpAvailability {
   /** `op` CLI is on PATH. */
@@ -29,18 +51,19 @@ export interface OpAvailability {
 }
 
 /** Probe both halves of "can we use 1Password automation right now?" — install
- *  presence and an active session. Caller decides whether to use it. */
+ *  presence and an active session. Caller decides whether to use it.
+ *
+ *  Returns `{ installed: false }` cleanly when `op` isn't on PATH at all —
+ *  no thrown ENOENT, so the caller can branch cleanly to manual-paste mode. */
 export async function detectOp(): Promise<OpAvailability> {
-  let installed = false;
-  try {
-    await execa('op', ['--version'], { reject: false });
-    installed = true;
-  } catch {
+  const version = await safeExeca('op', ['--version']);
+  if (version === null) {
     return { installed: false, signedIn: false };
   }
+  const installed = true;
 
-  const whoami = await execa('op', ['whoami', '--format=json'], { reject: false });
-  if (whoami.exitCode !== 0) {
+  const whoami = await safeExeca('op', ['whoami', '--format=json']);
+  if (whoami === null || whoami.exitCode !== 0) {
     return { installed, signedIn: false };
   }
 
@@ -91,53 +114,71 @@ export interface SaveSecretResult {
 export async function saveSecretToOp(input: SaveSecretInput): Promise<SaveSecretResult> {
   const vaultArg = input.vault ? ['--vault', input.vault] : [];
 
-  const existing = await execa(
-    'op',
-    ['item', 'get', input.title, ...vaultArg, '--format=json'],
-    { reject: false },
-  );
+  const existing = await safeExeca('op', ['item', 'get', input.title, ...vaultArg, '--format=json']);
+  if (existing === null) {
+    return {
+      written: false,
+      alreadyExisted: false,
+      reason: '`op` CLI not installed',
+    };
+  }
 
   if (existing.exitCode === 0) {
     if (!input.overwrite) {
       return { written: false, alreadyExisted: true };
     }
     // Edit the notes field on the existing item instead of creating a duplicate.
-    const edit = await execa(
+    const edit = await safeExeca(
       'op',
       ['item', 'edit', input.title, ...vaultArg, `notesPlain=${input.value}`],
-      { reject: false },
     );
-    if (edit.exitCode !== 0) {
+    if (edit === null || edit.exitCode !== 0) {
       return {
         written: false,
         alreadyExisted: true,
-        reason: `op item edit failed: ${edit.stderr || edit.stdout}`,
+        reason: `op item edit failed: ${edit?.stderr || edit?.stdout || '`op` not installed'}`,
       };
     }
     return { written: true, alreadyExisted: true };
   }
 
-  const create = await execa(
-    'op',
-    [
-      'item',
-      'create',
-      '--category',
-      'Secure Note',
-      '--title',
-      input.title,
-      ...vaultArg,
-      `notesPlain=${input.value}`,
-    ],
-    { reject: false },
-  );
+  const create = await safeExeca('op', [
+    'item',
+    'create',
+    '--category',
+    'Secure Note',
+    '--title',
+    input.title,
+    ...vaultArg,
+    `notesPlain=${input.value}`,
+  ]);
 
-  if (create.exitCode !== 0) {
+  if (create === null || create.exitCode !== 0) {
     return {
       written: false,
       alreadyExisted: false,
-      reason: `op item create failed: ${create.stderr || create.stdout}`,
+      reason: `op item create failed: ${create?.stderr || create?.stdout || '`op` not installed'}`,
     };
   }
   return { written: true, alreadyExisted: false };
+}
+
+/**
+ * Read the notesPlain value of a 1Password Secure Note by title. Returns
+ * `null` when the item doesn't exist or `op` isn't usable. Used by `init` to
+ * pick up an existing pgsodium key on a re-run instead of generating a new
+ * one and silently dropping it.
+ */
+export async function readSecretFromOp(input: {
+  title: string;
+  vault?: string;
+}): Promise<string | null> {
+  const vaultArg = input.vault ? ['--vault', input.vault] : [];
+  const res = await safeExeca(
+    'op',
+    ['item', 'get', input.title, ...vaultArg, '--fields', 'notesPlain', '--reveal'],
+  );
+  if (res === null || res.exitCode !== 0) return null;
+  const value = res.stdout.trim();
+  return value.length > 0 ? value : null;
 }

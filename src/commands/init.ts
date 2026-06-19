@@ -1,11 +1,11 @@
 import { Command, Option } from 'commander';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import { execa } from 'execa';
+import { execa, ExecaError } from 'execa';
 
 import { probeCloudflareToken } from '../lib/cloudflare.js';
 import { probeTfcToken } from '../lib/tfc.js';
-import { detectOp, saveSecretToOp } from '../lib/onepassword.js';
+import { detectOp, readSecretFromOp, saveSecretToOp } from '../lib/onepassword.js';
 import {
   commitFile,
   createBranch,
@@ -29,6 +29,8 @@ interface InitOptions {
   tfOrg?: string;
   ghToken?: string;
   vault?: string;
+  overwrite?: boolean;
+  useExistingRepo?: boolean;
   skipWait?: boolean;
   yes?: boolean;
 }
@@ -42,12 +44,20 @@ function unwrap<T>(value: T | symbol): T {
 }
 
 /** Pull the GitHub token from `gh auth token` if the CLI is signed in. Lets
- *  operators who use `gh` skip pasting their PAT. */
+ *  operators who use `gh` skip pasting their PAT. Returns null cleanly when
+ *  `gh` isn't installed at all — `reject: false` alone wouldn't catch
+ *  ENOENT, so we wrap the spawn in try/catch. */
 async function ghTokenFromCli(): Promise<string | null> {
-  const r = await execa('gh', ['auth', 'token'], { reject: false });
-  if (r.exitCode !== 0) return null;
-  const token = r.stdout.trim();
-  return token.length > 0 ? token : null;
+  try {
+    const r = await execa('gh', ['auth', 'token'], { reject: false });
+    if (r.exitCode !== 0) return null;
+    const token = r.stdout.trim();
+    return token.length > 0 ? token : null;
+  } catch (err) {
+    const e = err as ExecaError & NodeJS.ErrnoException;
+    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return null;
+    throw err;
+  }
 }
 
 export const initCommand = new Command('init')
@@ -70,6 +80,18 @@ export const initCommand = new Command('init')
   .addOption(new Option('--tf-org <org>', 'Terraform Cloud organization').env('TF_CLOUD_ORGANIZATION'))
   .addOption(new Option('--gh-token <token>', 'GitHub Personal Access Token (else gh CLI)').env('GH_TOKEN'))
   .addOption(new Option('--vault <vault>', '1Password vault for secrets').default('Private'))
+  .addOption(
+    new Option(
+      '--overwrite',
+      'Overwrite existing 1Password items (pgsodium key, Tunnel token) on a re-run',
+    ).default(false),
+  )
+  .addOption(
+    new Option(
+      '--use-existing-repo',
+      "Continue using a previously-created node repo (don't fail on 'already exists')",
+    ).default(false),
+  )
   .addOption(new Option('--skip-wait', "Don't poll for Terraform apply; exit after PR open").default(false))
   .addOption(new Option('-y, --yes', 'Skip the final confirmation').default(false))
   .action(async (opts: InitOptions) => {
@@ -223,12 +245,47 @@ export const initCommand = new Command('init')
         name: newRepoName,
         description: `Opus Populi node deployment for ${region}`,
       });
+      repoSpin.stop(pc.green(`✓ Created ${created.fullName}`));
     } catch (err) {
-      repoSpin.stop(pc.red(`✗ Couldn't create repo: ${(err as Error).message}`));
-      p.cancel('Fix the issue and re-run. If the repo already exists, delete it or rename.');
-      process.exit(1);
+      // The most likely re-run failure mode: the repo already exists from a
+      // previous partial run. The GitHub API returns 422 with a
+      // "name already exists on this account" error. Let the operator opt to
+      // continue with the existing repo (skip-create idempotency) rather than
+      // forcing them to delete the half-set-up repo first.
+      const message = (err as Error).message ?? '';
+      const isAlreadyExists =
+        /already exists/i.test(message) ||
+        (typeof err === 'object' && err !== null && 'status' in err && (err as { status: number }).status === 422);
+
+      if (!isAlreadyExists) {
+        repoSpin.stop(pc.red(`✗ Couldn't create repo: ${message || 'unknown error'}`));
+        p.cancel('Fix the issue and re-run.');
+        process.exit(1);
+      }
+
+      repoSpin.stop(pc.yellow(`⚠ ${newRepoFull} already exists.`));
+      const reuse =
+        opts.useExistingRepo ||
+        unwrap(
+          await p.confirm({
+            message: `Continue with the existing ${newRepoFull}? (Re-seeds secrets + re-commits prod.tfvars on a fresh branch.)`,
+            initialValue: true,
+          }),
+        );
+      if (!reuse) {
+        p.cancel(
+          `Delete ${newRepoFull} on GitHub and re-run, or pass --use-existing-repo to skip this prompt.`,
+        );
+        process.exit(0);
+      }
+      // Synthesize the same shape `createRepoFromTemplate` returns so the rest
+      // of the flow doesn't care which path got us here.
+      created = {
+        fullName: newRepoFull,
+        htmlUrl: `https://github.com/${newRepoFull}`,
+        defaultBranch: 'main',
+      };
     }
-    repoSpin.stop(pc.green(`✓ Created ${created.fullName}`));
 
     // ---- Execute: seed 5 secrets ---------------------------------------
     const secrets: Array<{ name: string; value: string }> = [
@@ -253,7 +310,10 @@ export const initCommand = new Command('init')
     secSpin.stop(pc.green(`✓ Seeded ${secrets.length} secrets on ${newRepoFull}`));
 
     // ---- Execute: branch + tfvars + PR ---------------------------------
-    const branch = `init/region-${region}`;
+    // Branch name is timestamped so re-runs don't collide with a leftover
+    // branch from a previous partial run. Keeps the PR list clean and avoids
+    // a separate "branch already exists" idempotency case.
+    const branch = `init/region-${region}-${Math.floor(Date.now() / 1000)}`;
     const setupSpin = p.spinner();
     setupSpin.start(`Writing prod.tfvars on branch ${branch}…`);
     try {
@@ -310,30 +370,53 @@ export const initCommand = new Command('init')
     }
     prSpin.stop(pc.green(`✓ Opened PR #${pr.number}`));
 
-    // ---- Generate + save pgsodium key ----------------------------------
+    // ---- pgsodium master key (read existing OR generate fresh) ----------
+    //
+    // Three branches to handle cleanly:
+    //   1. Op installed + signed in + key already in 1P + no --overwrite →
+    //      surface the existing key (and use it, not a freshly-generated one).
+    //   2. Op installed + signed in + no key OR --overwrite → generate fresh,
+    //      save to 1P.
+    //   3. Op unavailable → generate fresh, print for manual paste.
     const keyTitle = `op-region-${region}-pgsodium-root-key`;
-    const pgsodiumKey = generatePgsodiumRootKey();
+    const vaultArg = opts.vault ? { vault: opts.vault } : {};
+
     if (op.installed && op.signedIn) {
-      const r = await saveSecretToOp({
-        title: keyTitle,
-        value: pgsodiumKey,
-        ...(opts.vault ? { vault: opts.vault } : {}),
-      });
-      if (r.written) {
+      const existing = opts.overwrite
+        ? null
+        : await readSecretFromOp({ title: keyTitle, ...vaultArg });
+      if (existing && /^[a-f0-9]{64}$/.test(existing)) {
         p.note(
-          `${pc.green('✓')} pgsodium master key saved to 1Password as ${pc.cyan(keyTitle)}.`,
-          'Secret',
-        );
-      } else if (r.alreadyExisted) {
-        p.note(
-          `${pc.yellow('!')} 1Password already has an item titled ${pc.cyan(keyTitle)}. Leaving it untouched — make sure it's the right key. If not, delete it and re-run, or pass --overwrite (TODO).`,
+          `${pc.green('✓')} Re-using existing pgsodium master key from 1Password (${pc.cyan(keyTitle)}). Pass --overwrite to rotate.`,
           'Secret',
         );
       } else {
-        printKeyForManualSave(pgsodiumKey, keyTitle, r.reason);
+        const fresh = generatePgsodiumRootKey();
+        const r = await saveSecretToOp({
+          title: keyTitle,
+          value: fresh,
+          overwrite: opts.overwrite ?? false,
+          ...vaultArg,
+        });
+        if (r.written) {
+          p.note(
+            `${pc.green('✓')} pgsodium master key${r.alreadyExisted ? ' rotated' : ' saved'} to 1Password as ${pc.cyan(keyTitle)}.`,
+            'Secret',
+          );
+        } else if (r.alreadyExisted) {
+          // Existed but didn't parse as 64-hex AND no --overwrite. Surface this
+          // clearly rather than silently leaving the bad item in place.
+          p.note(
+            `${pc.yellow('!')} 1Password has an item titled ${pc.cyan(keyTitle)} but its value is NOT a 64-hex pgsodium key. Inspect it in 1Password; re-run with --overwrite to replace.`,
+            'Secret',
+          );
+        } else {
+          printKeyForManualSave(fresh, keyTitle, r.reason);
+        }
       }
     } else {
-      printKeyForManualSave(pgsodiumKey, keyTitle);
+      const fresh = generatePgsodiumRootKey();
+      printKeyForManualSave(fresh, keyTitle);
     }
 
     // ---- Pause for operator to merge PR --------------------------------
