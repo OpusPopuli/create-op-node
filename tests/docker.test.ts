@@ -8,9 +8,11 @@ vi.mock('execa', () => ({
 
 import {
   assessHealth,
+  composeDown,
   composePs,
   composePull,
   composeUp,
+  dockerLogout,
   GHCR_REGISTRY,
   loginToGhcr,
   parseComposePs,
@@ -100,6 +102,70 @@ describe('composePull / composeUp', () => {
     const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     execaMock.mockRejectedValueOnce(err);
     const r = await composePull({ files: ['a.yml'], cwd: '/tmp' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('not installed');
+  });
+});
+
+describe('composeDown', () => {
+  it('builds `docker compose -f X down` without -v by default', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    const r = await composeDown({ files: ['a.yml'], cwd: '/tmp' });
+    expect(r.ok).toBe(true);
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual(['compose', '-f', 'a.yml', 'down']);
+    expect(args).not.toContain('-v');
+  });
+
+  it('adds -v when wipeVolumes is true', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    await composeDown({ files: ['a.yml'], cwd: '/tmp', wipeVolumes: true });
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual(['compose', '-f', 'a.yml', 'down', '-v']);
+  });
+
+  it('adds --remove-orphans when removeOrphans is true', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    await composeDown({
+      files: ['a.yml'],
+      cwd: '/tmp',
+      wipeVolumes: true,
+      removeOrphans: true,
+    });
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual(['compose', '-f', 'a.yml', 'down', '-v', '--remove-orphans']);
+  });
+
+  it('labels the failure reason "compose down -v" when wipeVolumes was set', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: 'volume in use' });
+    const r = await composeDown({ files: ['a.yml'], cwd: '/tmp', wipeVolumes: true });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('compose down -v');
+    expect(r.reason).toContain('volume in use');
+  });
+});
+
+describe('dockerLogout', () => {
+  it('shells out to `docker logout ghcr.io` by default', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    const r = await dockerLogout();
+    expect(r.ok).toBe(true);
+    const [cmd, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(cmd).toBe('docker');
+    expect(args).toEqual(['logout', 'ghcr.io']);
+  });
+
+  it('accepts an override registry', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    await dockerLogout('registry.example.org');
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual(['logout', 'registry.example.org']);
+  });
+
+  it('reports docker missing cleanly', async () => {
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+    const r = await dockerLogout();
     expect(r.ok).toBe(false);
     expect(r.reason).toContain('not installed');
   });

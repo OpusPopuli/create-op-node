@@ -108,6 +108,44 @@ export async function composeUp(opts: ComposeOptions): Promise<ComposeResult> {
   return result(res, 'compose up');
 }
 
+export interface ComposeDownOptions extends ComposeOptions {
+  /** When true, adds `-v` — destroys named volumes. The default false is the
+   *  safe choice: stop the stack but preserve the database. Callers must
+   *  ALWAYS surface a typed confirmation before flipping this on. */
+  wipeVolumes?: boolean;
+  /** When true, adds `--remove-orphans` — drops containers from compose files
+   *  no longer present. Useful on first-after-rename runs. */
+  removeOrphans?: boolean;
+}
+
+/** `docker compose -f … down [-v] [--remove-orphans]`. */
+export async function composeDown(opts: ComposeDownOptions): Promise<ComposeResult> {
+  const flags: string[] = ['down'];
+  if (opts.wipeVolumes) flags.push('-v');
+  if (opts.removeOrphans) flags.push('--remove-orphans');
+  const res = await safeExeca('docker', composeArgs(opts, flags));
+  return result(res, opts.wipeVolumes ? 'compose down -v' : 'compose down');
+}
+
+/**
+ * `docker logout <registry>`.
+ *
+ * Behavior on "not currently logged in" varies by version: Docker 24+ returns
+ * exit 0 with "Not logged in to <registry>" on stdout, but older Docker
+ * Desktop releases (and some credential-helper configurations) return a
+ * non-zero exit instead. `reset` therefore renders a non-zero outcome as a
+ * warning rather than a failure — the goal is "ensure no creds remain," and
+ * "no creds existed to begin with" satisfies that goal.
+ *
+ * Note: this only clears the credential-store entry. If the operator's
+ * credential helper has cached the token elsewhere, or if `~/.docker/config.json`
+ * has stale entries from a different host, those need separate cleanup.
+ */
+export async function dockerLogout(registry: string = GHCR_REGISTRY): Promise<ComposeResult> {
+  const res = await safeExeca('docker', ['logout', registry]);
+  return result(res, `docker logout ${registry}`);
+}
+
 function result(
   res: { exitCode: number | undefined; stdout: string; stderr: string } | null,
   label: string,

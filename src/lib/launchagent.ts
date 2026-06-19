@@ -216,14 +216,58 @@ export async function setupLaunchAgent(input: SetupInput): Promise<SetupReport> 
   return { ok: true, paths };
 }
 
+export interface TeardownResult {
+  ok: boolean;
+  /** Per-step outcome. Each step is independently logged so the operator can
+   *  see "unload worked but the plist file was already gone." */
+  steps: Array<{ step: 'unload' | 'rm-plist' | 'rm-key-file'; ok: boolean; reason?: string }>;
+}
+
+export interface TeardownOptions {
+  /** When true, leave the pgsodium key file in place. Useful when the
+   *  operator wants to unload the LaunchAgent + remove the plist but
+   *  keep the key as belt-and-suspenders backup. */
+  keepKeyFile?: boolean;
+}
+
 /**
- * Test seam — also useful when an operator wants to wipe a LaunchAgent
- * outside of `launchctl unload`. Not currently surfaced as a `bootstrap`
- * subcommand. Exported because integration tests (and the eventual
- * `bootstrap --uninstall` flag, if we ever add it) need it.
+ * Reverse of `setupLaunchAgent`: unload the agent via `launchctl unload`,
+ * then `rm -f` both the plist and (unless `keepKeyFile`) the pgsodium key
+ * file. Idempotent — `rm -f` is a no-op when the file doesn't exist, and
+ * we treat `launchctl unload` of an already-unloaded agent as success.
+ *
+ * Used by `reset`. Also useful as a test seam during integration tests.
  */
-export async function _teardownLaunchAgent(paths: LaunchAgentPaths): Promise<void> {
-  await safeExeca('launchctl', ['unload', paths.plistFile]);
-  await rm(paths.plistFile, { force: true });
-  await rm(paths.keyFile, { force: true });
+export async function teardownLaunchAgent(
+  paths: LaunchAgentPaths,
+  opts: TeardownOptions = {},
+): Promise<TeardownResult> {
+  const steps: TeardownResult['steps'] = [];
+
+  const unload = await safeExeca('launchctl', ['unload', paths.plistFile]);
+  // `launchctl unload` exits non-zero when the agent isn't loaded — that's
+  // a successful teardown from our point of view, so we don't propagate it.
+  steps.push({
+    step: 'unload',
+    ok: true,
+    ...(unload === null ? { reason: '`launchctl` not on PATH' } : {}),
+  });
+
+  try {
+    await rm(paths.plistFile, { force: true });
+    steps.push({ step: 'rm-plist', ok: true });
+  } catch (err) {
+    steps.push({ step: 'rm-plist', ok: false, reason: (err as Error).message });
+  }
+
+  if (!opts.keepKeyFile) {
+    try {
+      await rm(paths.keyFile, { force: true });
+      steps.push({ step: 'rm-key-file', ok: true });
+    } catch (err) {
+      steps.push({ step: 'rm-key-file', ok: false, reason: (err as Error).message });
+    }
+  }
+
+  return { ok: steps.every((s) => s.ok), steps };
 }

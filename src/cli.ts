@@ -3,6 +3,7 @@ import pc from 'picocolors';
 
 import { initCommand } from './commands/init.js';
 import { bootstrapCommand } from './commands/bootstrap.js';
+import { resetCommand } from './commands/reset.js';
 import { verifyCommand } from './commands/verify.js';
 import { regionCommand } from './commands/region.js';
 
@@ -21,6 +22,7 @@ program
 
 program.addCommand(initCommand);
 program.addCommand(bootstrapCommand);
+program.addCommand(resetCommand);
 program.addCommand(verifyCommand);
 program.addCommand(regionCommand);
 

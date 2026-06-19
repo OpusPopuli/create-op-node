@@ -7,6 +7,7 @@ import pc from 'picocolors';
 import { tunnelStatus, type TunnelStatusInput, type TunnelStatusResult } from '../lib/cloudflare.js';
 import { cosignVerifyImage, type CosignVerifyInput, type CosignVerifyResult } from '../lib/cosign.js';
 import { graphqlProbe, httpProbe, type GraphqlProbeInput, type GraphqlProbeResult, type HttpProbeInput, type HttpProbeResult } from '../lib/http.js';
+import { unwrap } from '../lib/prompts.js';
 import { tlsHandshake, type TlsProbeInput, type TlsHandshakeResult } from '../lib/tls.js';
 
 interface VerifyOptions {
@@ -19,14 +20,6 @@ interface VerifyOptions {
   image?: string[];
   certWarnDays?: string;
   showSkipped?: boolean;
-}
-
-function unwrap<T>(value: T | symbol): T {
-  if (p.isCancel(value)) {
-    p.cancel('Cancelled.');
-    process.exit(0);
-  }
-  return value;
 }
 
 const DOMAIN_RE = /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i;
