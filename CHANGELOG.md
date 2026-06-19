@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-06-19
+
+### Added
+
+- **`reset`** — reverses the Mac Studio side of bootstrap. Three phases
+  in reverse-bootstrap order: `docker compose down` (volumes preserved
+  by default; `--wipe-data` destroys them after a typed region-label
+  retype), `launchctl unload` + remove plist + remove pgsodium key file
+  (`--keep-key-file` preserves the key), and `docker logout` against
+  `ghcr.io` (or `--registry <reg>`). Continue-on-failure design: a
+  docker daemon down doesn't block LaunchAgent / logout cleanup. Cloud-
+  side state untouched.
+- `composeDown` + `dockerLogout` helpers in `src/lib/docker.ts`.
+- `teardownLaunchAgent` promoted from a test seam to a public API
+  (returns per-step results so the caller knows what was removed).
+- `unwrap()` extracted to `src/lib/prompts.ts` — five commands now share
+  one definition instead of redefining it.
+
+### Changed
+
+- README "Resetting the Studio" section added between Bootstrap and
+  Verify, with the credential-helper caveat documented (we only clear
+  the store entry, not all credential caches).
+
 ## [0.1.0] — 2026-06-18
 
 First feature-complete release. All four subcommands wired end-to-end and
@@ -49,4 +73,5 @@ testable from `npx create-op-node`.
   a hostile path becoming shell injection in launchd's `sh -c` body.
 - `pnpm audit`, `trivy`, `gitleaks` all clean.
 
+[0.2.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.2.0
 [0.1.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.1.0
