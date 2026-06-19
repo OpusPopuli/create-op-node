@@ -27,8 +27,9 @@ export interface ProbeResult {
 async function get(
   token: string,
   path: string,
+  fetchImpl: typeof fetch = fetch,
 ): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(`${CF_API}${path}`, {
+  const res = await fetchImpl(`${CF_API}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   let body: unknown = null;
@@ -110,4 +111,68 @@ export async function probeCloudflareToken(input: ProbeInput): Promise<ProbeResu
   }
 
   return { ok: issues.length === 0, issues };
+}
+
+/* ------------------------------------------------------------------ *
+ *  Tunnel-status probe (used by `verify`, not `init`)                *
+ * ------------------------------------------------------------------ */
+
+export interface TunnelStatusInput {
+  token: string;
+  accountId: string;
+  tunnelId: string;
+  /** Injectable for tests. */
+  fetchImpl?: typeof fetch;
+}
+
+export interface TunnelStatusOk {
+  ok: true;
+  /** Active connector connections registered with Cloudflare's edge. Zero on
+   *  a freshly-created tunnel that hasn't been started, > 0 on a healthy one. */
+  connections: number;
+  /** Cloudflare's own status field — `healthy`, `degraded`, `inactive`, etc. */
+  status: string;
+}
+
+export interface TunnelStatusFailed {
+  ok: false;
+  reason: string;
+}
+
+export type TunnelStatusResult = TunnelStatusOk | TunnelStatusFailed;
+
+interface CfTunnelEnvelope {
+  result?: {
+    status?: string;
+    connections?: Array<unknown>;
+  };
+}
+
+/**
+ * Look up a single tunnel's current edge-side status. The CF API endpoint
+ * returns `connections: []` until at least one cloudflared connector
+ * registers — useful as a verify signal that the Studio's cloudflared is
+ * actually online.
+ */
+export async function tunnelStatus(input: TunnelStatusInput): Promise<TunnelStatusResult> {
+  const fetchImpl = input.fetchImpl ?? fetch;
+  try {
+    const res = await get(
+      input.token,
+      `/accounts/${input.accountId}/cfd_tunnel/${input.tunnelId}`,
+      fetchImpl,
+    );
+    if (res.status !== 200) {
+      return {
+        ok: false,
+        reason: `tunnel lookup failed (HTTP ${res.status}): ${shortError(res.body)}`,
+      };
+    }
+    const env = res.body as CfTunnelEnvelope;
+    const status = env.result?.status ?? '<no status>';
+    const connections = env.result?.connections?.length ?? 0;
+    return { ok: true, connections, status };
+  } catch (err) {
+    return { ok: false, reason: `tunnel lookup threw: ${(err as Error).message}` };
+  }
 }

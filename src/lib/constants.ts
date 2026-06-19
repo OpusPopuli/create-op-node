@@ -25,3 +25,12 @@ export const TUNNEL_TOKEN_RE = /^[A-Za-z0-9_\-.=]+$/;
  *  `/`, `-`, `_`, `.`, space) — and rejects `;`, `$`, backticks, quotes,
  *  newlines, etc. */
 export const SAFE_PATH_RE = /^[A-Za-z0-9_\-./ ]+$/;
+
+/** Default network timeout used by `verify`'s probes (TLS handshake, HTTP
+ *  GET /health, GraphQL POST). One number so tls.ts and http.ts don't drift. */
+export const VERIFY_NETWORK_TIMEOUT_MS = 10_000;
+
+/** First N chars of a probe response body that get echoed back to the
+ *  operator for diagnostics. Capped low because the wizard renders this
+ *  inline; for the real body, use `curl -v` and friends. */
+export const BODY_PREVIEW_MAX = 200;
