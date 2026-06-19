@@ -56,6 +56,29 @@ describe('renderLaunchAgentPlist', () => {
     ).toThrow(/base64-url/);
   });
 
+  it('refuses a keyFilePath with shell metacharacters (injection guard)', () => {
+    for (const evil of [
+      '/tmp/key;rm -rf $HOME',
+      '/tmp/key$(echo pwned)',
+      '/tmp/key`whoami`',
+      '/tmp/key"quoted"',
+      '/tmp/key\nnewline',
+    ]) {
+      expect(() =>
+        renderLaunchAgentPlist({ keyFilePath: evil, tunnelToken: VALID_TOKEN }),
+      ).toThrow(/launchd path interpolation/);
+    }
+  });
+
+  it('accepts realistic keyFilePaths (the defaults the runbook documents)', () => {
+    expect(() =>
+      renderLaunchAgentPlist({
+        keyFilePath: '/Users/op/.config/opuspopuli/pgsodium_root_key',
+        tunnelToken: VALID_TOKEN,
+      }),
+    ).not.toThrow();
+  });
+
   it('inlines the key file path (read at agent load via cat)', () => {
     const out = renderLaunchAgentPlist({
       keyFilePath: '/some/path/key',

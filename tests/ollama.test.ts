@@ -10,9 +10,11 @@ import {
   checkOllamaHealth,
   DEFAULT_MODELS,
   OLLAMA_URL,
+  PROBE_ALPINE_TAG,
   probeHostDockerInternal,
   pullModel,
   setupModels,
+  startOllamaService,
   warmModel,
 } from '../src/lib/ollama.js';
 
@@ -135,13 +137,14 @@ describe('warmModel', () => {
 });
 
 describe('probeHostDockerInternal', () => {
-  it('runs an alpine probe to host.docker.internal:11434', async () => {
+  it('runs an alpine probe to host.docker.internal:11434 with a pinned tag', async () => {
     execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '{}', stderr: '' });
     const r = await probeHostDockerInternal();
     expect(r.ok).toBe(true);
     const [, args] = execaMock.mock.calls[0] as [string, string[]];
     expect(args[0]).toBe('run');
     expect(args.join(' ')).toContain('host.docker.internal:11434');
+    expect(args).toContain(`alpine:${PROBE_ALPINE_TAG}`);
   });
 
   it('reports the Docker-Desktop-setting fix when the probe fails', async () => {
@@ -149,6 +152,35 @@ describe('probeHostDockerInternal', () => {
     const r = await probeHostDockerInternal();
     expect(r.ok).toBe(false);
     expect(r.reason).toContain('host.docker.internal');
+  });
+});
+
+describe('startOllamaService', () => {
+  it('runs `brew services start ollama` and reports ok on exit 0', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    const r = await startOllamaService();
+    expect(r.ok).toBe(true);
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual(['services', 'start', 'ollama']);
+  });
+
+  it("reports 'brew not on PATH' when brew is missing", async () => {
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+    const r = await startOllamaService();
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('not on PATH');
+  });
+
+  it('surfaces the stderr reason on non-zero exit', async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 1,
+      stdout: '',
+      stderr: 'permission denied',
+    });
+    const r = await startOllamaService();
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('permission denied');
   });
 });
 

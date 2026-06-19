@@ -26,8 +26,11 @@ export interface PackageSpec {
  *  authorization on first launch — Docker Desktop in particular requires
  *  manual click-through after `brew install --cask docker`. The wizard
  *  surfaces that as a follow-up prompt; this list is just what we'd shell
- *  out for. */
-export const STUDIO_PACKAGES: readonly PackageSpec[] = [
+ *  out for.
+ *
+ *  Deep-readonly via `as const` — neither the array nor the individual
+ *  PackageSpec entries can be mutated by accident. */
+export const STUDIO_PACKAGES = [
   { name: 'git', kind: 'formula' },
   { name: 'gh', kind: 'formula' },
   { name: 'pnpm', kind: 'formula' },
@@ -37,7 +40,7 @@ export const STUDIO_PACKAGES: readonly PackageSpec[] = [
   { name: 'ollama', kind: 'formula' },
   { name: 'docker', kind: 'cask' },
   { name: 'tailscale', kind: 'cask' },
-] as const;
+] as const satisfies readonly PackageSpec[];
 
 export interface BrewInfo {
   installed: boolean;

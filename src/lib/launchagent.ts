@@ -23,6 +23,7 @@ import { mkdir, writeFile, chmod, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { homedir } from 'node:os';
 
+import { PGSODIUM_KEY_RE, SAFE_PATH_RE, TUNNEL_TOKEN_RE } from './constants.js';
 import { safeExeca } from './exec.js';
 
 export const LAUNCH_AGENT_LABEL = 'org.opuspopuli.envloader';
@@ -57,7 +58,7 @@ export async function writePgsodiumKeyFile(
   key: string,
   keyFile: string,
 ): Promise<WriteResult> {
-  if (!/^[a-f0-9]{64}$/.test(key)) {
+  if (!PGSODIUM_KEY_RE.test(key)) {
     return {
       ok: false,
       reason: `pgsodium key must be 64 lowercase hex characters (got ${key.length} chars)`,
@@ -93,13 +94,21 @@ export interface PlistInput {
  * downstream sees the same values.
  */
 export function renderLaunchAgentPlist(input: PlistInput): string {
-  if (!/^[a-f0-9-/\w+.=:]+$/i.test(input.tunnelToken)) {
-    // Plist string content rejects unescaped XML special chars (`<`, `>`,
-    // `&`). Cloudflare Tunnel tokens are base64ish — no special chars —
-    // but we reject anything outside that alphabet so a future caller
-    // can't inject an attribute via a crafted token. Throw rather than
-    // silently emit broken XML.
+  if (!TUNNEL_TOKEN_RE.test(input.tunnelToken)) {
+    // JWT-style base64-url alphabet. Anything outside it would either break
+    // the XML string content (`<`, `>`, `&`) or inject shell metacharacters
+    // into the `sh -c` body downstream. Throw rather than silently emit
+    // broken XML or — worse — a working plist with shell injection.
     throw new Error('Tunnel token contains characters outside the expected base64-url set');
+  }
+  if (!SAFE_PATH_RE.test(input.keyFilePath)) {
+    // The keyFilePath gets interpolated into a `sh -c` command run by
+    // launchd at every login. Reject paths with shell metacharacters even
+    // though our own defaultPaths() never produces one — defense in depth
+    // against operator-supplied --repo-dir-adjacent overrides.
+    throw new Error(
+      `keyFilePath ${JSON.stringify(input.keyFilePath)} contains characters not allowed in a launchd path interpolation`,
+    );
   }
   const command =
     `launchctl setenv PGSODIUM_ROOT_KEY "$(cat ${input.keyFilePath})"; ` +
@@ -208,11 +217,12 @@ export async function setupLaunchAgent(input: SetupInput): Promise<SetupReport> 
 }
 
 /**
- * Test seam: tear down a LaunchAgent + key file the wizard previously wrote.
- * Used by integration tests; the bootstrap command doesn't expose it as a
- * subcommand (operators clean up by hand).
+ * Test seam — also useful when an operator wants to wipe a LaunchAgent
+ * outside of `launchctl unload`. Not currently surfaced as a `bootstrap`
+ * subcommand. Exported because integration tests (and the eventual
+ * `bootstrap --uninstall` flag, if we ever add it) need it.
  */
-export async function teardownLaunchAgent(paths: LaunchAgentPaths): Promise<void> {
+export async function _teardownLaunchAgent(paths: LaunchAgentPaths): Promise<void> {
   await safeExeca('launchctl', ['unload', paths.plistFile]);
   await rm(paths.plistFile, { force: true });
   await rm(paths.keyFile, { force: true });

@@ -154,11 +154,21 @@ describe('parseComposePs', () => {
 });
 
 describe('composePs', () => {
-  it('exits cleanly with [] when docker compose ps fails', async () => {
+  it('returns null when docker compose ps fails (distinguishes from empty)', async () => {
     execaMock.mockResolvedValueOnce({
       exitCode: 1,
       stdout: '',
       stderr: 'compose not found',
+    });
+    const snaps = await composePs({ files: ['a.yml'], cwd: '/tmp' });
+    expect(snaps).toBeNull();
+  });
+
+  it('returns [] when ps succeeds but no containers are listed yet', async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: '',
+      stderr: '',
     });
     const snaps = await composePs({ files: ['a.yml'], cwd: '/tmp' });
     expect(snaps).toEqual([]);

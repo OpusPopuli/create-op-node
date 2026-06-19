@@ -177,9 +177,19 @@ function normalize(raw: unknown): ContainerSnapshot {
   return { name, state, health, exitCode };
 }
 
-export async function composePs(opts: ComposeOptions): Promise<ContainerSnapshot[]> {
+/**
+ * `docker compose ps --format json`. Returns:
+ *
+ *   - `null` when the call itself failed (docker missing, compose file wrong,
+ *     non-zero exit). The caller can distinguish a real failure from a
+ *     stack-not-up-yet case.
+ *   - `[]` when the call succeeded but no containers are listed yet (compose
+ *     up still in flight).
+ *   - `ContainerSnapshot[]` populated on success.
+ */
+export async function composePs(opts: ComposeOptions): Promise<ContainerSnapshot[] | null> {
   const res = await safeExeca('docker', composeArgs(opts, ['ps', '--format', 'json']));
-  if (res === null || res.exitCode !== 0) return [];
+  if (res === null || res.exitCode !== 0) return null;
   return parseComposePs(res.stdout);
 }
 
@@ -206,7 +216,7 @@ export type HealthOutcome =
   | { kind: 'timeout'; snapshots: ContainerSnapshot[] };
 
 export interface WaitForHealthyDeps {
-  ps: (opts: ComposeOptions) => Promise<ContainerSnapshot[]>;
+  ps: (opts: ComposeOptions) => Promise<ContainerSnapshot[] | null>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
 }
@@ -233,27 +243,36 @@ export async function waitForHealthy(
   deps: WaitForHealthyDeps = realWaitDeps,
 ): Promise<HealthOutcome> {
   const timeoutMs = options.timeoutMs ?? 5 * 60 * 1000;
-  const pollMs = options.pollMs ?? 5 * 1000;
+  const basePollMs = options.pollMs ?? 5 * 1000;
   const start = deps.now();
   let last: ContainerSnapshot[] = [];
+  let pollCount = 0;
 
   while (deps.now() - start < timeoutMs) {
-    last = await deps.ps(composeOpts);
-    options.onPoll?.(last);
+    pollCount++;
+    const ps = await deps.ps(composeOpts);
+    if (ps !== null) {
+      last = ps;
+      options.onPoll?.(ps);
 
-    if (last.length > 0) {
-      const verdict = assessHealth(last, options.requireHealthy);
-      if (verdict.kind === 'healthy') return { kind: 'healthy', snapshots: last };
-      if (verdict.kind === 'unhealthy') {
-        return {
-          kind: 'unhealthy',
-          snapshots: last,
-          problem: verdict.problem ?? 'unhealthy',
-        };
+      if (ps.length > 0) {
+        const verdict = assessHealth(ps, options.requireHealthy);
+        if (verdict.kind === 'healthy') return { kind: 'healthy', snapshots: ps };
+        if (verdict.kind === 'unhealthy') {
+          return {
+            kind: 'unhealthy',
+            snapshots: ps,
+            problem: verdict.problem ?? 'unhealthy',
+          };
+        }
+        // 'pending' falls through to the sleep + next iteration.
       }
-      // 'pending' falls through to the sleep + next iteration.
     }
-    await deps.sleep(pollMs);
+    // Gentle backoff: 1× the base poll for the first 3 polls (fast feedback
+    // while containers are settling), 2× after that. Caps wasted subprocess
+    // startup on long timeouts without slowing down the typical case.
+    const interval = pollCount < 3 ? basePollMs : basePollMs * 2;
+    await deps.sleep(interval);
   }
   return { kind: 'timeout', snapshots: last };
 }

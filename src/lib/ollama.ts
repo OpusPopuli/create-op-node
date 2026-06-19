@@ -20,6 +20,11 @@ import { safeExeca } from './exec.js';
 export const OLLAMA_URL = 'http://localhost:11434';
 export const DEFAULT_MODELS = ['qwen3.5:9b', 'nomic-embed-text'] as const;
 
+/** Pinned alpine tag for the host.docker.internal probe. Latest is fine in
+ *  practice (the image only runs `curl`) but pinning keeps the probe
+ *  reproducible across operator machines. Bump when alpine cuts a major. */
+export const PROBE_ALPINE_TAG = '3.20';
+
 export interface OllamaHealth {
   /** True when the daemon answered the `/api/tags` probe with 200. */
   reachable: boolean;
@@ -32,6 +37,24 @@ export interface OllamaHealth {
  * that proves both reachability AND that the server is past initial bring-up
  * (a bare TCP-accept-but-not-ready Ollama returns 404 here, not 200).
  */
+/**
+ * Try to start the Ollama service via `brew services start ollama`.
+ * Idempotent — brew services no-ops on an already-started service. Returns
+ * `ok: false` only if brew itself is missing or the start command errored
+ * for a non-trivial reason.
+ */
+export async function startOllamaService(): Promise<{ ok: boolean; reason?: string }> {
+  const res = await safeExeca('brew', ['services', 'start', 'ollama']);
+  if (res === null) return { ok: false, reason: '`brew` not on PATH' };
+  if (res.exitCode !== 0) {
+    return {
+      ok: false,
+      reason: `brew services start ollama failed (${res.exitCode ?? 'signal'}): ${res.stderr || res.stdout}`,
+    };
+  }
+  return { ok: true };
+}
+
 export async function checkOllamaHealth(url: string = OLLAMA_URL): Promise<OllamaHealth> {
   try {
     const res = await fetch(`${url}/api/tags`);
@@ -113,7 +136,7 @@ export async function probeHostDockerInternal(): Promise<{ ok: boolean; reason?:
   const res = await safeExeca('docker', [
     'run',
     '--rm',
-    'alpine',
+    `alpine:${PROBE_ALPINE_TAG}`,
     'sh',
     '-c',
     'apk add --no-cache curl >/dev/null 2>&1 && curl -fsS http://host.docker.internal:11434/api/tags',
