@@ -1,0 +1,637 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/OpusPopuli/opuspopuli-regions/schema/region-plugin.schema.json",
+  "title": "Region Plugin File",
+  "description": "A declarative region configuration file for the Opus Populi civic data platform. A handful of string-valued fields (ApiSourceConfig.queryParams, BulkDownloadConfig.filters) support ${variableName} placeholders that the consumer resolves at runtime — see those field descriptions for the supported variable list.",
+  "type": "object",
+  "required": ["name", "displayName", "description", "version", "config"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Region identifier (e.g., 'california')"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable region name (e.g., 'California')"
+    },
+    "description": {
+      "type": "string",
+      "description": "Brief description of this region's data coverage"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of this config file"
+    },
+    "config": {
+      "$ref": "#/definitions/DeclarativeRegionConfig"
+    }
+  },
+  "definitions": {
+    "DeclarativeRegionConfig": {
+      "type": "object",
+      "required": ["regionId", "regionName", "description", "timezone", "dataSources"],
+      "additionalProperties": false,
+      "properties": {
+        "regionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Region identifier (e.g., 'california')"
+        },
+        "regionName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable region name (e.g., 'California')"
+        },
+        "description": {
+          "type": "string",
+          "description": "Region description"
+        },
+        "timezone": {
+          "type": "string",
+          "description": "IANA timezone (e.g., 'America/Los_Angeles')"
+        },
+        "stateCode": {
+          "type": "string",
+          "pattern": "^[A-Z]{2}$",
+          "description": "Two-letter US state code (e.g., 'CA')"
+        },
+        "parentRegionId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Region identifier of this region's parent in the geographic hierarchy. Top-level regions (states, federal) omit this field. Counties set parentRegionId to their state's regionId (e.g., 'california'); cities will set it to their county's regionId. Presence of this field is the canonical signal that a region is a sub-region; the consumer loader uses it to build the region tree."
+        },
+        "fipsCode": {
+          "type": "string",
+          "pattern": "^\\d{2,7}$",
+          "description": "Census FIPS code: 2 digits for states (e.g., '06' for CA), 5 digits for counties (e.g., '06037' for Los Angeles County — state FIPS + county FIPS), 7 digits for places/cities. This is the canonical join key against the consumer's PostGIS counties/places tables used today for user-to-district placement."
+        },
+        "dataSources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/DataSourceConfig"
+          },
+          "description": "Data sources to scrape"
+        },
+        "rateLimit": {
+          "type": "object",
+          "properties": {
+            "requestsPerSecond": { "type": "number", "minimum": 0 },
+            "burstSize": { "type": "integer", "minimum": 1 }
+          },
+          "required": ["requestsPerSecond", "burstSize"],
+          "additionalProperties": false,
+          "description": "Rate limiting defaults"
+        },
+        "cacheTtlMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cache TTL in milliseconds"
+        },
+        "requestTimeoutMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Request timeout in milliseconds"
+        },
+        "normalizeExternalIdDistrict": {
+          "type": "boolean",
+          "description": "Strip leading zeros from representative externalId trailing segment (e.g. ca-assembly-01 → ca-assembly-1). Opt-in; default false. Only needed for regions whose LLM manifests emit zero-padded district numbers."
+        },
+        "bioNoisePatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex pattern strings (case-insensitive) matched against scraped representative bio text. Bios matching any pattern are treated as nav junk and discarded. Defaults to no filtering if omitted."
+        },
+        "boundarySources": {
+          "$ref": "#/definitions/BoundarySourcesConfig",
+          "description": "Civic-boundary geometry sources used to populate the consumer's `jurisdictions` table (counties, cities, state legislative districts, school districts, special districts). The consumer's BoundaryLoaderService reads this block, dispatches to TIGER and ArcGIS FeatureServer fetchers, and upserts on fipsCode/ocdId. Omit when a region has no public boundary data — addresses still resolve via Census Geocoder string fields, but PostGIS point-in-polygon queries return no matches. See opuspopuli#804."
+        }
+      }
+    },
+    "BoundarySourcesConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ocdIdPrefix"],
+      "description": "Per-region declarative recipe for loading civic boundaries. Pure config — no per-region code lives in the consumer.",
+      "properties": {
+        "ocdIdPrefix": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Open Civic Data ID prefix for this region, e.g. 'ocd-division/country:us/state:ca'. All jurisdiction OCD-IDs are composed as `${ocdIdPrefix}${TigerLayerConfig.ocdIdSegment}` (or the Geoportal equivalent)."
+        },
+        "tigerLayers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/TigerLayerConfig" },
+          "description": "US Census TIGER/Line layers to ingest as jurisdictions. Each entry maps one ArcGIS MapServer layer to a JurisdictionType. Omit the field entirely when the region has no TIGER coverage — do not pass an empty array (the schema rejects it to prevent silent typos that strip the configured layers)."
+        },
+        "geoportalLayers": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/GeoportalLayerConfig" },
+          "description": "Region-specific ArcGIS FeatureServer endpoints — typically state geoportals serving boundary data Census TIGER doesn't cover (fire districts, water districts, transit districts, etc.). Omit when unused — empty arrays are rejected (see tigerLayers note)."
+        }
+      }
+    },
+    "JurisdictionTypeEnum": {
+      "type": "string",
+      "enum": ["COUNTY", "CITY", "STATE_SENATE_DISTRICT", "STATE_ASSEMBLY_DISTRICT", "CONGRESSIONAL_DISTRICT", "SCHOOL_DISTRICT_UNIFIED", "SCHOOL_DISTRICT_ELEMENTARY", "SCHOOL_DISTRICT_HIGH", "COMMUNITY_COLLEGE_DISTRICT", "WATER_DISTRICT", "FIRE_DISTRICT", "TRANSIT_DISTRICT", "SPECIAL_DISTRICT"],
+      "description": "Maps each feature to a JurisdictionType row in the consumer's `jurisdictions` table. Single source of truth — TigerLayerConfig and GeoportalLayerConfig both reference this so a new jurisdiction type can't be added to one without the other."
+    },
+    "JurisdictionLevelEnum": {
+      "type": "string",
+      "enum": ["FEDERAL", "STATE", "COUNTY", "MUNICIPAL", "DISTRICT"],
+      "description": "Hierarchy level for the resulting jurisdiction rows. Single source of truth — referenced from TigerLayerConfig and GeoportalLayerConfig."
+    },
+    "TigerLayerConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["layer", "outFields", "jurisdictionType", "level", "nameField"],
+      "description": "One TIGER/Line layer mapped to a JurisdictionType. The consumer hits `https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/${layer}/query` with GeoJSON output. Supported placeholders inside `where`, `ocdIdSegment`, `nameTemplate`: ${fipsCode} (this region's fipsCode), ${stateCode} (two-letter code), ${name} (the layer's nameField value for a given feature), ${district} (the districtField value).",
+      "properties": {
+        "layer": {
+          "type": "string",
+          "minLength": 1,
+          "description": "TIGER MapServer service+layer path, e.g. 'State_County/MapServer/1', 'Legislative/MapServer/1' (state senate), 'Legislative/MapServer/2' (state assembly), 'School/MapServer/0' (unified school districts)."
+        },
+        "where": {
+          "type": "string",
+          "description": "ESRI WHERE clause filtering features. Defaults to `STATE='${fipsCode}'` when omitted. Use `${fipsCode}` / `${stateCode}` placeholders."
+        },
+        "outFields": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Comma-separated TIGER attribute fields to return, e.g. 'GEOID,NAME' or 'GEOID,SLDUST'."
+        },
+        "jurisdictionType": {
+          "$ref": "#/definitions/JurisdictionTypeEnum"
+        },
+        "level": {
+          "$ref": "#/definitions/JurisdictionLevelEnum"
+        },
+        "nameField": {
+          "type": "string",
+          "minLength": 1,
+          "description": "TIGER attribute key whose value becomes the substitution for `${name}` placeholders. Typically 'NAME' for human-readable layers, or a district code field like 'SLDUST'/'SLDLST' for legislative layers."
+        },
+        "fipsField": {
+          "type": "string",
+          "description": "TIGER attribute key holding the canonical fips_code for an upsert. Defaults to 'GEOID'."
+        },
+        "fipsPrefix": {
+          "type": "string",
+          "description": "Optional prefix prepended to the fipsField value before persisting as fips_code. Use when the raw GEOID would collide with another layer's GEOID (e.g. state senate GEOID overlapping county GEOID format). Example: 'sldu-' for state senate, 'sldl-' for state assembly."
+        },
+        "districtField": {
+          "type": "string",
+          "description": "TIGER attribute key supplying the ${district} placeholder. Required when ocdIdSegment or nameTemplate contains ${district}."
+        },
+        "ocdIdSegment": {
+          "type": "string",
+          "description": "Segment appended to `boundarySources.ocdIdPrefix` to form the full OCD-ID, e.g. '/county:${name}', '/sldu:${district}'. Supports ${name} and ${district} placeholders. Inside `${name}` substitutions the consumer normalizes whitespace to underscores and lowercases the value for OCD-ID compatibility — so a NAME of 'Alameda County' produces 'alameda_county' in the OCD-ID. Omit when this layer's rows don't carry an OCD-ID."
+        },
+        "nameTemplate": {
+          "type": "string",
+          "description": "Template for the persisted jurisdiction name (NOT for OCD-ID composition). Supports ${name}, ${district}, ${stateCode}. The ${name} value is substituted verbatim (case + whitespace preserved). Defaults to ${name} when omitted."
+        }
+      }
+    },
+    "GeoportalLayerConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "outFields", "jurisdictionType", "level", "nameField"],
+      "description": "One arbitrary ArcGIS FeatureServer layer for jurisdictions Census TIGER doesn't cover. Same placeholder rules as TigerLayerConfig.",
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^https://",
+          "description": "Full ArcGIS FeatureServer layer URL ending in /FeatureServer/<n>. Must be HTTPS — the consumer rejects other schemes. The consumer paginates via resultOffset/resultRecordCount."
+        },
+        "where": {
+          "type": "string",
+          "description": "ESRI WHERE clause. Defaults to '1=1'."
+        },
+        "outFields": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Comma-separated FeatureServer attribute fields to return."
+        },
+        "jurisdictionType": {
+          "$ref": "#/definitions/JurisdictionTypeEnum"
+        },
+        "level": {
+          "$ref": "#/definitions/JurisdictionLevelEnum"
+        },
+        "nameField": {
+          "type": "string",
+          "minLength": 1,
+          "description": "FeatureServer attribute key supplying the human-readable name and the ${name} placeholder."
+        },
+        "fipsField": {
+          "type": "string",
+          "description": "FeatureServer attribute key used as fips_code. No default — geoportal attribute names vary widely (no GEOID convention). Omit when the layer has no FIPS analog; the upsert then matches on ocdId only."
+        },
+        "fipsPrefix": {
+          "type": "string",
+          "description": "Optional prefix prepended to fipsField, mirroring TigerLayerConfig.fipsPrefix."
+        },
+        "ocdIdSegment": {
+          "type": "string",
+          "description": "Appended to boundarySources.ocdIdPrefix. Supports ${name} placeholder. Same OCD-ID normalization as TigerLayerConfig.ocdIdSegment — whitespace to underscores, lowercased."
+        },
+        "nameTemplate": {
+          "type": "string",
+          "description": "Template for persisted name (NOT for OCD-ID). ${name} substituted verbatim. Defaults to ${name}."
+        }
+      }
+    },
+    "DataSourceConfig": {
+      "type": "object",
+      "required": ["url", "dataType", "contentGoal"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL to fetch data from"
+        },
+        "dataType": {
+          "type": "string",
+          "enum": ["propositions", "meetings", "representatives", "campaign_finance", "lobbying", "civics", "bills"],
+          "description": "What type of content this source provides. Daily journals / meeting minutes go under 'meetings' with sourceType=pdf_archive — the consumer partitions by sourceType internally. 'civics' marks a source of region governmental structure, process, and vocabulary; the civics-ingest handler scrapes it and uses the private prompt-service to extract structured shape (chambers, measure types, lifecycle stages with status patterns, glossary) plus a plain-language rewrite for laypeople. Verbatim source text and the AI rewrite are stored together — never one without the other. 'bills' marks a source of individual legislative bills (AB, SB, ACA, SCA, etc.) scraped from an official legislature website; the bills-ingest handler BFS-crawls from the seed URL and extracts one Bill record per detail page. See opuspopuli#686."
+        },
+        "contentGoal": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Natural language description of what to find/extract"
+        },
+        "category": {
+          "type": "string",
+          "description": "Sub-category for grouping (e.g., 'Assembly', 'Senate')"
+        },
+        "hints": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hints to help the AI find the right content"
+        },
+        "rateLimitOverride": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Override rate limit for this specific source"
+        },
+        "syncCadence": {
+          "type": "string",
+          "pattern": "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+$",
+          "description": "5-field cron expression (minute hour dom month dow) controlling how often this source is synced. The worker applies a deterministic per-source minute offset at registration time to spread load across gov hosts — the minute field you specify is the base, not the exact fire time. Omit to inherit the global daily fallback. Common patterns: '0 2 * * *' daily at 2 AM, '0 2 * * 0' weekly on Sunday, '0 * * * *' hourly."
+        },
+        "statusScanCadence": {
+          "type": "string",
+          "pattern": "^[^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+$",
+          "description": "5-field cron expression for a periodic full status-page sweep of all bills (dataType='bills' only). Runs forceStatusRecheck=true — bypasses the needsStatusRecheck flag and the sourcePublishedAt skip to catch governor actions and off-session changes the journal linker can't see. Per-source minute offset is applied like syncCadence. Typical: '0 2 * * 0' weekly Sunday 2 AM. See #689."
+        },
+        "sourceType": {
+          "type": "string",
+          "enum": ["html_scrape", "bulk_download", "api", "pdf", "pdf_archive"],
+          "description": "Source type determines the extraction strategy (default: html_scrape). 'pdf_archive' selects the listing-walk + per-PDF-extract pipeline: the URL is a paginated listing page that links to a series of dated PDF documents, each fetched and parsed (text only at V1) into one Minutes record."
+        },
+        "bulk": {
+          "$ref": "#/definitions/BulkDownloadConfig"
+        },
+        "api": {
+          "$ref": "#/definitions/ApiSourceConfig"
+        },
+        "pdf": {
+          "$ref": "#/definitions/PdfSourceConfig"
+        },
+        "pdfArchive": {
+          "$ref": "#/definitions/PdfArchiveConfig"
+        },
+        "billDiscovery": {
+          "$ref": "#/definitions/BillDiscoveryConfig"
+        },
+        "detailFields": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string" },
+              { "$ref": "#/definitions/StructuredFieldConfig" }
+            ]
+          },
+          "description": "Detail page extraction plan: maps domain field names to CSS selectors (string) or structured array configs (object). Supports dot notation and '|attr:name' suffix."
+        },
+        "staticManifest": {
+          "type": "object",
+          "required": ["containerSelector", "itemSelector", "fieldMappings"],
+          "additionalProperties": false,
+          "description": "Explicit extraction selectors that bypass AI structural analysis entirely. Use when the page structure is known and stable, or when the local LLM consistently generates wrong selectors.",
+          "properties": {
+            "containerSelector": { "type": "string" },
+            "itemSelector": { "type": "string" },
+            "fieldMappings": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["fieldName", "selector", "extractionMethod", "required"],
+                "additionalProperties": true,
+                "properties": {
+                  "fieldName": { "type": "string" },
+                  "selector": { "type": "string" },
+                  "extractionMethod": { "type": "string" },
+                  "attribute": { "type": "string" },
+                  "regexPattern": { "type": "string" },
+                  "regexGroup": { "type": "integer" },
+                  "transform": { "type": "object" },
+                  "required": { "type": "boolean" },
+                  "defaultValue": { "type": "string" },
+                  "scope": {
+                    "type": "string",
+                    "enum": ["item", "container"]
+                  },
+                  "children": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "oneOf": [
+                        { "type": "string" },
+                        { "$ref": "#/definitions/ChildFieldConfig" }
+                      ]
+                    },
+                    "description": "For extractionMethod='structured': child field selectors. Each value is a string shortcut or a ChildFieldConfig object."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "crawlDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Crawl depth from the seed URL for sync handlers that walk a site's link graph (currently civics — see opuspopuli#669). 0 (default) = no crawl, fetch only the seed. N = N hops from seed. Crawls are scoped to same host + same path prefix as the seed, HTML responses only."
+        },
+        "crawlMaxPages": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Cap on total pages a crawler will visit per sync run regardless of crawlDepth. Defaults to 20. Each page costs one LLM call, so this bounds runtime + token spend."
+        },
+        "llmMaxTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Per-source override for the LLM maxTokens generation cap. Useful when a source needs a much longer or shorter output than its siblings (e.g., a 150-term glossary needs ~32000; a short bio prompt finishes well under 2000). Overrides the sync handler's hardcoded default."
+        },
+        "llmRequestTimeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Per-source override for the LLM provider request timeout (milliseconds). Useful when a single source legitimately runs much longer than the platform-wide default — civics-glossary extraction on qwen3.5:9b can take 15-20 min, while bio gen finishes in 2 min on the same hardware. Overrides the provider's constructor-configured default."
+        }
+      }
+    },
+    "BulkDownloadConfig": {
+      "type": "object",
+      "required": ["format", "columnMappings"],
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["tsv", "csv", "zip_tsv", "zip_csv"],
+          "description": "File format"
+        },
+        "filePattern": {
+          "type": "string",
+          "description": "For ZIP archives: path/glob of target file(s) within the ZIP"
+        },
+        "delimiter": {
+          "type": "string",
+          "description": "Column delimiter override"
+        },
+        "headerLines": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of header lines to skip"
+        },
+        "headers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Explicit column headers for files without a header row (e.g., FEC bulk files)"
+        },
+        "columnMappings": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Column name mappings: source column name -> domain field name"
+        },
+        "filters": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Filter expressions applied during parse. Values support ${variableName} placeholders that the consumer resolves at runtime from the active local region. Supported variables: ${stateCode} (the 2-letter US state code of the active local region, e.g. 'CA'). Placeholders must appear verbatim. Example: '\"STATE\": \"${stateCode}\"' on an FEC bulk filter."
+        },
+        "batchSize": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Records per batch for streaming processing (default: 10000)"
+        }
+      }
+    },
+    "ApiSourceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["GET", "POST"],
+          "description": "HTTP method (default: GET)"
+        },
+        "apiKeyEnvVar": {
+          "type": "string",
+          "description": "Environment variable name containing the API key"
+        },
+        "apiKeyHeader": {
+          "type": "string",
+          "description": "Header name for the API key"
+        },
+        "pagination": {
+          "$ref": "#/definitions/ApiPaginationConfig"
+        },
+        "resultsPath": {
+          "type": "string",
+          "description": "JSON path to the items array in the response"
+        },
+        "queryParams": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Query parameters appended to every request. Values support ${variableName} placeholders that the consumer resolves at runtime from the active local region. Supported variables: ${stateCode} (the 2-letter US state code of the active local region, e.g. 'CA'). Placeholders must appear verbatim — no escaping, no nested expressions. Example: '\"contributor_state\": \"${stateCode}\"'."
+        },
+        "fieldMappings": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Field name mappings: API response field -> domain model field (e.g., committee_id -> committeeId)"
+        }
+      }
+    },
+    "ApiPaginationConfig": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["offset", "cursor", "page"],
+          "description": "Pagination strategy type"
+        },
+        "pageParam": {
+          "type": "string",
+          "description": "Query parameter name for page/offset"
+        },
+        "limitParam": {
+          "type": "string",
+          "description": "Query parameter name for page size"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of items per page"
+        }
+      }
+    },
+    "PdfSourceConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "skipPages": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Skip first N pages (e.g., skip cover page)"
+        },
+        "maxPages": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum pages to process (default: all)"
+        },
+        "followPdfLink": {
+          "type": "boolean",
+          "description": "If true, treats the URL as a gateway page and follows the first PDF link"
+        }
+      }
+    },
+    "StructuredFieldConfig": {
+      "type": "object",
+      "required": ["selector", "children"],
+      "additionalProperties": false,
+      "properties": {
+        "selector": {
+          "type": "string",
+          "description": "CSS selector matching each repeating item (e.g., '.office-card')"
+        },
+        "children": {
+          "type": "object",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "string" },
+              { "$ref": "#/definitions/ChildFieldConfig" }
+            ]
+          },
+          "description": "Child field selectors relative to each item. Each entry is either a string shortcut (e.g. 'h3', 'a|attr:href') or a richer ChildFieldConfig object with extractionMethod / regex / transform."
+        },
+        "multiple": {
+          "type": "boolean",
+          "description": "If true, extracts all matches as an array (default: true)"
+        }
+      }
+    },
+    "ChildFieldConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-child extraction config for structured extraction. Object form supports the same shape as the top-level FieldMapping (selector + extractionMethod + attribute / regex / transform), minus fieldName/required/defaultValue which don't apply at child scope.",
+      "properties": {
+        "selector": {
+          "type": "string",
+          "description": "CSS selector relative to the matched parent item. Optional for regex on full element text."
+        },
+        "extractionMethod": {
+          "type": "string",
+          "description": "How to extract: 'text', 'attribute', 'regex', 'html', etc."
+        },
+        "attribute": {
+          "type": "string",
+          "description": "For extractionMethod='attribute': which attribute to read (e.g. 'href', 'src')."
+        },
+        "regexPattern": {
+          "type": "string",
+          "description": "For extractionMethod='regex': the pattern."
+        },
+        "regexGroup": {
+          "type": "integer",
+          "description": "For extractionMethod='regex': capture group (default: 1)."
+        },
+        "transform": {
+          "type": "object",
+          "description": "Optional transform applied after extraction (e.g. trim, regex_replace, url_resolve)."
+        }
+      }
+    },
+    "BillDiscoveryConfig": {
+      "type": "object",
+      "required": ["navLinkPattern", "statusPageTemplate", "votesPageTemplate"],
+      "additionalProperties": false,
+      "description": "Declarative bill discovery for legislature sites that list per-bill nav-hub links on a search results page (e.g. CA leginfo). The bills-ingest handler fetches the seed once, extracts bill IDs with navLinkPattern, and constructs status + votes URLs from the templates — bypassing generic BFS which would exhaust crawlMaxPages with nav-hub links before reaching detail pages.",
+      "properties": {
+        "navLinkPattern": {
+          "type": "string",
+          "description": "Regex string applied to the decoded seed-page HTML to extract bill IDs. Capture group 1 must be the bill ID. Example for CA leginfo: \"/faces/billNavClient\\\\.xhtml\\\\?bill_id=([^\\\"&\\\\s]+)\""
+        },
+        "statusPageTemplate": {
+          "type": "string",
+          "description": "URL path + query template for the bill status page. Use {bill_id} as the placeholder; the service prepends the seed origin. Example: \"/faces/billStatusClient.xhtml?bill_id={bill_id}\""
+        },
+        "votesPageTemplate": {
+          "type": "string",
+          "description": "URL path + query template for the bill votes page. Same substitution as statusPageTemplate. Example: \"/faces/billVotesClient.xhtml?bill_id={bill_id}\""
+        },
+        "textPageTemplate": {
+          "type": "string",
+          "description": "Optional URL path + query template for the bill text page. When set, the sync fetches this page before LLM extraction to check the 'Date Published' timestamp and skip unchanged bills. Example: \"/faces/billTextClient.xhtml?bill_id={bill_id}\""
+        }
+      }
+    },
+    "PdfArchiveConfig": {
+      "type": "object",
+      "required": ["linkSelector"],
+      "additionalProperties": false,
+      "description": "Listing-walk configuration for sourceType=pdf_archive. The page at `url` is treated as a paginated index of dated PDF documents; each linked PDF is fetched, pdf-parsed, and stored as a Minutes record. Cold-start work is bounded by maxNew (default 10) so first-run sync doesn't ingest years of historical archives. Per-document parsing (text → action records) is a downstream backend pass — this block carries no parser DSL.",
+      "properties": {
+        "linkSelector": {
+          "type": "string",
+          "description": "CSS selector for PDF anchor elements on the listing page. Each match yields a candidate document."
+        },
+        "datePattern": {
+          "type": "string",
+          "description": "Regex applied to the link href (falling back to anchor text) to extract the document's date. Capture groups depend on dateFormat."
+        },
+        "dateFormat": {
+          "type": "string",
+          "description": "Date format hint for interpreting datePattern's captures. Supported: 'MMDDYY' (3 captures: month, day, two-digit year — assumed 20YY), 'YYYY-MM-DD' (3 captures), 'MM/DD/YYYY' (3 captures)."
+        },
+        "revisionPattern": {
+          "type": "string",
+          "description": "Regex against the link href whose match indicates this URL is a revision. Capture group 1 is the revision sequence number (1, 2, ...). Unmatched URLs are revisionSeq=0."
+        },
+        "maxPages": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of listing pages to walk during one sync cycle. Default: 10."
+        },
+        "maxNew": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Hard cap on number of new documents ingested per sync cycle. Cold-start protection. Default: 10."
+        },
+        "paginationParam": {
+          "type": "string",
+          "description": "Query parameter name used to paginate the listing page (e.g., 'page'). Omitted when the listing isn't paginated."
+        }
+      }
+    }
+  }
+}
