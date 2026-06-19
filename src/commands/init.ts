@@ -1,11 +1,11 @@
 import { Command, Option } from 'commander';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
-import { execa, ExecaError } from 'execa';
 
 import { probeCloudflareToken } from '../lib/cloudflare.js';
 import { probeTfcToken } from '../lib/tfc.js';
 import { detectOp, readSecretFromOp, saveSecretToOp } from '../lib/onepassword.js';
+import { safeExeca } from '../lib/exec.js';
 import {
   commitFile,
   createBranch,
@@ -14,7 +14,8 @@ import {
   setRepoSecret,
 } from '../lib/github.js';
 import { generatePgsodiumRootKey, renderProdTfvars } from '../lib/secrets.js';
-import { findWorkspace, fetchOutput, getRunStatus } from '../lib/tfc.js';
+import { findWorkspace } from '../lib/tfc.js';
+import { waitForApply } from '../lib/polling.js';
 
 interface InitOptions {
   domain?: string;
@@ -45,19 +46,12 @@ function unwrap<T>(value: T | symbol): T {
 
 /** Pull the GitHub token from `gh auth token` if the CLI is signed in. Lets
  *  operators who use `gh` skip pasting their PAT. Returns null cleanly when
- *  `gh` isn't installed at all — `reject: false` alone wouldn't catch
- *  ENOENT, so we wrap the spawn in try/catch. */
+ *  `gh` isn't installed or isn't signed in. */
 async function ghTokenFromCli(): Promise<string | null> {
-  try {
-    const r = await execa('gh', ['auth', 'token'], { reject: false });
-    if (r.exitCode !== 0) return null;
-    const token = r.stdout.trim();
-    return token.length > 0 ? token : null;
-  } catch (err) {
-    const e = err as ExecaError & NodeJS.ErrnoException;
-    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return null;
-    throw err;
-  }
+  const r = await safeExeca('gh', ['auth', 'token']);
+  if (r === null || r.exitCode !== 0) return null;
+  const token = r.stdout.trim();
+  return token.length > 0 ? token : null;
 }
 
 export const initCommand = new Command('init')
@@ -135,7 +129,11 @@ export const initCommand = new Command('init')
     const newRepoFull = `${owner}/${newRepoName}`;
 
     // ---- Cloudflare token ----------------------------------------------
-    const cfToken = await collectSecret(opts.cfToken, 'Cloudflare Account API token (input hidden)');
+    const cfToken = await collectSecret(
+      opts.cfToken,
+      'Cloudflare Account API token (input hidden)',
+      'cloudflare',
+    );
     const cfAccount = await collectId(opts.cfAccount, 'Cloudflare account ID');
     const cfZone = await collectId(opts.cfZone, `Cloudflare zone ID for ${domain}`);
 
@@ -155,7 +153,11 @@ export const initCommand = new Command('init')
     cfSpin.stop(pc.green('✓ Cloudflare token valid, 5 scopes present.'));
 
     // ---- Terraform Cloud token -----------------------------------------
-    const tfToken = await collectSecret(opts.tfToken, 'Terraform Cloud user/team API token');
+    const tfToken = await collectSecret(
+      opts.tfToken,
+      'Terraform Cloud user/team API token',
+      'tfc',
+    );
     const tfOrg = opts.tfOrg
       ? opts.tfOrg
       : unwrap(
@@ -195,7 +197,11 @@ export const initCommand = new Command('init')
       }
     }
     if (!ghToken) {
-      ghToken = await collectSecret(undefined, 'GitHub Personal Access Token (repo scope)');
+      ghToken = await collectSecret(
+        undefined,
+        'GitHub Personal Access Token (repo scope)',
+        'github',
+      );
     }
 
     // ---- 1Password detection --------------------------------------------
@@ -248,17 +254,17 @@ export const initCommand = new Command('init')
       repoSpin.stop(pc.green(`✓ Created ${created.fullName}`));
     } catch (err) {
       // The most likely re-run failure mode: the repo already exists from a
-      // previous partial run. The GitHub API returns 422 with a
-      // "name already exists on this account" error. Let the operator opt to
-      // continue with the existing repo (skip-create idempotency) rather than
-      // forcing them to delete the half-set-up repo first.
-      const message = (err as Error).message ?? '';
-      const isAlreadyExists =
-        /already exists/i.test(message) ||
-        (typeof err === 'object' && err !== null && 'status' in err && (err as { status: number }).status === 422);
+      // previous partial run. The GitHub API responds with HTTP 422 for that
+      // case — status code is the API contract, message text isn't. Don't
+      // regex on the message; it can change.
+      const status =
+        typeof err === 'object' && err !== null && 'status' in err
+          ? (err as { status: number }).status
+          : 0;
+      const message = (err as Error).message ?? 'unknown error';
 
-      if (!isAlreadyExists) {
-        repoSpin.stop(pc.red(`✗ Couldn't create repo: ${message || 'unknown error'}`));
+      if (status !== 422) {
+        repoSpin.stop(pc.red(`✗ Couldn't create repo: ${message}`));
         p.cancel('Fix the issue and re-run.');
         process.exit(1);
       }
@@ -297,23 +303,37 @@ export const initCommand = new Command('init')
     ];
     const secSpin = p.spinner();
     secSpin.start(`Seeding ${secrets.length} repo secrets…`);
+    const seeded: string[] = [];
     for (const s of secrets) {
       const r = await setRepoSecret({ repo: newRepoFull, name: s.name, value: s.value });
       if (!r.written) {
         secSpin.stop(pc.red(`✗ Failed to set ${s.name}: ${r.reason ?? 'unknown'}`));
+        const remaining = secrets
+          .slice(secrets.findIndex((x) => x.name === s.name))
+          .map((x) => x.name);
         p.cancel(
-          `Make sure \`gh\` is installed and signed in (\`gh auth login\`). Repo created at https://github.com/${newRepoFull} — re-run with --skip-create to retry secrets.`,
+          [
+            seeded.length > 0
+              ? `Already seeded on ${newRepoFull}: ${seeded.join(', ')}.`
+              : `Nothing seeded yet on ${newRepoFull}.`,
+            `Still pending: ${remaining.join(', ')}.`,
+            '',
+            `Make sure \`gh\` is installed and signed in (\`gh auth login\`).`,
+            `Re-run with --use-existing-repo to retry (GitHub will overwrite the already-set secrets idempotently).`,
+          ].join('\n'),
         );
         process.exit(1);
       }
+      seeded.push(s.name);
     }
     secSpin.stop(pc.green(`✓ Seeded ${secrets.length} secrets on ${newRepoFull}`));
 
     // ---- Execute: branch + tfvars + PR ---------------------------------
-    // Branch name is timestamped so re-runs don't collide with a leftover
-    // branch from a previous partial run. Keeps the PR list clean and avoids
-    // a separate "branch already exists" idempotency case.
-    const branch = `init/region-${region}-${Math.floor(Date.now() / 1000)}`;
+    // Branch name is timestamped (ISO compact, UTC) so re-runs don't collide
+    // with a leftover branch from a previous partial run. Keeps the PR list
+    // readable and avoids a separate "branch already exists" idempotency
+    // case.
+    const branch = `init/region-${region}-${isoStampUtc(new Date())}`;
     const setupSpin = p.spinner();
     setupSpin.start(`Writing prod.tfvars on branch ${branch}…`);
     try {
@@ -378,7 +398,7 @@ export const initCommand = new Command('init')
     //   2. Op installed + signed in + no key OR --overwrite → generate fresh,
     //      save to 1P.
     //   3. Op unavailable → generate fresh, print for manual paste.
-    const keyTitle = `op-region-${region}-pgsodium-root-key`;
+    const keyTitle = `opuspopuli-${region}-pgsodium-root-key`;
     const vaultArg = opts.vault ? { vault: opts.vault } : {};
 
     if (op.installed && op.signedIn) {
@@ -411,12 +431,12 @@ export const initCommand = new Command('init')
             'Secret',
           );
         } else {
-          printKeyForManualSave(fresh, keyTitle, r.reason);
+          await printKeyForManualSave(fresh, keyTitle, r.reason);
         }
       }
     } else {
       const fresh = generatePgsodiumRootKey();
-      printKeyForManualSave(fresh, keyTitle);
+      await printKeyForManualSave(fresh, keyTitle);
     }
 
     // ---- Pause for operator to merge PR --------------------------------
@@ -476,7 +496,7 @@ export const initCommand = new Command('init')
     }
 
     // ---- Save Tunnel token ----------------------------------------------
-    const tunnelTitle = `op-region-${region}-tunnel-token`;
+    const tunnelTitle = `opuspopuli-${region}-tunnel-token`;
     if (op.installed && op.signedIn) {
       const r = await saveSecretToOp({
         title: tunnelTitle,
@@ -490,10 +510,10 @@ export const initCommand = new Command('init')
           'Secret',
         );
       } else {
-        printKeyForManualSave(tunnelToken, tunnelTitle, r.reason);
+        await printKeyForManualSave(tunnelToken, tunnelTitle, r.reason);
       }
     } else {
-      printKeyForManualSave(tunnelToken, tunnelTitle);
+      await printKeyForManualSave(tunnelToken, tunnelTitle);
     }
 
     // ---- Done -----------------------------------------------------------
@@ -508,12 +528,31 @@ export const initCommand = new Command('init')
 // Helpers
 // ----------------------------------------------------------------------------
 
-async function collectSecret(preset: string | undefined, message: string): Promise<string> {
+/** Source-specific minimums — every real-world token from these issuers is
+ *  longer than the floor, so a short input is a typo or paste error. */
+const MIN_TOKEN_LENGTH: Record<SecretKind, number> = {
+  cloudflare: 40,
+  tfc: 40,
+  github: 40,
+  generic: 20,
+};
+
+type SecretKind = 'cloudflare' | 'tfc' | 'github' | 'generic';
+
+async function collectSecret(
+  preset: string | undefined,
+  message: string,
+  kind: SecretKind = 'generic',
+): Promise<string> {
   if (preset) return preset;
+  const min = MIN_TOKEN_LENGTH[kind];
   const v = unwrap(
     await p.password({
       message,
-      validate: (v) => (v && v.length >= 20 ? undefined : 'That looks too short'),
+      validate: (v) =>
+        v && v.length >= min
+          ? undefined
+          : `That looks too short — expected at least ${min} characters for a ${kind} token`,
     }),
   );
   return v;
@@ -532,7 +571,11 @@ async function collectId(preset: string | undefined, message: string): Promise<s
   return v;
 }
 
-function printKeyForManualSave(value: string, title: string, reason?: string): void {
+async function printKeyForManualSave(
+  value: string,
+  title: string,
+  reason?: string,
+): Promise<void> {
   p.note(
     [
       reason ? `${pc.red('✗')} ${reason}` : '',
@@ -540,11 +583,35 @@ function printKeyForManualSave(value: string, title: string, reason?: string): v
       '',
       pc.yellow(value),
       '',
-      pc.dim('It will not be shown again. Press Enter when stashed.'),
+      pc.dim('It will not be shown again.'),
     ]
       .filter((line) => line.length > 0)
       .join('\n'),
     'Manual save',
+  );
+  // Actually wait for the operator to confirm they've stashed it — previously
+  // the doc said "Press Enter when stashed" but nothing paused. Operators
+  // following the prompt literally would have hit a paradox.
+  unwrap(
+    await p.confirm({
+      message: 'Value stashed in 1Password?',
+      initialValue: true,
+    }),
+  );
+}
+
+/** Compact ISO timestamp suitable for a git branch name: 20260618-184530Z.
+ *  UTC so re-runs across timezones sort coherently. */
+function isoStampUtc(d: Date): string {
+  const pad = (n: number, w = 2) => n.toString().padStart(w, '0');
+  return (
+    `${d.getUTCFullYear()}` +
+    `${pad(d.getUTCMonth() + 1)}` +
+    `${pad(d.getUTCDate())}` +
+    `-` +
+    `${pad(d.getUTCHours())}` +
+    `${pad(d.getUTCMinutes())}` +
+    `${pad(d.getUTCSeconds())}Z`
   );
 }
 
@@ -555,56 +622,37 @@ interface WaitInput {
   runId: string | null;
 }
 
-/**
- * Poll TFC for the workspace's current run until it terminates, then pull the
- * tunnel_token output. ~10 minute max wall-clock by default; the wizard will
- * tell the operator to retry if the apply hasn't finished.
- */
+/** Thin command-side adapter for the polling lib — renders Clack spinner
+ *  state from the lib's progress callback + maps the discriminated outcome
+ *  to a single nullable result the command keeps using. */
 async function waitForApplyAndFetchTunnelToken(input: WaitInput): Promise<string | null> {
-  const auth = { token: input.token, organization: input.organization };
-  const start = Date.now();
-  const timeoutMs = 10 * 60 * 1000;
-  const pollMs = 10 * 1000;
-
   const spin = p.spinner();
   spin.start('Waiting for terraform apply to finish (polling every 10s)…');
 
-  // If we don't have a run id yet (first merge), poll the workspace to discover
-  // one. The cloudflare-infra workflow may take a few seconds to kick off TFC.
-  let runId = input.runId;
-  while (!runId && Date.now() - start < 60_000) {
-    await sleep(pollMs);
-    const ws = await findWorkspace({
-      token: input.token,
-      organization: input.organization,
-      tags: ['opuspopuli', 'cloudflare'],
-    });
-    runId = ws?.currentRunId ?? null;
-  }
-  if (!runId) {
-    spin.stop(pc.red('✗ No run started in the workspace yet.'));
-    return null;
-  }
+  const outcome = await waitForApply({
+    token: input.token,
+    organization: input.organization,
+    workspaceId: input.workspaceId,
+    runId: input.runId,
+    workspaceTags: ['opuspopuli', 'cloudflare'],
+    outputName: 'tunnel_token',
+  });
 
-  while (Date.now() - start < timeoutMs) {
-    const r = await getRunStatus(auth, runId);
-    if (r?.finished) {
-      if (!r.succeeded) {
-        spin.stop(pc.red(`✗ Run finished with status "${r.status}".`));
-        return null;
-      }
-      spin.message('Apply succeeded — fetching tunnel_token output…');
-      const out = await fetchOutput(auth, input.workspaceId, 'tunnel_token');
+  switch (outcome.kind) {
+    case 'success':
       spin.stop(pc.green('✓ Tunnel token retrieved.'));
-      return out;
-    }
-    await sleep(pollMs);
+      return outcome.value;
+    case 'output-missing':
+      spin.stop(pc.red('✗ Apply succeeded but tunnel_token output is missing.'));
+      return null;
+    case 'no-run-started':
+      spin.stop(pc.red('✗ No run started in the workspace yet.'));
+      return null;
+    case 'run-failed':
+      spin.stop(pc.red(`✗ Run finished with status "${outcome.status}".`));
+      return null;
+    case 'timeout':
+      spin.stop(pc.red('✗ Timed out after 10 minutes.'));
+      return null;
   }
-
-  spin.stop(pc.red('✗ Timed out after 10 minutes.'));
-  return null;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((res) => setTimeout(res, ms));
 }

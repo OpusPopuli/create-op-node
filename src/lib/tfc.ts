@@ -15,6 +15,17 @@
 
 const TFC_API = 'https://app.terraform.io/api/v2';
 
+/** TFC organization slug rules: alphanumerics, underscores, hyphens; the API
+ *  doesn't formally publish a max but slugs over 40 chars are rejected in
+ *  practice. We validate before any URL interpolation to neutralise typos
+ *  that would otherwise hit unintended endpoints (e.g. `?` or `/` in the
+ *  slug bouncing us into a different route). */
+const ORG_SLUG_RE = /^[A-Za-z0-9_-]{1,40}$/;
+
+export function isValidTfcOrgSlug(slug: string): boolean {
+  return ORG_SLUG_RE.test(slug);
+}
+
 interface TfcAuth {
   token: string;
   organization: string;
@@ -63,6 +74,13 @@ export interface TfcProbeResult {
 export async function probeTfcToken(input: TfcAuth): Promise<TfcProbeResult> {
   const issues: string[] = [];
 
+  if (!isValidTfcOrgSlug(input.organization)) {
+    issues.push(
+      `Organization "${input.organization}" isn't a valid TFC slug (letters, digits, hyphens, underscores; up to 40 chars).`,
+    );
+    return { ok: false, issues };
+  }
+
   const account = await getJson(input.token, '/account/details');
   if (account.status !== 200) {
     issues.push(
@@ -72,7 +90,10 @@ export async function probeTfcToken(input: TfcAuth): Promise<TfcProbeResult> {
   }
   const userName = extractUserName(account.body);
 
-  const org = await getJson(input.token, `/organizations/${input.organization}`);
+  const org = await getJson(
+    input.token,
+    `/organizations/${encodeURIComponent(input.organization)}`,
+  );
   if (org.status === 404) {
     issues.push(
       `TFC organization "${input.organization}" not found, or this token lacks access. Check the org slug at https://app.terraform.io.`,
@@ -127,10 +148,11 @@ export interface TfcWorkspace {
  * org can host many workspaces with the same tag set).
  */
 export async function findWorkspace(input: FindWorkspaceInput): Promise<TfcWorkspace | null> {
+  if (!isValidTfcOrgSlug(input.organization)) return null;
   const tagFilter = encodeURIComponent(input.tags.join(','));
   const res = await getJson(
     input.token,
-    `/organizations/${input.organization}/workspaces?filter[tagged]=${tagFilter}&page[size]=100`,
+    `/organizations/${encodeURIComponent(input.organization)}/workspaces?filter[tagged]=${tagFilter}&page[size]=100`,
   );
   if (res.status !== 200) return null;
 
@@ -190,7 +212,9 @@ export async function getRunStatus(
   auth: TfcAuth,
   runId: string,
 ): Promise<TfcRunStatus | null> {
-  const res = await getJson(auth.token, `/runs/${runId}`);
+  // runId comes from a previous TFC response — trusted shape — but
+  // encodeURIComponent is cheap defense if it's ever sourced from elsewhere.
+  const res = await getJson(auth.token, `/runs/${encodeURIComponent(runId)}`);
   if (res.status !== 200) return null;
 
   const body = res.body as {
@@ -209,9 +233,15 @@ export async function getRunStatus(
 }
 
 /**
- * Pull the `tunnel_token` (or any named output) from a workspace's current
- * state version. Returns `null` when the workspace hasn't reached an applied
- * state yet — caller should poll the matching run first.
+ * Pull a named output value from a workspace's current state version.
+ * Returns `null` when:
+ *
+ *   - the workspace, token, or HTTP call fails (any non-200 status)
+ *   - the named output isn't present in the response
+ *   - the output value isn't a string (e.g. the operator changed the type)
+ *
+ * Caller should poll the matching run for `applied` status first; an
+ * in-flight workspace returns a 404 / 425 here.
  */
 export async function fetchOutput(
   auth: TfcAuth,
@@ -220,7 +250,7 @@ export async function fetchOutput(
 ): Promise<string | null> {
   const res = await getJson(
     auth.token,
-    `/workspaces/${workspaceId}/current-state-version-outputs`,
+    `/workspaces/${encodeURIComponent(workspaceId)}/current-state-version-outputs`,
   );
   if (res.status !== 200) return null;
 

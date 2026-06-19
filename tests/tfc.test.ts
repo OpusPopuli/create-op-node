@@ -4,6 +4,7 @@ import {
   fetchOutput,
   findWorkspace,
   getRunStatus,
+  isValidTfcOrgSlug,
   probeTfcToken,
 } from '../src/lib/tfc.js';
 
@@ -28,7 +29,38 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('isValidTfcOrgSlug', () => {
+  it('accepts conventional org slugs', () => {
+    expect(isValidTfcOrgSlug('op-region-ca')).toBe(true);
+    expect(isValidTfcOrgSlug('OpusPopuli')).toBe(true);
+    expect(isValidTfcOrgSlug('org_with_underscores')).toBe(true);
+    expect(isValidTfcOrgSlug('a')).toBe(true);
+  });
+
+  it('rejects slugs that would break URL interpolation', () => {
+    expect(isValidTfcOrgSlug('org/with/slash')).toBe(false);
+    expect(isValidTfcOrgSlug('org?with=query')).toBe(false);
+    expect(isValidTfcOrgSlug('org with space')).toBe(false);
+    expect(isValidTfcOrgSlug('../traversal')).toBe(false);
+    expect(isValidTfcOrgSlug('')).toBe(false);
+  });
+
+  it('rejects slugs over 40 chars', () => {
+    expect(isValidTfcOrgSlug('a'.repeat(40))).toBe(true);
+    expect(isValidTfcOrgSlug('a'.repeat(41))).toBe(false);
+  });
+});
+
 describe('probeTfcToken', () => {
+  it('rejects an invalid org slug before hitting the API', async () => {
+    const fn = installFetch(() => ({ status: 200, body: {} }));
+    const r = await probeTfcToken({ token: TOKEN, organization: 'bad/slug' });
+    expect(r.ok).toBe(false);
+    expect(r.issues[0]).toMatch(/isn't a valid TFC slug/);
+    // No HTTP call should have happened.
+    expect(fn).not.toHaveBeenCalled();
+  });
+
   it('returns ok=true when token + org both resolve', async () => {
     installFetch((path) => {
       if (path.endsWith('/account/details')) {

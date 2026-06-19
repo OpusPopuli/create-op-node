@@ -133,6 +133,15 @@ describe('setRepoSecret', () => {
     expect(r.written).toBe(false);
     expect(r.reason).toContain('not authenticated');
   });
+
+  it("returns 'gh not installed' cleanly on ENOENT (B2 — supports the --gh-token escape hatch when gh isn't on PATH)", async () => {
+    const err = Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+
+    const r = await setRepoSecret({ repo: 'a/b', name: 'X', value: 'v' });
+    expect(r.written).toBe(false);
+    expect(r.reason).toContain('not installed');
+  });
 });
 
 describe('commitFile', () => {

@@ -17,29 +17,7 @@
  * read helpers go alongside the write helpers.
  */
 
-import { execa, ExecaError } from 'execa';
-
-/** Wraps execa in a way that "command not found" doesn't throw — neither
- *  `reject: false` nor a normal catch suppresses ENOENT from the spawn step.
- *  Returns `null` when the binary isn't on PATH at all. */
-async function safeExeca(
-  cmd: string,
-  args: string[],
-  options?: { input?: string },
-): Promise<{ exitCode: number; stdout: string; stderr: string } | null> {
-  try {
-    const result = await execa(cmd, args, { reject: false, ...options });
-    return {
-      exitCode: result.exitCode ?? 0,
-      stdout: result.stdout,
-      stderr: result.stderr,
-    };
-  } catch (err) {
-    const e = err as ExecaError & NodeJS.ErrnoException;
-    if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return null;
-    throw err;
-  }
-}
+import { safeExeca } from './exec.js';
 
 export interface OpAvailability {
   /** `op` CLI is on PATH. */
@@ -108,8 +86,12 @@ export interface SaveSecretResult {
  * so the caller can decide whether to overwrite (use `overwrite: true`) or
  * surface the duplicate to the operator.
  *
- * Stays silent about the contents — `op` only sees the value through argv
- * once and never logs it.
+ * **Argv exposure caveat:** `op item create/edit` accepts the value via the
+ * `notesPlain=<value>` argv assignment — there's no `--stdin` form. The
+ * value is briefly visible to any process that scans `/proc/<pid>/cmdline`
+ * (Linux) or runs `ps -E` while the child is alive. This is the standard
+ * 1Password CLI pattern; if a future `op` release adds a stdin form, swap
+ * to it here. Don't add `console.log` of `input.value` anywhere.
  */
 export async function saveSecretToOp(input: SaveSecretInput): Promise<SaveSecretResult> {
   const vaultArg = input.vault ? ['--vault', input.vault] : [];

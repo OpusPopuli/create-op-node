@@ -16,8 +16,9 @@
  * clear error rather than a cryptic auth failure inside a downstream call.
  */
 
-import { execa } from 'execa';
 import { Octokit } from '@octokit/rest';
+
+import { safeExeca } from './exec.js';
 
 export interface GhAuth {
   /** A GitHub Personal Access Token (Classic or Fine-grained) with at least
@@ -25,6 +26,10 @@ export interface GhAuth {
   token: string;
 }
 
+// One Octokit per token — fine for a one-shot CLI. NOT safe to wire into a
+// long-running service that issues calls under different identities; the
+// memoization will hand out the wrong client. If that ever happens, key the
+// cache by (token, …other-dimensions) or drop the memoization.
 let _client: Octokit | null = null;
 let _clientToken: string | null = null;
 
@@ -126,19 +131,26 @@ export interface SetSecretResult {
 /**
  * Set a single repository Actions secret via `gh secret set`. Value is piped
  * on stdin — never on argv — so it doesn't land in process listing or any
- * shell history.
+ * shell history. Returns `written: false` with a clear reason when `gh`
+ * isn't installed (B2 — required for the `--gh-token` escape hatch where the
+ * operator supplies a PAT and may not have `gh` at all).
  */
 export async function setRepoSecret(input: SetRepoSecretInput): Promise<SetSecretResult> {
-  const res = await execa(
+  const res = await safeExeca(
     'gh',
     ['secret', 'set', input.name, '--repo', input.repo, '--body', '-'],
-    { input: input.value, reject: false },
+    { input: input.value },
   );
-
+  if (res === null) {
+    return {
+      written: false,
+      reason: '`gh` CLI not installed — install from https://cli.github.com or seed secrets manually',
+    };
+  }
   if (res.exitCode !== 0) {
     return {
       written: false,
-      reason: `gh secret set failed (${res.exitCode}): ${res.stderr || res.stdout}`,
+      reason: `gh secret set failed (${res.exitCode ?? 'signal'}): ${res.stderr || res.stdout}`,
     };
   }
   return { written: true };
