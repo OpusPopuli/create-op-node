@@ -73,11 +73,15 @@ The CLI itself never holds any credentials beyond the scope of a single command 
 
 ## Status
 
-**v0.0.1 — scaffold only.** The 3 subcommands exist with type-safe argument parsing and the Cloudflare 5-scope probe. The interactive prompts collect inputs but stop before doing destructive work. Iterating in the open against the OpusPopuli/opuspopuli-node template as it stabilizes.
+**`init` — fully wired.** The full Phase 1 bootstrap runs end to end: prompts → Cloudflare 5-scope probe → Terraform Cloud verify → GitHub template clone → 5 repo secrets seeded → branch + prod.tfvars committed → PR opened → pgsodium key generated → (after operator merges PR) Terraform apply polled → Tunnel token retrieved + saved to 1Password.
+
+**`bootstrap`, `verify` — scaffold stubs.** Type-safe argument parsing only; print roadmap-style messages and exit.
+
+**`region`** — fully wired. Scaffolds schema-valid region configs for the `OpusPopuli/opuspopuli-regions` repo.
 
 ### Roadmap
 
-- **v0.1.0** — `init` fully wired: GitHub template clone, secret seeding, prod.tfvars generation, pgsodium key flow, first PR, Tunnel token retrieval.
+- **v0.1.0** ✅ `init` end-to-end + `region` scaffolder.
 - **v0.2.0** — `bootstrap` fully wired: macOS config, brew installs, Docker Desktop setup, Tailscale, repo clone, LaunchAgent, ghcr.io login, Ollama, `docker compose up`.
 - **v0.3.0** — `verify` fully wired: TLS + GraphQL + cosign signature checks.
 - **v0.4.0** — Resend domain + DKIM automation, drift detection, automated backup-restore drill.
