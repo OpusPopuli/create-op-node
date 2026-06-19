@@ -1,159 +1,527 @@
 import { Command, Option } from 'commander';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
+import { execa } from 'execa';
 
 import { probeCloudflareToken } from '../lib/cloudflare.js';
+import { probeTfcToken } from '../lib/tfc.js';
+import { detectOp, saveSecretToOp } from '../lib/onepassword.js';
+import {
+  commitFile,
+  createBranch,
+  createRepoFromTemplate,
+  openPullRequest,
+  setRepoSecret,
+} from '../lib/github.js';
+import { generatePgsodiumRootKey, renderProdTfvars } from '../lib/secrets.js';
+import { findWorkspace, fetchOutput, getRunStatus } from '../lib/tfc.js';
 
 interface InitOptions {
   domain?: string;
   region?: string;
+  owner?: string;
+  template?: string;
+  project?: string;
   cfToken?: string;
   cfAccount?: string;
   cfZone?: string;
+  tfToken?: string;
+  tfOrg?: string;
+  ghToken?: string;
+  vault?: string;
+  skipWait?: boolean;
   yes?: boolean;
+}
+
+function unwrap<T>(value: T | symbol): T {
+  if (p.isCancel(value)) {
+    p.cancel('Cancelled.');
+    process.exit(0);
+  }
+  return value;
+}
+
+/** Pull the GitHub token from `gh auth token` if the CLI is signed in. Lets
+ *  operators who use `gh` skip pasting their PAT. */
+async function ghTokenFromCli(): Promise<string | null> {
+  const r = await execa('gh', ['auth', 'token'], { reject: false });
+  if (r.exitCode !== 0) return null;
+  const token = r.stdout.trim();
+  return token.length > 0 ? token : null;
 }
 
 export const initCommand = new Command('init')
   .description(
-    'Stand up the node repo + Cloudflare infrastructure for a new region. ' +
-      'Run this on your laptop.',
+    'Stand up the node repo + Cloudflare infrastructure for a new region. Run this on your laptop.',
   )
+  .addOption(new Option('--domain <domain>', 'Your registered domain (e.g. example.org)'))
+  .addOption(new Option('--region <slug>', 'Short label for your region (e.g. us-ca)'))
+  .addOption(new Option('--owner <owner>', 'GitHub owner for the new node repo').default('OpusPopuli'))
   .addOption(
-    new Option('--domain <domain>', 'Your registered domain (e.g. example.org)'),
+    new Option('--template <owner/repo>', 'Template repo to clone from').default(
+      'OpusPopuli/opuspopuli-node',
+    ),
   )
-  .addOption(
-    new Option('--region <slug>', 'Short label for your region (e.g. us-ca)'),
-  )
-  .addOption(
-    new Option('--cf-token <token>', 'Cloudflare Account API token').env('CF_TOKEN'),
-  )
-  .addOption(
-    new Option('--cf-account <id>', 'Cloudflare account ID').env('CF_ACCOUNT'),
-  )
-  .addOption(
-    new Option('--cf-zone <id>', 'Cloudflare zone ID for your domain').env('CF_ZONE'),
-  )
-  .addOption(new Option('-y, --yes', 'Skip confirmation prompts').default(false))
+  .addOption(new Option('--project <name>', 'tfvars project prefix').default('opuspopuli'))
+  .addOption(new Option('--cf-token <token>', 'Cloudflare Account API token').env('CF_TOKEN'))
+  .addOption(new Option('--cf-account <id>', 'Cloudflare account ID').env('CF_ACCOUNT'))
+  .addOption(new Option('--cf-zone <id>', 'Cloudflare zone ID for your domain').env('CF_ZONE'))
+  .addOption(new Option('--tf-token <token>', 'Terraform Cloud user/team token').env('TF_API_TOKEN'))
+  .addOption(new Option('--tf-org <org>', 'Terraform Cloud organization').env('TF_CLOUD_ORGANIZATION'))
+  .addOption(new Option('--gh-token <token>', 'GitHub Personal Access Token (else gh CLI)').env('GH_TOKEN'))
+  .addOption(new Option('--vault <vault>', '1Password vault for secrets').default('Private'))
+  .addOption(new Option('--skip-wait', "Don't poll for Terraform apply; exit after PR open").default(false))
+  .addOption(new Option('-y, --yes', 'Skip the final confirmation').default(false))
   .action(async (opts: InitOptions) => {
-    p.intro(pc.bgCyan(pc.black(' create-op-node ')));
+    p.intro(pc.bgCyan(pc.black(' create-op-node init ')));
 
     p.note(
       [
         'This walks you from a sealed Mac Studio + a Cloudflare account to a',
         'live federation node serving traffic at api.<your-domain>.',
         '',
-        pc.dim('Phase 1: laptop side — Cloudflare, GitHub, Terraform Cloud.'),
+        pc.dim('Phase 1: laptop side (now) — Cloudflare, GitHub, Terraform Cloud.'),
         pc.dim('Phase 2: Studio side — run `create-op-node bootstrap` on the Mac.'),
       ].join('\n'),
       'Welcome',
     );
 
-    // ---- Step 1: collect / confirm region values ----
-    const values = await p.group(
-      {
-        domain: () =>
-          opts.domain
-            ? Promise.resolve(opts.domain)
-            : p.text({
-                message: 'Domain registered in Cloudflare?',
-                placeholder: 'example.org',
-                validate: (v) =>
-                  !v ? 'Required' : v.includes('.') ? undefined : 'Looks like that domain is missing a TLD',
-              }),
-        region: () =>
-          opts.region
-            ? Promise.resolve(opts.region)
-            : p.text({
-                message: 'Short region label (used as a prefix in 1Password + R2)?',
-                placeholder: 'us-ca',
-                validate: (v) => (/^[a-z0-9-]{2,32}$/.test(v ?? '') ? undefined : 'lowercase letters, digits, hyphens; 2–32 chars'),
-              }),
-      },
-      {
-        onCancel: () => {
-          p.cancel('Cancelled.');
-          process.exit(0);
-        },
-      },
-    );
+    // ---- Region values --------------------------------------------------
+    const region = opts.region
+      ? opts.region
+      : unwrap(
+          await p.text({
+            message: 'Short region label (used as a prefix in 1Password + R2)?',
+            placeholder: 'us-ca',
+            validate: (v) =>
+              /^[a-z0-9-]{2,32}$/.test(v ?? '') ? undefined : 'lowercase letters, digits, hyphens; 2–32 chars',
+          }),
+        );
 
-    // ---- Step 2: Cloudflare token verification ----
-    const tokenSpinner = p.spinner();
+    const domain = opts.domain
+      ? opts.domain
+      : unwrap(
+          await p.text({
+            message: 'Domain registered in Cloudflare?',
+            placeholder: 'example.org',
+            validate: (v) => (!v ? 'Required' : v.includes('.') ? undefined : 'Missing a TLD?'),
+          }),
+        );
 
-    let cfToken = opts.cfToken;
-    if (!cfToken) {
-      const v = await p.password({
-        message: 'Paste your Cloudflare Account API token (input hidden)',
-        validate: (v) => (v && v.length >= 30 ? undefined : 'Token looks too short'),
-      });
-      if (p.isCancel(v)) {
-        p.cancel('Cancelled.');
-        process.exit(0);
-      }
-      cfToken = v;
-    }
+    const owner = opts.owner ?? 'OpusPopuli';
+    const newRepoName = `opuspopuli-node-${region}`;
+    const newRepoFull = `${owner}/${newRepoName}`;
 
-    let cfAccount = opts.cfAccount;
-    if (!cfAccount) {
-      const v = await p.text({
-        message: 'Cloudflare account ID',
-        placeholder: '0000000000000000000000000000000',
-        validate: (v) => (/^[a-f0-9]{32}$/.test(v ?? '') ? undefined : 'Expected 32 hex characters'),
-      });
-      if (p.isCancel(v)) {
-        p.cancel('Cancelled.');
-        process.exit(0);
-      }
-      cfAccount = v;
-    }
+    // ---- Cloudflare token ----------------------------------------------
+    const cfToken = await collectSecret(opts.cfToken, 'Cloudflare Account API token (input hidden)');
+    const cfAccount = await collectId(opts.cfAccount, 'Cloudflare account ID');
+    const cfZone = await collectId(opts.cfZone, `Cloudflare zone ID for ${domain}`);
 
-    let cfZone = opts.cfZone;
-    if (!cfZone) {
-      const v = await p.text({
-        message: `Cloudflare zone ID for ${values.domain}`,
-        placeholder: '0000000000000000000000000000000',
-        validate: (v) => (/^[a-f0-9]{32}$/.test(v ?? '') ? undefined : 'Expected 32 hex characters'),
-      });
-      if (p.isCancel(v)) {
-        p.cancel('Cancelled.');
-        process.exit(0);
-      }
-      cfZone = v;
-    }
-
-    tokenSpinner.start('Verifying token + scopes against the Cloudflare API…');
-    const probe = await probeCloudflareToken({
+    const cfSpin = p.spinner();
+    cfSpin.start('Verifying Cloudflare token + 5 scopes…');
+    const cfProbe = await probeCloudflareToken({
       token: cfToken,
       accountId: cfAccount,
       zoneId: cfZone,
     });
-    if (probe.ok) {
-      tokenSpinner.stop(pc.green('✓ Token valid, all 5 scopes present.'));
-    } else {
-      tokenSpinner.stop(pc.red('✗ Token check failed.'));
-      for (const issue of probe.issues) {
-        console.error(`  - ${issue}`);
-      }
+    if (!cfProbe.ok) {
+      cfSpin.stop(pc.red('✗ Cloudflare token check failed.'));
+      for (const issue of cfProbe.issues) console.error(`  - ${issue}`);
       p.cancel('Fix the token in the Cloudflare dashboard, then re-run.');
       process.exit(1);
     }
+    cfSpin.stop(pc.green('✓ Cloudflare token valid, 5 scopes present.'));
 
-    // ---- Step 3: stub — the rest comes in v0.0.2 ----
-    p.note(
-      [
-        pc.yellow('Stopping here in v0.0.1. Coming next:'),
-        '',
-        '  • Validate Terraform Cloud token',
-        '  • `gh repo create --template OpusPopuli/opuspopuli-node`',
-        '  • Seed 5 GitHub Secrets via Octokit',
-        '  • Write environments/prod.tfvars from your answers',
-        '  • Generate pgsodium master key + stash in 1Password (via `op` if available)',
-        '  • Open the first PR; wait for `terraform apply` to complete',
-        '  • Retrieve Tunnel token from TF Cloud outputs',
-        '  • Print next steps for `create-op-node bootstrap` on the Mac Studio',
-      ].join('\n'),
-      'Roadmap',
+    // ---- Terraform Cloud token -----------------------------------------
+    const tfToken = await collectSecret(opts.tfToken, 'Terraform Cloud user/team API token');
+    const tfOrg = opts.tfOrg
+      ? opts.tfOrg
+      : unwrap(
+          await p.text({
+            message: 'Terraform Cloud organization name?',
+            placeholder: 'op-region-ca',
+          }),
+        );
+
+    const tfSpin = p.spinner();
+    tfSpin.start('Verifying Terraform Cloud token + organization…');
+    const tfProbe = await probeTfcToken({ token: tfToken, organization: tfOrg });
+    if (!tfProbe.ok) {
+      tfSpin.stop(pc.red('✗ Terraform Cloud check failed.'));
+      for (const issue of tfProbe.issues) console.error(`  - ${issue}`);
+      p.cancel('Fix the token / org, then re-run.');
+      process.exit(1);
+    }
+    tfSpin.stop(
+      pc.green(
+        `✓ TFC token valid${tfProbe.userName ? ` (as ${tfProbe.userName})` : ''}, org "${tfOrg}" reachable.`,
+      ),
     );
 
-    p.outro(pc.cyan(`Ready for the next session. Your region: opuspopuli-node-${values.region}`));
+    // ---- GitHub auth ---------------------------------------------------
+    let ghToken = opts.ghToken;
+    if (!ghToken) {
+      const fromCli = await ghTokenFromCli();
+      if (fromCli) {
+        const useCli = unwrap(
+          await p.confirm({
+            message: 'Found a signed-in `gh` CLI — use its token?',
+            initialValue: true,
+          }),
+        );
+        if (useCli) ghToken = fromCli;
+      }
+    }
+    if (!ghToken) {
+      ghToken = await collectSecret(undefined, 'GitHub Personal Access Token (repo scope)');
+    }
+
+    // ---- 1Password detection --------------------------------------------
+    const op = await detectOp();
+    const opNote = op.installed
+      ? op.signedIn
+        ? `✓ 1Password CLI signed in${op.email ? ` (${op.email})` : ''} — pgsodium key + Tunnel token will be saved automatically.`
+        : `⚠ 1Password CLI installed but not signed in. Run \`op signin\` in another shell, or you'll be prompted to paste secrets.`
+      : `⚠ 1Password CLI not installed. Secrets will be printed for you to paste into 1Password by hand.`;
+    p.note(opNote, '1Password');
+
+    // ---- Plan summary + confirm ----------------------------------------
+    p.note(
+      [
+        `Region label:        ${pc.cyan(region)}`,
+        `Domain:              ${pc.cyan(domain)}`,
+        `New node repo:       ${pc.cyan(newRepoFull)}`,
+        `Template:            ${pc.dim(opts.template ?? 'OpusPopuli/opuspopuli-node')}`,
+        `TFC organization:    ${pc.cyan(tfOrg)}`,
+        ``,
+        `Will create the repo, seed 5 secrets, write prod.tfvars on a branch,`,
+        `open a PR, generate a fresh pgsodium key, and (after you merge) wait`,
+        `for terraform apply to finish and retrieve the Tunnel token.`,
+      ].join('\n'),
+      'Plan',
+    );
+
+    if (!opts.yes) {
+      const go = unwrap(
+        await p.confirm({ message: 'Proceed?', initialValue: true }),
+      );
+      if (!go) {
+        p.cancel('Cancelled.');
+        process.exit(0);
+      }
+    }
+
+    // ---- Execute: create repo ------------------------------------------
+    const repoSpin = p.spinner();
+    repoSpin.start(`Creating ${newRepoFull} from ${opts.template}…`);
+    let created;
+    try {
+      created = await createRepoFromTemplate({
+        token: ghToken,
+        template: opts.template ?? 'OpusPopuli/opuspopuli-node',
+        owner,
+        name: newRepoName,
+        description: `Opus Populi node deployment for ${region}`,
+      });
+    } catch (err) {
+      repoSpin.stop(pc.red(`✗ Couldn't create repo: ${(err as Error).message}`));
+      p.cancel('Fix the issue and re-run. If the repo already exists, delete it or rename.');
+      process.exit(1);
+    }
+    repoSpin.stop(pc.green(`✓ Created ${created.fullName}`));
+
+    // ---- Execute: seed 5 secrets ---------------------------------------
+    const secrets: Array<{ name: string; value: string }> = [
+      { name: 'CLOUDFLARE_API_TOKEN', value: cfToken },
+      { name: 'CLOUDFLARE_ACCOUNT_ID', value: cfAccount },
+      { name: 'CLOUDFLARE_ZONE_ID', value: cfZone },
+      { name: 'TF_API_TOKEN', value: tfToken },
+      { name: 'TF_CLOUD_ORGANIZATION', value: tfOrg },
+    ];
+    const secSpin = p.spinner();
+    secSpin.start(`Seeding ${secrets.length} repo secrets…`);
+    for (const s of secrets) {
+      const r = await setRepoSecret({ repo: newRepoFull, name: s.name, value: s.value });
+      if (!r.written) {
+        secSpin.stop(pc.red(`✗ Failed to set ${s.name}: ${r.reason ?? 'unknown'}`));
+        p.cancel(
+          `Make sure \`gh\` is installed and signed in (\`gh auth login\`). Repo created at https://github.com/${newRepoFull} — re-run with --skip-create to retry secrets.`,
+        );
+        process.exit(1);
+      }
+    }
+    secSpin.stop(pc.green(`✓ Seeded ${secrets.length} secrets on ${newRepoFull}`));
+
+    // ---- Execute: branch + tfvars + PR ---------------------------------
+    const branch = `init/region-${region}`;
+    const setupSpin = p.spinner();
+    setupSpin.start(`Writing prod.tfvars on branch ${branch}…`);
+    try {
+      await createBranch({
+        token: ghToken,
+        repo: newRepoFull,
+        branch,
+        fromBranch: created.defaultBranch,
+      });
+      const tfvars = renderProdTfvars({
+        project: opts.project ?? 'opuspopuli',
+        domain,
+      });
+      await commitFile({
+        token: ghToken,
+        repo: newRepoFull,
+        branch,
+        path: 'infra/cloudflare/environments/prod.tfvars',
+        content: tfvars,
+        message: `init: prod.tfvars for ${region}`,
+      });
+    } catch (err) {
+      setupSpin.stop(pc.red(`✗ Couldn't write tfvars: ${(err as Error).message}`));
+      p.cancel('The repo exists but the branch / commit failed. Open it on GitHub and inspect.');
+      process.exit(1);
+    }
+    setupSpin.stop(pc.green('✓ Wrote prod.tfvars'));
+
+    const prSpin = p.spinner();
+    prSpin.start('Opening pull request…');
+    let pr;
+    try {
+      pr = await openPullRequest({
+        token: ghToken,
+        repo: newRepoFull,
+        head: branch,
+        base: created.defaultBranch,
+        title: `init: bring up region ${region}`,
+        body: [
+          `Initial region deployment for **${region}** (${domain}).`,
+          '',
+          'Adds `infra/cloudflare/environments/prod.tfvars`. Merging this PR triggers',
+          '`cloudflare-infra.yml` which runs `terraform apply` against the',
+          `\`${tfOrg}\` Terraform Cloud organization, provisioning the Cloudflare`,
+          'Tunnel, DNS records, R2 buckets, and Pages project.',
+          '',
+          `Generated by \`create-op-node init\`.`,
+        ].join('\n'),
+      });
+    } catch (err) {
+      prSpin.stop(pc.red(`✗ Couldn't open PR: ${(err as Error).message}`));
+      p.cancel('Branch + tfvars are committed; open the PR by hand on GitHub.');
+      process.exit(1);
+    }
+    prSpin.stop(pc.green(`✓ Opened PR #${pr.number}`));
+
+    // ---- Generate + save pgsodium key ----------------------------------
+    const keyTitle = `op-region-${region}-pgsodium-root-key`;
+    const pgsodiumKey = generatePgsodiumRootKey();
+    if (op.installed && op.signedIn) {
+      const r = await saveSecretToOp({
+        title: keyTitle,
+        value: pgsodiumKey,
+        ...(opts.vault ? { vault: opts.vault } : {}),
+      });
+      if (r.written) {
+        p.note(
+          `${pc.green('✓')} pgsodium master key saved to 1Password as ${pc.cyan(keyTitle)}.`,
+          'Secret',
+        );
+      } else if (r.alreadyExisted) {
+        p.note(
+          `${pc.yellow('!')} 1Password already has an item titled ${pc.cyan(keyTitle)}. Leaving it untouched — make sure it's the right key. If not, delete it and re-run, or pass --overwrite (TODO).`,
+          'Secret',
+        );
+      } else {
+        printKeyForManualSave(pgsodiumKey, keyTitle, r.reason);
+      }
+    } else {
+      printKeyForManualSave(pgsodiumKey, keyTitle);
+    }
+
+    // ---- Pause for operator to merge PR --------------------------------
+    if (opts.skipWait) {
+      p.outro(
+        pc.cyan(
+          `Review + merge ${pr.htmlUrl} when ready. Re-run with no --skip-wait or run \`npx create-op-node verify\` afterwards.`,
+        ),
+      );
+      return;
+    }
+
+    p.note(
+      [
+        `Open the PR: ${pc.cyan(pr.htmlUrl)}`,
+        '',
+        'Review the `terraform plan` comment, then merge to main.',
+        'The workflow then runs `terraform apply` against Terraform Cloud.',
+      ].join('\n'),
+      'Next step: review + merge',
+    );
+    const merged = unwrap(
+      await p.confirm({ message: 'PR merged?', initialValue: false }),
+    );
+    if (!merged) {
+      p.outro(
+        pc.cyan(`No worries — re-run \`create-op-node init --skip-wait\` later to skip this step, or finish manually.`),
+      );
+      return;
+    }
+
+    // ---- Poll TFC for apply completion ---------------------------------
+    const ws = await findWorkspace({
+      token: tfToken,
+      organization: tfOrg,
+      tags: ['opuspopuli', 'cloudflare'],
+    });
+    if (!ws) {
+      p.cancel(
+        `Couldn't find a TFC workspace tagged opuspopuli + cloudflare in ${tfOrg}. ` +
+          `Check the workflow's run log; the workspace is created on first apply.`,
+      );
+      process.exit(1);
+    }
+
+    const tunnelToken = await waitForApplyAndFetchTunnelToken({
+      token: tfToken,
+      organization: tfOrg,
+      workspaceId: ws.id,
+      runId: ws.currentRunId,
+    });
+    if (!tunnelToken) {
+      p.cancel(
+        `Terraform apply didn't produce a tunnel_token output. Check the run on TFC; if it succeeded, the output may be named differently — patch and re-run, or fetch via 'terraform output -raw tunnel_token'.`,
+      );
+      process.exit(1);
+    }
+
+    // ---- Save Tunnel token ----------------------------------------------
+    const tunnelTitle = `op-region-${region}-tunnel-token`;
+    if (op.installed && op.signedIn) {
+      const r = await saveSecretToOp({
+        title: tunnelTitle,
+        value: tunnelToken,
+        ...(opts.vault ? { vault: opts.vault } : {}),
+        overwrite: true,
+      });
+      if (r.written) {
+        p.note(
+          `${pc.green('✓')} Tunnel token saved to 1Password as ${pc.cyan(tunnelTitle)}.`,
+          'Secret',
+        );
+      } else {
+        printKeyForManualSave(tunnelToken, tunnelTitle, r.reason);
+      }
+    } else {
+      printKeyForManualSave(tunnelToken, tunnelTitle);
+    }
+
+    // ---- Done -----------------------------------------------------------
+    p.outro(
+      pc.cyan(
+        `Region ${region} is provisioned. Next: \`npx create-op-node bootstrap\` on the Mac Studio.`,
+      ),
+    );
   });
+
+// ----------------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------------
+
+async function collectSecret(preset: string | undefined, message: string): Promise<string> {
+  if (preset) return preset;
+  const v = unwrap(
+    await p.password({
+      message,
+      validate: (v) => (v && v.length >= 20 ? undefined : 'That looks too short'),
+    }),
+  );
+  return v;
+}
+
+async function collectId(preset: string | undefined, message: string): Promise<string> {
+  if (preset) return preset;
+  const v = unwrap(
+    await p.text({
+      message,
+      placeholder: '0000000000000000000000000000000',
+      validate: (v) =>
+        /^[a-f0-9]{32}$/.test(v ?? '') ? undefined : 'Expected 32 hex characters',
+    }),
+  );
+  return v;
+}
+
+function printKeyForManualSave(value: string, title: string, reason?: string): void {
+  p.note(
+    [
+      reason ? `${pc.red('✗')} ${reason}` : '',
+      `Save this value to 1Password as ${pc.cyan(title)}:`,
+      '',
+      pc.yellow(value),
+      '',
+      pc.dim('It will not be shown again. Press Enter when stashed.'),
+    ]
+      .filter((line) => line.length > 0)
+      .join('\n'),
+    'Manual save',
+  );
+}
+
+interface WaitInput {
+  token: string;
+  organization: string;
+  workspaceId: string;
+  runId: string | null;
+}
+
+/**
+ * Poll TFC for the workspace's current run until it terminates, then pull the
+ * tunnel_token output. ~10 minute max wall-clock by default; the wizard will
+ * tell the operator to retry if the apply hasn't finished.
+ */
+async function waitForApplyAndFetchTunnelToken(input: WaitInput): Promise<string | null> {
+  const auth = { token: input.token, organization: input.organization };
+  const start = Date.now();
+  const timeoutMs = 10 * 60 * 1000;
+  const pollMs = 10 * 1000;
+
+  const spin = p.spinner();
+  spin.start('Waiting for terraform apply to finish (polling every 10s)…');
+
+  // If we don't have a run id yet (first merge), poll the workspace to discover
+  // one. The cloudflare-infra workflow may take a few seconds to kick off TFC.
+  let runId = input.runId;
+  while (!runId && Date.now() - start < 60_000) {
+    await sleep(pollMs);
+    const ws = await findWorkspace({
+      token: input.token,
+      organization: input.organization,
+      tags: ['opuspopuli', 'cloudflare'],
+    });
+    runId = ws?.currentRunId ?? null;
+  }
+  if (!runId) {
+    spin.stop(pc.red('✗ No run started in the workspace yet.'));
+    return null;
+  }
+
+  while (Date.now() - start < timeoutMs) {
+    const r = await getRunStatus(auth, runId);
+    if (r?.finished) {
+      if (!r.succeeded) {
+        spin.stop(pc.red(`✗ Run finished with status "${r.status}".`));
+        return null;
+      }
+      spin.message('Apply succeeded — fetching tunnel_token output…');
+      const out = await fetchOutput(auth, input.workspaceId, 'tunnel_token');
+      spin.stop(pc.green('✓ Tunnel token retrieved.'));
+      return out;
+    }
+    await sleep(pollMs);
+  }
+
+  spin.stop(pc.red('✗ Timed out after 10 minutes.'));
+  return null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((res) => setTimeout(res, ms));
+}
