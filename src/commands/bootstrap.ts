@@ -4,7 +4,13 @@ import { Command, Option } from 'commander';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 
-import { PGSODIUM_KEY_RE, TUNNEL_TOKEN_RE } from '../lib/constants.js';
+import {
+  PGSODIUM_KEY_RE,
+  SAFE_LAUNCHCTL_VALUE_RE,
+  SAFE_URL_RE,
+  TUNNEL_TOKEN_RE,
+  URL_SAFE_PASSWORD_RE,
+} from '../lib/constants.js';
 import {
   detectBrew,
   HOMEBREW_INSTALL_COMMAND,
@@ -18,7 +24,14 @@ import {
   inspectSystem,
 } from '../lib/macos.js';
 import { detectKeychain, readSecret, saveSecret, type SecretAccount } from '../lib/keychain.js';
-import { generatePgsodiumRootKey } from '../lib/secrets.js';
+import {
+  generateDashboardPassword,
+  generateJwtSecret,
+  generatePgsodiumRootKey,
+  generatePostgresPassword,
+  signSupabaseJwt,
+  verifySupabaseJwt,
+} from '../lib/secrets.js';
 import { setupLaunchAgent } from '../lib/launchagent.js';
 import {
   composePull,
@@ -58,6 +71,10 @@ interface BootstrapOptions {
   localOnly?: boolean;
   llmModel?: string;
   embeddingModel?: string;
+  /** Public-facing Supabase URL. Defaults to `http://localhost:8000` in
+   *  --local-only mode, otherwise `https://supabase.<domain>` — operator
+   *  can override with --supabase-url. */
+  supabaseUrl?: string;
   yes?: boolean;
 }
 
@@ -93,6 +110,12 @@ export const bootstrapCommand = new Command('bootstrap')
     new Option(
       '--embedding-model <model>',
       `Ollama embedding model. Default: ${DEFAULT_EMBEDDING_MODEL}. Only takes effect when the knowledge service runs with EMBEDDINGS_PROVIDER=ollama (otherwise embeddings are computed in-process via xenova).`,
+    ),
+  )
+  .addOption(
+    new Option(
+      '--supabase-url <url>',
+      'Public-facing Supabase URL (what browsers + microservices use). Default: `http://localhost:8000` in --local-only mode, otherwise `https://supabase.<domain>` (which the operator can override).',
     ),
   )
   .addOption(new Option('--skip-stack', "Stop before `docker compose pull && up`").default(false))
@@ -314,6 +337,123 @@ export const bootstrapCommand = new Command('bootstrap')
             TUNNEL_TOKEN_RE.test(v) ? undefined : 'tunnel token must be a base64-url JWT',
         });
 
+    // ---- Phase 5b: Supabase self-hosted credentials ----
+    //
+    // The template's docker-compose-prod.yml runs the full self-hosted
+    // Supabase stack (kong, auth, rest, storage, meta, optional studio).
+    // Every one of those containers + every microservice in the platform
+    // needs the same shared values: POSTGRES_PASSWORD for DB connections,
+    // JWT_SECRET for auth, and the long-lived anon/service_role JWTs that
+    // @supabase/supabase-js authenticates with.
+    //
+    // All five are auto-generated on first run via the same `loadSecret`
+    // path used for the pgsodium key — Keychain hit → reuse; miss →
+    // generate fresh + persist + hard-fail if persist fails (so the next
+    // re-run doesn't silently mint a different password and lock us out
+    // of the old DB).
+    //
+    // The two Supabase JWTs are derived from JWT_SECRET so they're not
+    // independent secrets — but we cache them in Keychain anyway because:
+    //   (a) re-signing on every bootstrap means the `iat`/`exp` claims
+    //       drift, which is fine functionally but noisy in audit logs,
+    //   (b) it lets operators rotate ANON without rotating JWT_SECRET
+    //       by manually replacing the Keychain item.
+    const postgresPassword = await loadSecret({
+      region,
+      account: 'postgres-password',
+      label: 'Postgres password',
+      // URL-safe alphabet required — value lands in postgres:// URIs where
+      // `+`/`/`/`=` cause parser ambiguity in gotrue/postgrest/storage.
+      validate: (v) =>
+        URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+      generate: generatePostgresPassword,
+    });
+
+    const jwtSecret = await loadSecret({
+      region,
+      account: 'jwt-secret',
+      label: 'JWT signing secret',
+      validate: (v) =>
+        SAFE_LAUNCHCTL_VALUE_RE.test(v) && v.length >= 32
+          ? undefined
+          : 'must be ≥32 base64 characters',
+      generate: generateJwtSecret,
+    });
+
+    // Derived JWTs MUST match the current jwtSecret's signature — otherwise
+    // a stale anon/service_role token (cached from a previous bootstrap with
+    // a different JWT_SECRET) sails past the shape check and breaks every
+    // auth call silently. verifySupabaseJwt re-runs the HMAC and rejects on
+    // mismatch, triggering regeneration with the current secret.
+    const supabaseAnonKey = await loadSecret({
+      region,
+      account: 'supabase-anon-key',
+      label: 'Supabase anon key',
+      validate: (v) =>
+        SAFE_LAUNCHCTL_VALUE_RE.test(v) && verifySupabaseJwt(v, jwtSecret)
+          ? undefined
+          : 'must be a base64url JWT signed by the current JWT_SECRET',
+      generate: () => signSupabaseJwt({ role: 'anon', secret: jwtSecret }),
+    });
+
+    const supabaseServiceRoleKey = await loadSecret({
+      region,
+      account: 'supabase-service-role-key',
+      label: 'Supabase service role key',
+      validate: (v) =>
+        SAFE_LAUNCHCTL_VALUE_RE.test(v) && verifySupabaseJwt(v, jwtSecret)
+          ? undefined
+          : 'must be a base64url JWT signed by the current JWT_SECRET',
+      generate: () => signSupabaseJwt({ role: 'service_role', secret: jwtSecret }),
+    });
+
+    const dashboardPassword = await loadSecret({
+      region,
+      account: 'dashboard-password',
+      label: 'Supabase Studio dashboard password',
+      // URL-safe alphabet required — value lands in basic-auth headers via
+      // kong's declarative config. Avoid `+`/`/`/`=` for the same reasons.
+      validate: (v) =>
+        URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+      generate: generateDashboardPassword,
+    });
+
+    // SUPABASE_URL gets baked into gotrue's API_EXTERNAL_URL and into every
+    // magic-link callback gotrue emails to users. localhost is only correct
+    // in --local-only mode; for a Tunnel-exposed production node, emailing
+    // links pointing at http://localhost:8000 silently breaks signups.
+    //
+    // Resolution order:
+    //   --local-only mode → default http://localhost:8000 (no prompt)
+    //   non-local-only   → require --supabase-url OR prompt for the
+    //                       public-facing URL (typically
+    //                       https://supabase.<region-domain>)
+    let supabaseUrl: string;
+    if (opts.supabaseUrl) {
+      supabaseUrl = opts.supabaseUrl;
+    } else if (opts.localOnly) {
+      supabaseUrl = 'http://localhost:8000';
+    } else {
+      supabaseUrl = unwrap(
+        await p.text({
+          message: 'Public-facing Supabase URL (what browsers + microservices use to reach kong)?',
+          placeholder: 'https://supabase.civicfeed.tx',
+          validate: (v) =>
+            !v
+              ? 'required'
+              : SAFE_URL_RE.test(v)
+                ? undefined
+                : 'contains characters outside the allowed URL set',
+        }),
+      );
+    }
+    if (!SAFE_URL_RE.test(supabaseUrl)) {
+      p.cancel(
+        `--supabase-url ${JSON.stringify(supabaseUrl)} contains characters outside the allowed URL set`,
+      );
+      process.exit(1);
+    }
+
     // ---- Phase 6: LaunchAgent ----
     if (!opts.skipLaunchAgent) {
       const laSpin = p.spinner();
@@ -323,6 +463,12 @@ export const bootstrapCommand = new Command('bootstrap')
         ...(tunnelToken !== undefined ? { tunnelToken } : {}),
         llmModel,
         embeddingModel,
+        postgresPassword,
+        jwtSecret,
+        supabaseAnonKey,
+        supabaseServiceRoleKey,
+        dashboardPassword,
+        supabaseUrl,
       });
       if (!la.ok) {
         laSpin.stop(pc.red(`✗ LaunchAgent step ${la.step} failed.`));

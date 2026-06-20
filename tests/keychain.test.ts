@@ -31,6 +31,17 @@ describe('_internal naming', () => {
       'pgsodium',
     );
     expect(_internal.labelFor({ region: 'us-ca', account: 'tunnel-token' })).toContain('Tunnel');
+    expect(_internal.labelFor({ region: 'us-ca', account: 'postgres-password' })).toContain(
+      'Postgres',
+    );
+    expect(_internal.labelFor({ region: 'us-ca', account: 'jwt-secret' })).toContain('JWT');
+    expect(_internal.labelFor({ region: 'us-ca', account: 'supabase-anon-key' })).toContain('anon');
+    expect(
+      _internal.labelFor({ region: 'us-ca', account: 'supabase-service-role-key' }),
+    ).toContain('service role');
+    expect(_internal.labelFor({ region: 'us-ca', account: 'dashboard-password' })).toContain(
+      'dashboard',
+    );
   });
 });
 

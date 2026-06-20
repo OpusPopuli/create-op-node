@@ -173,6 +173,66 @@ describe('renderLaunchAgentPlist', () => {
       ).toThrow(/llmModel.*not allowed/);
     }
   });
+
+  describe('Supabase credentials', () => {
+    const SAFE_BASE64 = 'aGVsbG8td29ybGQ='; // arbitrary base64 sample
+    const SAFE_JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.sigsig-_';
+
+    it('emits every Supabase setenv line when all fields are provided', () => {
+      const out = renderLaunchAgentPlist({
+        keyFilePath: '/k',
+        postgresPassword: SAFE_BASE64,
+        jwtSecret: SAFE_BASE64,
+        supabaseAnonKey: SAFE_JWT,
+        supabaseServiceRoleKey: SAFE_JWT,
+        dashboardPassword: SAFE_BASE64,
+        supabaseUrl: 'http://localhost:8000',
+      });
+      expect(out).toContain('launchctl setenv POSTGRES_PASSWORD');
+      expect(out).toContain('launchctl setenv JWT_SECRET');
+      expect(out).toContain('launchctl setenv SUPABASE_ANON_KEY');
+      expect(out).toContain('launchctl setenv SUPABASE_SERVICE_ROLE_KEY');
+      expect(out).toContain('launchctl setenv DASHBOARD_PASSWORD');
+      expect(out).toContain('launchctl setenv SUPABASE_URL "http://localhost:8000"');
+    });
+
+    it('omits all Supabase setenv lines when fields are undefined (back-compat)', () => {
+      const out = renderLaunchAgentPlist({ keyFilePath: '/k' });
+      for (const v of [
+        'POSTGRES_PASSWORD',
+        'JWT_SECRET',
+        'SUPABASE_ANON_KEY',
+        'SUPABASE_SERVICE_ROLE_KEY',
+        'DASHBOARD_PASSWORD',
+        'SUPABASE_URL',
+      ]) {
+        expect(out).not.toContain(v);
+      }
+    });
+
+    it.each([
+      ['postgresPassword', 'pw;evil'],
+      ['jwtSecret', 'has$dollar'],
+      ['supabaseAnonKey', 'has`backtick'],
+      ['supabaseServiceRoleKey', 'has space'],
+      ['dashboardPassword', 'has\nnewline'],
+    ])('refuses %s with shell metacharacters', (field, evil) => {
+      expect(() =>
+        renderLaunchAgentPlist({ keyFilePath: '/k', [field]: evil } as Parameters<
+          typeof renderLaunchAgentPlist
+        >[0]),
+      ).toThrow(/launchd setenv value/);
+    });
+
+    it('refuses supabaseUrl with shell metacharacters', () => {
+      expect(() =>
+        renderLaunchAgentPlist({
+          keyFilePath: '/k',
+          supabaseUrl: 'http://localhost;rm -rf /',
+        }),
+      ).toThrow(/supabaseUrl.*not allowed/);
+    });
+  });
 });
 
 describe('writePgsodiumKeyFile', () => {
