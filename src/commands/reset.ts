@@ -8,7 +8,16 @@
  * Reset does NOT touch cloud-side state (Cloudflare resources, the GitHub
  * repo, the TFC workspace). It also leaves the Keychain items in place —
  * delete those manually via Keychain Access or `security delete-generic-
- * password` if you want a truly clean slate.
+ * password -s org.opuspopuli.<region> -a <account>` if you want a truly
+ * clean slate.
+ *
+ * Accounts to wipe (under service `org.opuspopuli.<region>`):
+ *   pgsodium-root-key, tunnel-token, postgres-password, jwt-secret,
+ *   supabase-anon-key, supabase-service-role-key, dashboard-password
+ *
+ * Wiping pgsodium-root-key permanently destroys every value in
+ * supabase_vault for this region. Wiping postgres-password locks you out
+ * of the existing database. Don't do either without a backup.
  */
 
 import { access } from 'node:fs/promises';

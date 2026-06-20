@@ -25,7 +25,14 @@ import { safeExeca } from './exec.js';
 /** Reverse-DNS prefix for all Opus Populi entries in Keychain Access. */
 const SERVICE_PREFIX = 'org.opuspopuli';
 
-export type SecretAccount = 'pgsodium-root-key' | 'tunnel-token';
+export type SecretAccount =
+  | 'pgsodium-root-key'
+  | 'tunnel-token'
+  | 'postgres-password'
+  | 'jwt-secret'
+  | 'supabase-anon-key'
+  | 'supabase-service-role-key'
+  | 'dashboard-password';
 
 export interface SecretCoordinates {
   /** Region label, used to scope the service identifier. */
@@ -38,10 +45,18 @@ function serviceFor(region: string): string {
   return `${SERVICE_PREFIX}.${region}`;
 }
 
+const FRIENDLY: Record<SecretAccount, string> = {
+  'pgsodium-root-key': 'pgsodium root key',
+  'tunnel-token': 'Cloudflare Tunnel token',
+  'postgres-password': 'Postgres password',
+  'jwt-secret': 'JWT signing secret',
+  'supabase-anon-key': 'Supabase anon key',
+  'supabase-service-role-key': 'Supabase service role key',
+  'dashboard-password': 'Supabase Studio dashboard password',
+};
+
 function labelFor(coords: SecretCoordinates): string {
-  const friendly =
-    coords.account === 'pgsodium-root-key' ? 'pgsodium root key' : 'Cloudflare Tunnel token';
-  return `Opus Populi (${coords.region}) — ${friendly}`;
+  return `Opus Populi (${coords.region}) — ${FRIENDLY[coords.account]}`;
 }
 
 export interface KeychainAvailability {
