@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/OpusPopuli/create-op-node/compare/v0.6.0...v0.7.0) (2026-06-20)
+
+
+### Features
+
+* **bootstrap:** interactive LLM model picker (Qwen-only) + time estimates on long phases ([36e8049](https://github.com/OpusPopuli/create-op-node/commit/36e80493a2e0f712bd6b5153b09ecc5490cd026f))
+* **bootstrap:** interactive LLM picker (Qwen-only) + time estimates ([cec5c79](https://github.com/OpusPopuli/create-op-node/commit/cec5c7974fd46cb9179cb2413fc822dc13d1cb7a))
+
 ## [0.6.0] — 2026-06-19
 
 ### Added
