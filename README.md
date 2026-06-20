@@ -202,6 +202,11 @@ npx create-op-node reset --region us-ca --dry-run
 
 # Nuke from orbit: containers + volumes + LaunchAgent + ghcr credentials.
 npx create-op-node reset --region us-ca --wipe-data
+
+# Even more: ALSO drop all docker images (forces re-pull on next bootstrap).
+# Use this for the "wipe everything and start over" iteration loop while
+# debugging a fresh bootstrap. Implies --wipe-data.
+npx create-op-node reset --region us-ca --wipe-images
 ```
 
 ## Verifying a live node

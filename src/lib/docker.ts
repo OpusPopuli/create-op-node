@@ -140,15 +140,30 @@ export interface ComposeDownOptions extends ComposeOptions {
   /** When true, adds `--remove-orphans` — drops containers from compose files
    *  no longer present. Useful on first-after-rename runs. */
   removeOrphans?: boolean;
+  /** When set, adds `--rmi <mode>` to also remove the images.
+   *   - `'all'`: removes all images referenced by services (forces re-pull
+   *              on next `compose up`).
+   *   - `'local'`: removes only images that don't have a custom tag (i.e.,
+   *                locally-built ones; pulled images stay).
+   *  Use 'all' for true "wipe everything and start over" iteration loops. */
+  removeImages?: 'all' | 'local';
 }
 
-/** `docker compose -f … down [-v] [--remove-orphans]`. */
+/** `docker compose -f … down [-v] [--remove-orphans] [--rmi MODE]`. */
 export async function composeDown(opts: ComposeDownOptions): Promise<ComposeResult> {
   const flags: string[] = ['down'];
   if (opts.wipeVolumes) flags.push('-v');
   if (opts.removeOrphans) flags.push('--remove-orphans');
+  if (opts.removeImages) flags.push('--rmi', opts.removeImages);
+  const label = [
+    'compose down',
+    opts.wipeVolumes ? '-v' : '',
+    opts.removeImages ? `--rmi ${opts.removeImages}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
   const res = await safeExeca('docker', composeArgs(opts, flags));
-  return result(res, opts.wipeVolumes ? 'compose down -v' : 'compose down');
+  return result(res, label);
 }
 
 /**

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { estimatedPullTime, LLM_MODEL_CHOICES, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
+import { estimatedPullTime, LLM_MODEL_CHOICES, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_LLM_MODEL } from '../src/lib/ollama.js';
 
 describe('resolveComposeFiles', () => {
@@ -121,5 +121,37 @@ describe('estimatedPullTime', () => {
 
   it('returns a soft fallback for unrecognized shapes', () => {
     expect(estimatedPullTime('unrecognized-model')).toMatch(/depends on/);
+  });
+});
+
+describe('recommendLlmModel', () => {
+  it('returns null when ram detection failed (caller falls back to platform default)', () => {
+    expect(recommendLlmModel(null)).toBeNull();
+  });
+
+  it('recommends qwen2.5:72b for 128 GB / 96 GB Studios', () => {
+    expect(recommendLlmModel(128)).toBe('qwen2.5:72b');
+    expect(recommendLlmModel(96)).toBe('qwen2.5:72b');
+  });
+
+  it('recommends qwen2.5:32b for 48-64 GB Studios', () => {
+    expect(recommendLlmModel(64)).toBe('qwen2.5:32b');
+    expect(recommendLlmModel(48)).toBe('qwen2.5:32b');
+    expect(recommendLlmModel(95)).toBe('qwen2.5:32b'); // just under the 96-GB threshold
+  });
+
+  it('recommends qwen3.5:9b for ≤ 36 GB Studios', () => {
+    expect(recommendLlmModel(36)).toBe('qwen3.5:9b');
+    expect(recommendLlmModel(16)).toBe('qwen3.5:9b');
+    expect(recommendLlmModel(47)).toBe('qwen3.5:9b'); // just under the 48-GB threshold
+  });
+
+  it('every recommendation matches a curated option (no orphan recommendations)', () => {
+    const values = LLM_MODEL_CHOICES.map((c) => c.value);
+    for (const ram of [16, 36, 48, 64, 96, 128]) {
+      const rec = recommendLlmModel(ram);
+      expect(rec).not.toBeNull();
+      expect(values).toContain(rec!);
+    }
   });
 });

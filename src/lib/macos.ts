@@ -118,6 +118,23 @@ export async function disableDiskSleep(): Promise<SetResult> {
   return runSudoPmset(['disksleep', '0']);
 }
 
+/**
+ * Read the Studio's unified memory in GB via `sysctl hw.memsize`. Returns
+ * `null` when sysctl is unavailable or the output is unparseable — callers
+ * fall back to platform defaults in that case.
+ *
+ * `hw.memsize` reports bytes (e.g. `137438953472` for 128 GB). We divide
+ * by 2^30 and round; vendors mostly ship integer GB so the rounding is
+ * cosmetic, but the user may see `127` instead of `128` on rare configs.
+ */
+export async function detectUnifiedMemoryGB(): Promise<number | null> {
+  const res = await safeExeca('sysctl', ['-n', 'hw.memsize']);
+  if (res === null || res.exitCode !== 0) return null;
+  const bytes = Number.parseInt(res.stdout.trim(), 10);
+  if (!Number.isFinite(bytes) || bytes <= 0) return null;
+  return Math.round(bytes / 2 ** 30);
+}
+
 async function runSudoPmset(args: string[]): Promise<SetResult> {
   const res = await safeExeca('sudo', ['pmset', '-a', ...args]);
   if (res === null) {
