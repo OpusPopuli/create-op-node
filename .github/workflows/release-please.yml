@@ -27,5 +27,20 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
+          # Use a PAT (RELEASE_PLEASE_TOKEN) when available so the release
+          # PR + tag get authored by a real user, not GITHUB_TOKEN. That
+          # matters because GitHub deliberately doesn't fire workflows on
+          # branches/tags pushed by GITHUB_TOKEN — without a PAT, the
+          # release PR's CI doesn't run (release-please PR sits in
+          # "Expected — Waiting for status to be reported") and the
+          # publish.yml tag-push workflow doesn't fire (npm doesn't get
+          # the new version). Both happen automatically once the PAT is
+          # in place.
+          #
+          # See the "Releases" section of README.md for PAT-creation
+          # steps. Falls back to GITHUB_TOKEN when the secret isn't set
+          # so the workflow still completes (with the manual-republish
+          # workarounds you've used before).
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json

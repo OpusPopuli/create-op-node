@@ -557,6 +557,42 @@ Releases are automated via [release-please](https://github.com/googleapis/releas
 
 No manual version bumps, no manual tagging. To trigger a release with no functional changes (re-publishing after a CI fix, etc.), push a commit with `chore: trigger release` — release-please will skip it but still update the PR.
 
+#### One-time PAT setup
+
+GitHub deliberately doesn't fire workflows on branches or tags pushed by
+`GITHUB_TOKEN`. Without a PAT, two things bite every release:
+
+- The release PR opens but its CI run never starts (sits in
+  *Expected — Waiting for status to be reported*). You can't merge.
+- After you eventually merge, `publish.yml`'s tag-push trigger doesn't
+  fire either, so npm never gets the new version.
+
+Both go away when release-please uses a PAT instead. One-time setup:
+
+1. **Create a fine-grained PAT** at
+   [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new):
+   - *Resource owner*: **OpusPopuli** (not your personal account —
+     fine-grained PATs are scoped at creation and can't be moved)
+   - *Expiration*: your call (90 days for safety; you'll be reminded
+     when it's near expiry)
+   - *Repository access*: **Only select repositories** →
+     `create-op-node`
+   - *Repository permissions*:
+     - **Contents**: Read and write
+     - **Pull requests**: Read and write
+     - **Workflows**: Read and write *(release-please updates the
+       version line in `release-please.yml`'s manifest output;
+       without this permission the action fails to write)*
+2. **Add it as a repo secret**: repo → Settings → Secrets and
+   variables → Actions → New repository secret →
+   `RELEASE_PLEASE_TOKEN`, paste the PAT value.
+3. **Done.** Next release-please run uses the PAT, CI runs normally on
+   the release PR, and `publish.yml` fires automatically on the tag.
+
+The workflow falls back to `GITHUB_TOKEN` when the secret isn't
+present, so it doesn't break in repos that haven't done the PAT setup
+yet — it just goes back to needing the manual workarounds.
+
 ## License
 
 [AGPL-3.0-or-later](./LICENSE). The Opus Populi platform code is AGPL-3.0 + dual commercial; this CLI inherits the AGPL-3.0 terms.
