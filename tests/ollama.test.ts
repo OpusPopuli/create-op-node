@@ -8,6 +8,8 @@ vi.mock('execa', () => ({
 
 import {
   checkOllamaHealth,
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_LLM_MODEL,
   DEFAULT_MODELS,
   OLLAMA_URL,
   PROBE_ALPINE_TAG,
@@ -36,6 +38,15 @@ function stubFetch(handler: (url: string, init?: RequestInit) => { status: numbe
 describe('DEFAULT_MODELS + OLLAMA_URL', () => {
   it('uses qwen3.5:9b + nomic-embed-text by default', () => {
     expect(DEFAULT_MODELS).toEqual(['qwen3.5:9b', 'nomic-embed-text']);
+  });
+
+  it('exports DEFAULT_LLM_MODEL + DEFAULT_EMBEDDING_MODEL scalars', () => {
+    expect(DEFAULT_LLM_MODEL).toBe('qwen3.5:9b');
+    expect(DEFAULT_EMBEDDING_MODEL).toBe('nomic-embed-text');
+  });
+
+  it('DEFAULT_MODELS is composed from the two scalars (no drift)', () => {
+    expect(DEFAULT_MODELS).toEqual([DEFAULT_LLM_MODEL, DEFAULT_EMBEDDING_MODEL]);
   });
 
   it('points at localhost:11434', () => {

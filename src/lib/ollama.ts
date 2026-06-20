@@ -18,7 +18,23 @@
 import { safeExeca } from './exec.js';
 
 export const OLLAMA_URL = 'http://localhost:11434';
-export const DEFAULT_MODELS = ['qwen3.5:9b', 'nomic-embed-text'] as const;
+
+/** Default LLM the platform ships against — small enough to pull on a fresh
+ *  Studio in minutes, capable enough to validate the inference path
+ *  end-to-end. Operators can override at bootstrap time with `--llm-model`,
+ *  and we surface a sizing table in `docs/docker-resources.md` for the
+ *  70B-class jump. */
+export const DEFAULT_LLM_MODEL = 'qwen3.5:9b';
+
+/** Default embedding model used by the knowledge service when
+ *  `EMBEDDINGS_PROVIDER=ollama`. With the default `xenova` (in-process)
+ *  provider, this isn't pulled. Operators can override with
+ *  `--embedding-model`. */
+export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
+
+/** Default model pull set for `bootstrap`. Kept as a `as const`-typed array
+ *  so existing code can iterate without re-deriving from the two scalars. */
+export const DEFAULT_MODELS = [DEFAULT_LLM_MODEL, DEFAULT_EMBEDDING_MODEL] as const;
 
 /** Pinned alpine tag for the host.docker.internal probe. Latest is fine in
  *  practice (the image only runs `curl`) but pinning keeps the probe

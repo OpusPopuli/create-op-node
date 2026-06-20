@@ -77,6 +77,16 @@ export async function writePgsodiumKeyFile(
   }
 }
 
+/** Model-identifier safe set. Requires at least one alphanumeric character
+ *  to start (rejects lone `:`, `.`, `///`, etc. — Ollama would reject those
+ *  too, but catching them here gives a clearer error). Then allows the
+ *  letters/digits + Ollama's separators (`.`, `:`, `_`, `-`, `/`) — matches
+ *  shapes like `qwen3.5:9b`, `library/llama3.3:70b-q4`, `mxbai-embed-large`.
+ *  Reject anything outside this because the value gets interpolated into a
+ *  `sh -c` body run by launchd — `;`, `$`, backticks, quotes would all give
+ *  shell injection. */
+const MODEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
+
 export interface PlistInput {
   /** Path the plist will exec — sourced from defaultPaths() unless an operator
    *  overrides on the command line. */
@@ -85,6 +95,14 @@ export interface PlistInput {
    *  `bootstrap --local-only` flows where no Tunnel is provisioned — the
    *  rendered plist will only set PGSODIUM_ROOT_KEY. */
   tunnelToken?: string;
+  /** Ollama model identifier (e.g. `qwen3.5:9b`, `llama3.3:70b`).
+   *  When set, plist exports `LLM_MODEL` into the launchd session so the
+   *  knowledge service reads it via env. */
+  llmModel?: string;
+  /** Ollama embedding model identifier. When set, plist exports
+   *  `EMBEDDINGS_MODEL` into the launchd session. Only meaningful when the
+   *  knowledge service runs with `EMBEDDINGS_PROVIDER=ollama`. */
+  embeddingModel?: string;
 }
 
 /**
@@ -95,8 +113,9 @@ export interface PlistInput {
  * not just the agent's own env, so anything Docker Desktop launches
  * downstream sees the same values.
  *
- * When `tunnelToken` is omitted, the plist sets ONLY `PGSODIUM_ROOT_KEY`
- * (for local-only / no-Cloudflare flows). When present, it sets both.
+ * Required: `PGSODIUM_ROOT_KEY`. Optional: `TUNNEL_TOKEN`, `LLM_MODEL`,
+ * `EMBEDDINGS_MODEL` — omitted from the setenv list when their inputs
+ * are undefined.
  */
 export function renderLaunchAgentPlist(input: PlistInput): string {
   if (input.tunnelToken !== undefined && !TUNNEL_TOKEN_RE.test(input.tunnelToken)) {
@@ -105,6 +124,16 @@ export function renderLaunchAgentPlist(input: PlistInput): string {
     // into the `sh -c` body downstream. Throw rather than silently emit
     // broken XML or — worse — a working plist with shell injection.
     throw new Error('Tunnel token contains characters outside the expected base64-url set');
+  }
+  if (input.llmModel !== undefined && !MODEL_NAME_RE.test(input.llmModel)) {
+    throw new Error(
+      `llmModel ${JSON.stringify(input.llmModel)} contains characters not allowed in a launchd setenv value`,
+    );
+  }
+  if (input.embeddingModel !== undefined && !MODEL_NAME_RE.test(input.embeddingModel)) {
+    throw new Error(
+      `embeddingModel ${JSON.stringify(input.embeddingModel)} contains characters not allowed in a launchd setenv value`,
+    );
   }
   if (!SAFE_PATH_RE.test(input.keyFilePath)) {
     // The keyFilePath gets interpolated into a `sh -c` command run by
@@ -119,6 +148,12 @@ export function renderLaunchAgentPlist(input: PlistInput): string {
     `launchctl setenv PGSODIUM_ROOT_KEY "$(cat ${input.keyFilePath})"`,
     ...(input.tunnelToken !== undefined
       ? [`launchctl setenv TUNNEL_TOKEN "${input.tunnelToken}"`]
+      : []),
+    ...(input.llmModel !== undefined
+      ? [`launchctl setenv LLM_MODEL "${input.llmModel}"`]
+      : []),
+    ...(input.embeddingModel !== undefined
+      ? [`launchctl setenv EMBEDDINGS_MODEL "${input.embeddingModel}"`]
       : []),
   ];
   const command = setenvLines.join('; ');
@@ -181,6 +216,10 @@ export interface SetupInput {
   /** Omit for `bootstrap --local-only` flows — the rendered plist will only
    *  set `PGSODIUM_ROOT_KEY`. */
   tunnelToken?: string;
+  /** Ollama LLM model name. When set, plist exports `LLM_MODEL`. */
+  llmModel?: string;
+  /** Ollama embedding model name. When set, plist exports `EMBEDDINGS_MODEL`. */
+  embeddingModel?: string;
   paths?: LaunchAgentPaths;
 }
 
@@ -209,6 +248,8 @@ export async function setupLaunchAgent(input: SetupInput): Promise<SetupReport> 
     plistContent = renderLaunchAgentPlist({
       keyFilePath: paths.keyFile,
       ...(input.tunnelToken !== undefined ? { tunnelToken: input.tunnelToken } : {}),
+      ...(input.llmModel !== undefined ? { llmModel: input.llmModel } : {}),
+      ...(input.embeddingModel !== undefined ? { embeddingModel: input.embeddingModel } : {}),
     });
   } catch (err) {
     return { ok: false, paths, step: 'plist', reason: (err as Error).message };

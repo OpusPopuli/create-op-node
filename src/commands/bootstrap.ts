@@ -27,7 +27,8 @@ import {
   waitForHealthy,
 } from '../lib/docker.js';
 import {
-  DEFAULT_MODELS,
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_LLM_MODEL,
   checkOllamaHealth,
   probeHostDockerInternal,
   setupModels,
@@ -54,6 +55,8 @@ interface BootstrapOptions {
   skipOllama?: boolean;
   skipStack?: boolean;
   localOnly?: boolean;
+  llmModel?: string;
+  embeddingModel?: string;
   yes?: boolean;
 }
 
@@ -79,6 +82,18 @@ export const bootstrapCommand = new Command('bootstrap')
     ).default(false),
   )
   .addOption(new Option('--skip-ollama', "Skip the Ollama model pull + warm").default(false))
+  .addOption(
+    new Option(
+      '--llm-model <model>',
+      `Ollama LLM model to pull and warm. Default: ${DEFAULT_LLM_MODEL}. Examples: \`llama3.3:70b\`, \`qwen2.5:72b\`. Memory sizing table: docs/docker-resources.md in the opuspopuli-node template (or your region repo's checkout).`,
+    ),
+  )
+  .addOption(
+    new Option(
+      '--embedding-model <model>',
+      `Ollama embedding model. Default: ${DEFAULT_EMBEDDING_MODEL}. Only takes effect when the knowledge service runs with EMBEDDINGS_PROVIDER=ollama (otherwise embeddings are computed in-process via xenova).`,
+    ),
+  )
   .addOption(new Option('--skip-stack', "Stop before `docker compose pull && up`").default(false))
   .addOption(
     new Option(
@@ -114,6 +129,16 @@ export const bootstrapCommand = new Command('bootstrap')
       ? ['docker-compose-prod.yml']
       : ['docker-compose-prod.yml', 'docker-compose-backup.yml'];
     const composeFile = opts.composeFile ?? composeFileDefault;
+
+    // Model selection: defaults baked into ollama.ts; flags override. The
+    // resolved values flow to both Ollama (pull + warm) and the LaunchAgent
+    // (LLM_MODEL / EMBEDDINGS_MODEL env vars Docker Desktop inherits).
+    //
+    // Note: the LaunchAgent ALWAYS exports both env vars now that they
+    // default — bootstrap is the source of truth for what model runs.
+    // The absence of a flag doesn't fall through to a compose default;
+    // it falls through to the CLI's default. (N3)
+    const [embeddingModel, llmModel] = resolveModels(opts);
 
     // ---- Phase 1: macOS sanity ----
     const sysSpin = p.spinner();
@@ -290,6 +315,8 @@ export const bootstrapCommand = new Command('bootstrap')
       const la = await setupLaunchAgent({
         pgsodiumKey,
         ...(tunnelToken !== undefined ? { tunnelToken } : {}),
+        llmModel,
+        embeddingModel,
       });
       if (!la.ok) {
         laSpin.stop(pc.red(`✗ LaunchAgent step ${la.step} failed.`));
@@ -346,7 +373,7 @@ export const bootstrapCommand = new Command('bootstrap')
           process.exit(1);
         }
       }
-      const modelReport = await setupModels(DEFAULT_MODELS, (model, status) => {
+      const modelReport = await setupModels([embeddingModel, llmModel], (model, status) => {
         olSpin.message(`${status}: ${model}`);
       });
       olSpin.stop(
@@ -510,6 +537,26 @@ export function resolveComposeFiles(
 ): string[] {
   const inputs = composeFile ?? ['docker-compose-prod.yml'];
   return inputs.map((f) => (f.startsWith('/') ? f : join(repoPath, f)));
+}
+
+/**
+ * Resolve the Ollama model identifiers from operator flags + defaults.
+ * Pure helper — mirrors `resolveComposeFiles` so the flag-resolution rule
+ * lives in one place and stays unit-testable.
+ *
+ * Returned in the order Ollama pulls + warms them: `[embedding, llm]`.
+ * The embedding model is typically tiny (~500 MB), so emitting it first
+ * gives the operator a visible "✓ pulled" milestone before the LLM's
+ * potentially-tens-of-gigabytes download dominates the spinner. (S3)
+ */
+export function resolveModels(opts: {
+  llmModel?: string;
+  embeddingModel?: string;
+}): readonly [embedding: string, llm: string] {
+  return [
+    opts.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
+    opts.llmModel ?? DEFAULT_LLM_MODEL,
+  ] as const;
 }
 
 function kvBool(b: boolean): string {
