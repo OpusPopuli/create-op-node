@@ -7,8 +7,14 @@ import { resetCommand } from './commands/reset.js';
 import { verifyCommand } from './commands/verify.js';
 import { regionCommand } from './commands/region.js';
 
-// Bumped manually; published version comes from package.json.
+// release-please updates the string in `const VERSION = '...'` on each
+// release. See release-please-config.json's extra-files entry that points
+// at this file with type: generic — that scanner finds the version string
+// in package.json (via the manifest file) and updates literals on lines
+// like the one below.
+// x-release-please-start-version
 const VERSION = '0.6.0';
+// x-release-please-end
 
 const program = new Command();
 

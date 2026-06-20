@@ -1,0 +1,31 @@
+name: release-please
+
+# release-please opens (or updates) a release PR whenever new Conventional
+# Commits land on `main`. Merging that PR creates the git tag, cuts a GitHub
+# release, and `publish.yml` fires on the tag push to publish to npm.
+#
+# Why this exists: PRs #11 (v0.5.0) and #12 (v0.6.0) bumped version in
+# package.json but never got tagged, so publish.yml never fired and npm
+# stayed pinned at v0.4.0. Automating the tag-and-publish removes that
+# manual step.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

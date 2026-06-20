@@ -527,6 +527,17 @@ pnpm build                  # tsup → dist/
 node dist/cli.js --help     # test the built binary
 ```
 
+### Releases
+
+Releases are automated via [release-please](https://github.com/googleapis/release-please-action):
+
+1. **Write Conventional Commits.** `feat:` → minor bump (or major on `BREAKING CHANGE:`); `fix:` → patch; `docs:`/`refactor:`/`perf:` show up in CHANGELOG; `chore:`/`test:`/`build:`/`ci:` are hidden.
+2. **Merge PRs to `main`** as normal.
+3. **release-please opens a `chore(main): release X.Y.Z` PR** that bumps `package.json` + `src/cli.ts`'s `VERSION` constant + adds a CHANGELOG section. It updates the PR continuously as more commits land.
+4. **Merge the release PR.** That creates the `vX.Y.Z` tag + a GitHub Release. `publish.yml` fires on the tag push and runs `npm publish --provenance --access public`.
+
+No manual version bumps, no manual tagging. To trigger a release with no functional changes (re-publishing after a CI fix, etc.), push a commit with `chore: trigger release` — release-please will skip it but still update the PR.
+
 ## License
 
 [AGPL-3.0-or-later](./LICENSE). The Opus Populi platform code is AGPL-3.0 + dual commercial; this CLI inherits the AGPL-3.0 terms.
