@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-06-19
+
+### Added
+
+- **`init --local-only`** — symmetric with `bootstrap --local-only`. Creates
+  the region repo from template (private, no public exposure), generates the
+  pgsodium master key, saves it to Keychain. Skips: Cloudflare 5-scope
+  probe, Terraform Cloud verification, repo secrets seeding, prod.tfvars
+  + PR generation, the post-merge TFC apply poll, and the tunnel token
+  retrieval. The `bootstrap --local-only` happy path now expects `init`
+  to have run first (the inline pgsodium auto-generation in bootstrap
+  stays as a safety net for operators who skip init entirely).
+- Warns when `--local-only` is combined with production-only flags
+  (`--domain`, `--cf-token`, `--cf-account`, `--cf-zone`, `--tf-token`,
+  `--tf-org`, `--skip-wait`) so they don't appear to silently no-op.
+- `listIgnoredLocalOnlyFlags` and `summarizePhases` pure helpers exported
+  for testing; first unit-test coverage for `init.ts` (8 tests).
+
+### Changed
+
+- Init's flow now mirrors bootstrap: local-only is a first-class mode on
+  both sides, with consistent CLI semantics and outros pointing at the
+  next step. Production flow unchanged byte-for-byte.
+- v0.4.0's local-only flow worked but expected operators to skip `init`
+  entirely; bootstrap's locate-or-clone phase would then fail because
+  the region repo wasn't on GitHub yet. v0.5.0 makes `init --local-only`
+  the documented start of the local-only flow — it creates the region
+  repo from template, so bootstrap's clone fallback finds it cleanly.
+  The inline pgsodium auto-generation in bootstrap from v0.4.0 stays as
+  a safety net for operators who run bootstrap without init.
+
+### Refactored
+
+- Cloudflare + TFC config collection lifted into `collectPublicConfig`
+  returning a `PublicConfig | null` shape — eliminates the loose
+  `let cfToken; let tfOrg; ...` + non-null-assertion pattern. TS now
+  narrows the production-only fields automatically.
+
 ## [0.4.0] — 2026-06-19
 
 ### Added
@@ -129,6 +167,7 @@ testable from `npx create-op-node`.
   a hostile path becoming shell injection in launchd's `sh -c` body.
 - `pnpm audit`, `trivy`, `gitleaks` all clean.
 
+[0.5.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.5.0
 [0.4.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.4.0
 [0.3.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.3.0
 [0.2.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.2.0

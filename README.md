@@ -16,6 +16,10 @@ That's it. The wizard walks you through:
 5. **pgsodium master key** — generates a fresh 64-hex root key, stores it in your **macOS login Keychain** as `org.opuspopuli.<region>/pgsodium-root-key`. No third-party password manager required.
 6. **Tunnel token retrieval** — after `terraform apply` lands, fetches the Tunnel token from Terraform Cloud outputs and stores it alongside the pgsodium key in your Keychain.
 
+> Doing **local dev / testing first** (no public exposure yet)?
+> See [Local-only mode](#local-only-mode-no-cloudflare) — `init --local-only`
+> skips the Cloudflare/TFC/PR phases entirely.
+
 Then on the Mac Studio itself:
 
 ```bash
@@ -26,16 +30,31 @@ Configures macOS power settings, installs Homebrew + the CLI tool list, sets up 
 
 ### Local-only mode (no Cloudflare)
 
+For local dev / testing — frontend on your laptop, backend on the Studio
+over Tailscale, no public exposure. The flow mirrors production-init →
+production-bootstrap, just with the Cloudflare half cut out on both
+sides.
+
+**On the laptop:**
+
+```bash
+npx create-op-node init --region us-ca --local-only
+```
+
+This creates the region repo from the `OpusPopuli/opuspopuli-node`
+template (private, no public exposure), generates the pgsodium master
+key, and saves it to Keychain. No Cloudflare, no Terraform Cloud, no PR
+to merge.
+
+**On the Studio:**
+
 ```bash
 npx create-op-node bootstrap --region us-ca --local-only
 ```
 
-Brings the Studio up for local dev / testing — frontend on your laptop
-hits the Studio over Tailscale, no public exposure. Differences from
-the standard run:
+Differences from production bootstrap:
 
-- **No Tunnel token required.** `init` is unnecessary; if the pgsodium
-  key isn't in Keychain, bootstrap generates one inline and persists it.
+- **No Tunnel token required.** `init --local-only` skipped that phase.
 - **`cloudflared` stays down.** It's gated behind the `public` compose
   profile, which `--local-only` doesn't activate. Bootstrap also evicts
   any leftover cloudflared from a prior public run so it doesn't strand
@@ -47,8 +66,9 @@ the standard run:
   exported into the launchd session.
 - **Outro tells you to use Tailscale**, not `npx create-op-node verify`.
 
-When you're ready to go public, re-run `bootstrap` without `--local-only`
-and the same Studio promotes to the full production-shaped deploy.
+When you're ready to expose publicly, re-run **both** commands without
+`--local-only`. Same region repo, same pgsodium key — promotes
+cleanly to the production-shaped deploy.
 
 > **Template version**: this mode depends on the `opuspopuli-node`
 > template having `profiles: [public]` on its cloudflared service. If
