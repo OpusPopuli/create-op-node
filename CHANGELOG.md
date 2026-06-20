@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/OpusPopuli/create-op-node/compare/v0.7.0...v0.8.0) (2026-06-20)
+
+
+### Features
+
+* reset --wipe-images + auto-detect Studio RAM for LLM picker ([d3f3a49](https://github.com/OpusPopuli/create-op-node/commit/d3f3a49e840baa3b07057a4328747cc0e46a2165))
+* reset --wipe-images + auto-detect Studio RAM for LLM picker default ([dfc81e0](https://github.com/OpusPopuli/create-op-node/commit/dfc81e0b3280d8daeffcf0115f308b9d5274e205))
+
 ## [0.7.0](https://github.com/OpusPopuli/create-op-node/compare/v0.6.0...v0.7.0) (2026-06-20)
 
 
