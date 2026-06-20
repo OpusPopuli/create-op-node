@@ -104,6 +104,75 @@ describe('renderLaunchAgentPlist', () => {
       renderLaunchAgentPlist({ keyFilePath: '/tmp/key;rm -rf $HOME' }),
     ).toThrow(/launchd path interpolation/);
   });
+
+  it('emits LLM_MODEL setenv when llmModel is provided', () => {
+    const out = renderLaunchAgentPlist({
+      keyFilePath: '/Users/op/.config/opuspopuli/pgsodium_root_key',
+      llmModel: 'qwen3.5:9b',
+    });
+    expect(out).toContain('launchctl setenv LLM_MODEL "qwen3.5:9b"');
+  });
+
+  it('emits EMBEDDINGS_MODEL setenv when embeddingModel is provided', () => {
+    const out = renderLaunchAgentPlist({
+      keyFilePath: '/Users/op/.config/opuspopuli/pgsodium_root_key',
+      embeddingModel: 'nomic-embed-text',
+    });
+    expect(out).toContain('launchctl setenv EMBEDDINGS_MODEL "nomic-embed-text"');
+  });
+
+  it('omits LLM_MODEL setenv when llmModel is undefined', () => {
+    const out = renderLaunchAgentPlist({
+      keyFilePath: '/Users/op/.config/opuspopuli/pgsodium_root_key',
+    });
+    expect(out).not.toContain('LLM_MODEL');
+    expect(out).not.toContain('EMBEDDINGS_MODEL');
+  });
+
+  it('accepts library-prefix + quantization-suffix model names (llama3.3:70b-q4)', () => {
+    expect(() =>
+      renderLaunchAgentPlist({
+        keyFilePath: '/k',
+        llmModel: 'library/llama3.3:70b-q4',
+        embeddingModel: 'mxbai-embed-large',
+      }),
+    ).not.toThrow();
+  });
+
+  it('refuses an llmModel with shell metacharacters (injection guard)', () => {
+    for (const evil of [
+      'qwen;rm -rf $HOME',
+      'qwen$(echo pwned)',
+      'qwen`whoami`',
+      'qwen"quoted"',
+      'qwen\nnewline',
+      'qwen with spaces',
+    ]) {
+      expect(() =>
+        renderLaunchAgentPlist({
+          keyFilePath: '/k',
+          llmModel: evil,
+        }),
+      ).toThrow(/llmModel.*not allowed/);
+    }
+  });
+
+  it('refuses an embeddingModel with shell metacharacters', () => {
+    expect(() =>
+      renderLaunchAgentPlist({
+        keyFilePath: '/k',
+        embeddingModel: 'em;evil',
+      }),
+    ).toThrow(/embeddingModel.*not allowed/);
+  });
+
+  it('refuses model names that start with a non-alphanumeric (Ollama-rejected shapes)', () => {
+    for (const bad of [':9b', '.qwen', '/library/x', '-tag', '_underscore', ':']) {
+      expect(() =>
+        renderLaunchAgentPlist({ keyFilePath: '/k', llmModel: bad }),
+      ).toThrow(/llmModel.*not allowed/);
+    }
+  });
 });
 
 describe('writePgsodiumKeyFile', () => {

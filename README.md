@@ -28,6 +28,52 @@ npx create-op-node bootstrap
 
 Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, reads the pgsodium key + Tunnel token from the Studio's Keychain (or prompts you to paste them once, then persists for re-runs), writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, and finally `docker compose --profile public pull && up -d` brings the whole stack online. Health-check loop waits until all containers are `(healthy)`.
 
+### Choosing the LLM model
+
+By default bootstrap pulls `qwen3.5:9b` (LLM) and `nomic-embed-text`
+(embeddings) — small enough to validate the inference path on first
+run. Override with flags:
+
+```bash
+# Just swap the LLM, keep the default embedding model:
+npx create-op-node bootstrap --region us-ca --llm-model llama3.3:70b
+
+# Override both:
+npx create-op-node bootstrap \
+  --region us-ca \
+  --llm-model llama3.3:70b \
+  --embedding-model mxbai-embed-large
+```
+
+The chosen models flow two places:
+
+1. **Ollama**: bootstrap pulls + warms them so the daemon has them
+   resident before the stack comes up. The embedding model pulls first
+   (small, fast feedback); the LLM pulls second (can be tens of GB).
+2. **LaunchAgent**: the plist exports `LLM_MODEL` and `EMBEDDINGS_MODEL`
+   into the launchd session, which Docker Desktop inherits — so compose
+   services read them via env, no `.env.production` edits needed.
+
+> **`--embedding-model` only takes effect when the knowledge service
+> runs with `EMBEDDINGS_PROVIDER=ollama`.** The default provider is
+> `xenova` (in-process), which bundles its own embedding model and
+> ignores both `EMBEDDINGS_MODEL` and the local Ollama model. Setting
+> `EMBEDDINGS_PROVIDER=ollama` is a separate decision (set in your
+> region repo's `.env.production`) — see `docs/provider-pattern.md`.
+
+> **Template contract**: for `--llm-model` to actually change the
+> running model, the region repo's `docker-compose-prod.yml` must use
+> `${LLM_MODEL:-qwen3.5:9b}` (or similar) on the knowledge service's
+> `environment:` block. The current `opuspopuli-node` template does;
+> a fork that hardcodes the value would ignore the flag silently.
+
+For RAM sizing, the [Docker resources doc](https://github.com/OpusPopuli/opuspopuli-node/blob/main/docs/docker-resources.md)
+has a tier table: 9B-class needs ~8 GB Ollama; 70B-class needs ~50 GB;
+frontier MoE needs ~80 GB. Allocate Docker the remainder.
+
+To switch models post-bootstrap, re-run with the new flag and
+`docker compose down && up -d` to pick up the changed env.
+
 ### Local-only mode (no Cloudflare)
 
 For local dev / testing — frontend on your laptop, backend on the Studio

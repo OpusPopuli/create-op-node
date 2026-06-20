@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-06-19
+
+### Added
+
+- **`bootstrap --llm-model <model>`** and **`--embedding-model <model>`**
+  flags. Override the defaults (`qwen3.5:9b` and `nomic-embed-text`)
+  with any Ollama model identifier (e.g. `llama3.3:70b`,
+  `qwen2.5:72b`). Bootstrap pulls + warms whichever models you pick,
+  embedding model first (small, fast operator feedback) then the LLM.
+- **LaunchAgent exports `LLM_MODEL` and `EMBEDDINGS_MODEL`** into the
+  launchd session. Docker Desktop inherits them, so the knowledge
+  service reads them via env without operator edits to
+  `.env.production`. The plist's `sh -c` body validates both values
+  against a model-name safe set (`[A-Za-z0-9][A-Za-z0-9._:/-]*`) —
+  same defense-in-depth pattern as the existing TUNNEL_TOKEN
+  injection guard.
+- `DEFAULT_LLM_MODEL` and `DEFAULT_EMBEDDING_MODEL` exported scalars in
+  `src/lib/ollama.ts` (existing `DEFAULT_MODELS` is now composed from
+  them, so they can't drift).
+- `resolveModels(opts)` exported pure helper paralleling
+  `resolveComposeFiles`. Five unit tests cover default fallback,
+  per-flag override, and the embedding-first ordering invariant.
+- README "Choosing the LLM model" subsection with both single-flag and
+  two-flag examples, a callout that `--embedding-model` only takes
+  effect with `EMBEDDINGS_PROVIDER=ollama`, and a callout documenting
+  the template-side `${LLM_MODEL:-default}` contract.
+
 ## [0.5.0] — 2026-06-19
 
 ### Added
@@ -167,6 +194,7 @@ testable from `npx create-op-node`.
   a hostile path becoming shell injection in launchd's `sh -c` body.
 - `pnpm audit`, `trivy`, `gitleaks` all clean.
 
+[0.6.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.6.0
 [0.5.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.5.0
 [0.4.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.4.0
 [0.3.0]: https://github.com/OpusPopuli/create-op-node/releases/tag/v0.3.0
