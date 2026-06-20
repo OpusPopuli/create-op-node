@@ -7,6 +7,7 @@ vi.mock('execa', () => ({
 }));
 
 import {
+  detectUnifiedMemoryGB,
   disableDiskSleep,
   enableAutoRestartOnPowerFailure,
   inspectSystem,
@@ -175,5 +176,57 @@ describe('disableDiskSleep', () => {
     expect(r.ok).toBe(true);
     const [, args] = execaMock.mock.calls[0] as [string, string[]];
     expect(args).toEqual(['pmset', '-a', 'disksleep', '0']);
+  });
+});
+
+describe('detectUnifiedMemoryGB', () => {
+  it('returns 128 for a 128 GB Studio (hw.memsize = 128 * 2^30)', async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: `${128 * 2 ** 30}\n`,
+      stderr: '',
+    });
+    const gb = await detectUnifiedMemoryGB();
+    expect(gb).toBe(128);
+    const [cmd, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(cmd).toBe('sysctl');
+    expect(args).toEqual(['-n', 'hw.memsize']);
+  });
+
+  it('rounds to the nearest GB (vendor reports can be slightly off)', async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: `${Math.round(36 * 2 ** 30 - 100_000_000)}\n`, // ~36 GB minus 100 MB
+      stderr: '',
+    });
+    const gb = await detectUnifiedMemoryGB();
+    expect(gb).toBe(36);
+  });
+
+  it('returns null when sysctl is not on PATH (non-macOS)', async () => {
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    execaMock.mockRejectedValueOnce(err);
+    const gb = await detectUnifiedMemoryGB();
+    expect(gb).toBeNull();
+  });
+
+  it('returns null when sysctl exits non-zero', async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 1,
+      stdout: '',
+      stderr: 'unknown oid',
+    });
+    const gb = await detectUnifiedMemoryGB();
+    expect(gb).toBeNull();
+  });
+
+  it('returns null when output is unparseable', async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: 'not a number\n',
+      stderr: '',
+    });
+    const gb = await detectUnifiedMemoryGB();
+    expect(gb).toBeNull();
   });
 });

@@ -31,6 +31,7 @@ const fullInput = (): ResetInput => ({
     repoPath: '/repo',
     composeFiles: ['/repo/docker-compose-prod.yml'],
     wipeVolumes: false,
+    wipeImages: false,
     removeOrphans: true,
   },
   launchAgent: {
@@ -84,6 +85,42 @@ describe('runReset', () => {
     const reportP = await runReset(fullInput(), depsFor());
     expect(reportW.phases.find((ph) => ph.name === RESET_PHASES.STOP_STACK)?.detail).toContain('destroyed');
     expect(reportP.phases.find((ph) => ph.name === RESET_PHASES.STOP_STACK)?.detail).toContain('preserved');
+  });
+
+  it('passes removeImages: "all" through to composeDown when wipeImages is set', async () => {
+    const deps = depsFor();
+    const input = fullInput();
+    input.stack!.wipeImages = true;
+    input.stack!.wipeVolumes = true; // CLI enforces this combo
+    await runReset(input, deps);
+    expect(deps.composeDown).toHaveBeenCalledWith(
+      expect.objectContaining({ removeImages: 'all' }),
+    );
+  });
+
+  it('omits removeImages when wipeImages is false', async () => {
+    const deps = depsFor();
+    await runReset(fullInput(), deps);
+    const call = (deps.composeDown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as object;
+    expect(call).not.toHaveProperty('removeImages');
+  });
+
+  it('detail mentions images removed when wipeImages is set', async () => {
+    const input = fullInput();
+    input.stack!.wipeImages = true;
+    input.stack!.wipeVolumes = true;
+    const report = await runReset(input, depsFor());
+    const detail = report.phases.find((ph) => ph.name === RESET_PHASES.STOP_STACK)?.detail;
+    expect(detail).toContain('images removed');
+  });
+
+  it('dry-run detail shows --rmi all when wipeImages set', async () => {
+    const input = fullInput();
+    input.dryRun = true;
+    input.stack!.wipeImages = true;
+    input.stack!.wipeVolumes = true;
+    const report = await runReset(input, depsFor());
+    expect(report.phases.find((ph) => ph.name === RESET_PHASES.STOP_STACK)?.detail).toContain('--rmi all');
   });
 
   it('skips Stop stack when input.stack is undefined', async () => {

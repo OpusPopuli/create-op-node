@@ -12,6 +12,7 @@ import {
   STUDIO_PACKAGES,
 } from '../lib/homebrew.js';
 import {
+  detectUnifiedMemoryGB,
   disableDiskSleep,
   enableAutoRestartOnPowerFailure,
   inspectSystem,
@@ -592,13 +593,31 @@ export const LLM_MODEL_CHOICES = [
 const OTHER_SENTINEL = '__OTHER__';
 
 /**
+ * Pick the LLM that fits the operator's unified-memory budget. Ollama uses
+ * roughly the model's parameter count in GB (in q4 quantization), plus a
+ * context-window buffer. The Studio also needs RAM for macOS + Docker +
+ * the data services. Thresholds below leave 30–40 GB headroom for that.
+ *
+ * Returns null when `ramGB` is null (sysctl unavailable) so the caller
+ * falls back to the platform-default recommendation. (Pure helper —
+ * exported for unit tests.)
+ */
+export function recommendLlmModel(ramGB: number | null): string | null {
+  if (ramGB === null) return null;
+  if (ramGB >= 96) return 'qwen2.5:72b';
+  if (ramGB >= 48) return 'qwen2.5:32b';
+  return 'qwen3.5:9b';
+}
+
+/**
  * Prompt the operator to pick an LLM model. Skipped when `--yes` is set
  * (returns the conservative default) or when `--llm-model` was passed
  * (caller short-circuits before this is reached).
  *
- * Defaults the selection to llama3.3:70b — the 70B-class tier the
- * documented Studio config (128 GB / M4 Max) targets. Operators on
- * smaller Studios pick the 9B-class option.
+ * Pre-selects based on the Studio's detected unified memory — 128 GB
+ * studios get qwen2.5:72b, 64 GB get qwen2.5:32b, smaller fall back to
+ * qwen3.5:9b. When detection fails (non-macOS, sysctl missing), defaults
+ * to qwen2.5:72b (the documented platform target).
  *
  * "Other..." branches to a text input validated against the same
  * MODEL_NAME_RE the LaunchAgent uses for setenv injection safety.
@@ -606,10 +625,18 @@ const OTHER_SENTINEL = '__OTHER__';
 async function selectLlmModel(opts: { yes?: boolean }): Promise<string> {
   if (opts.yes) return DEFAULT_LLM_MODEL;
 
+  const ramGB = await detectUnifiedMemoryGB();
+  const recommended = recommendLlmModel(ramGB) ?? 'qwen2.5:72b';
+  const ramNote = ramGB !== null
+    ? `Detected ${ramGB} GB unified memory — pre-selecting ${recommended}.`
+    : `Couldn't detect Studio memory — defaulting to ${recommended} (override if your config differs).`;
+
+  p.note(ramNote, 'Hardware');
+
   const choice = unwrap(
     await p.select({
       message: 'Choose the LLM model to pull + run',
-      initialValue: 'qwen2.5:72b',
+      initialValue: recommended,
       options: [
         ...LLM_MODEL_CHOICES.map((c) => ({ value: c.value, label: c.label, hint: c.hint })),
         {

@@ -33,6 +33,7 @@ interface ResetOptions {
   composeFile?: string[];
   envFile?: string;
   wipeData?: boolean;
+  wipeImages?: boolean;
   removeOrphans?: boolean;
   skipStack?: boolean;
   skipLaunchAgent?: boolean;
@@ -95,6 +96,10 @@ export interface ResetInput {
     composeFiles: string[];
     envFile?: string;
     wipeVolumes: boolean;
+    /** When true, also remove all images referenced by the compose files
+     *  (passes `--rmi all` to compose down). Forces a fresh pull on the
+     *  next bootstrap — used for "wipe everything and start over" loops. */
+    wipeImages: boolean;
     removeOrphans: boolean;
   };
   launchAgent?: {
@@ -144,7 +149,7 @@ export async function runReset(input: ResetInput, deps: ResetDeps = DEFAULT_DEPS
     push({
       name: RESET_PHASES.STOP_STACK,
       status: 'dry-run',
-      detail: `would run: docker compose -f ${input.stack.composeFiles.join(' -f ')} down${input.stack.wipeVolumes ? ' -v' : ''}${input.stack.removeOrphans ? ' --remove-orphans' : ''}`,
+      detail: `would run: docker compose -f ${input.stack.composeFiles.join(' -f ')} down${input.stack.wipeVolumes ? ' -v' : ''}${input.stack.removeOrphans ? ' --remove-orphans' : ''}${input.stack.wipeImages ? ' --rmi all' : ''}`,
     });
   } else {
     const result = await deps.composeDown({
@@ -153,12 +158,17 @@ export async function runReset(input: ResetInput, deps: ResetDeps = DEFAULT_DEPS
       ...(input.stack.envFile ? { envFile: input.stack.envFile } : {}),
       wipeVolumes: input.stack.wipeVolumes,
       removeOrphans: input.stack.removeOrphans,
+      ...(input.stack.wipeImages ? { removeImages: 'all' as const } : {}),
     });
     if (result.ok) {
+      const bits = [
+        input.stack.wipeVolumes ? 'volumes destroyed' : 'containers stopped, volumes preserved',
+        input.stack.wipeImages ? 'images removed (next bootstrap will re-pull)' : null,
+      ].filter(Boolean);
       push({
         name: RESET_PHASES.STOP_STACK,
         status: 'ok',
-        detail: input.stack.wipeVolumes ? 'volumes destroyed' : 'containers stopped, volumes preserved',
+        detail: bits.join('; '),
       });
     } else {
       push({ name: RESET_PHASES.STOP_STACK, status: 'fail', detail: result.reason ?? 'unknown failure' });
@@ -269,6 +279,12 @@ export const resetCommand = new Command('reset')
   )
   .addOption(
     new Option(
+      '--wipe-images',
+      'ALSO remove all docker images referenced by the compose file (adds --rmi all). Forces a fresh pull on next bootstrap. Implies --wipe-data semantics for the iteration loop ("wipe everything and start over"). Default off.',
+    ).default(false),
+  )
+  .addOption(
+    new Option(
       '--no-remove-orphans',
       'Do NOT pass --remove-orphans to compose down. Preserves containers from compose files no longer included.',
     ),
@@ -288,7 +304,12 @@ export const resetCommand = new Command('reset')
   .action(async (opts: ResetOptions) => {
     p.intro(pc.bgCyan(pc.black(' create-op-node reset ')));
 
-    const wipeData = opts.wipeData ?? false;
+    const wipeImages = opts.wipeImages ?? false;
+    // --wipe-images implies --wipe-data — the iteration loop semantics are
+    // "wipe everything." If the operator passed --wipe-images but not
+    // --wipe-data, we still wipe volumes (no point keeping data tied to
+    // images that are about to disappear).
+    const wipeData = (opts.wipeData ?? false) || wipeImages;
     const removeOrphans = opts.removeOrphans ?? true; // commander --no-remove-orphans sets this to false
 
     // ---- Region (needed for confirmation phrase + repo discovery) ----
@@ -387,6 +408,7 @@ export const resetCommand = new Command('reset')
         `pgsodium key file:     ${keyFileExists ? pc.cyan(launchAgentPaths.keyFile) : pc.dim('not present')}`,
         `Registry to log out:   ${pc.cyan(opts.registry ?? GHCR_REGISTRY)}`,
         `Volume policy:         ${wipeData ? pc.red('WIPE') : pc.green('preserve (default)')}`,
+        `Image policy:          ${wipeImages ? pc.red('WIPE (re-pull on next bootstrap)') : pc.green('keep (default)')}`,
         `Dry run:               ${opts.dryRun ? pc.yellow('yes') : pc.dim('no')}`,
       ].join('\n'),
       'Snapshot',
@@ -424,6 +446,7 @@ export const resetCommand = new Command('reset')
           repoPath,
           composeFiles: resolveComposeFiles(repoPath, opts.composeFile),
           wipeVolumes: wipeData,
+          wipeImages,
           removeOrphans,
           ...(opts.envFile ? { envFile: opts.envFile } : {}),
         }

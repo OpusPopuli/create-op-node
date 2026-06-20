@@ -166,6 +166,42 @@ describe('composeDown', () => {
     expect(r.reason).toContain('compose down -v');
     expect(r.reason).toContain('volume in use');
   });
+
+  it('adds --rmi all when removeImages: "all"', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    await composeDown({
+      files: ['a.yml'],
+      cwd: '/tmp',
+      wipeVolumes: true,
+      removeImages: 'all',
+    });
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual(['compose', '-f', 'a.yml', 'down', '-v', '--rmi', 'all']);
+  });
+
+  it('adds --rmi local when removeImages: "local"', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    await composeDown({
+      files: ['a.yml'],
+      cwd: '/tmp',
+      removeImages: 'local',
+    });
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual(['compose', '-f', 'a.yml', 'down', '--rmi', 'local']);
+  });
+
+  it('labels the failure reason with --rmi mode when removeImages is set', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: 'image in use' });
+    const r = await composeDown({
+      files: ['a.yml'],
+      cwd: '/tmp',
+      wipeVolumes: true,
+      removeImages: 'all',
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain('compose down -v --rmi all');
+    expect(r.reason).toContain('image in use');
+  });
 });
 
 describe('composeRemoveService', () => {
