@@ -30,9 +30,23 @@ Configures macOS power settings, installs Homebrew + the CLI tool list, sets up 
 
 ### Choosing the LLM model
 
-By default bootstrap pulls `qwen3.5:9b` (LLM) and `nomic-embed-text`
-(embeddings) — small enough to validate the inference path on first
-run. Override with flags:
+When you run `bootstrap` interactively (no `-y`, no `--llm-model` flag),
+you'll get a curated picker:
+
+- `qwen2.5:72b` — 72B, ~50 GB Ollama RAM. **Default**, recommended for
+  128 GB Studios. Best Spanish + multilingual quality.
+- `qwen2.5:32b` — 32B, ~22 GB Ollama RAM. Middle tier for 64 GB Studios.
+- `qwen3.5:9b` — 9B, ~8 GB Ollama RAM. Validation runs or smaller
+  Studios (36–48 GB).
+- `Other…` — any Ollama model name you specify.
+
+The picker is Qwen-only because the Opus Populi platform serves
+Spanish-speaking civic users and Qwen has the strongest Spanish (and
+broader multilingual) capability of the open-weight models in this
+size class. Pick "Other…" for non-Qwen models.
+
+For non-interactive runs (`-y`) or scripted invocations, the LLM
+defaults to `qwen3.5:9b` (small, fast) — pass `--llm-model` to override:
 
 ```bash
 # Just swap the LLM, keep the default embedding model:

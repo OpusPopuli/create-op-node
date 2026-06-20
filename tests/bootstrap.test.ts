@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
+import { estimatedPullTime, LLM_MODEL_CHOICES, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_LLM_MODEL } from '../src/lib/ollama.js';
 
 describe('resolveComposeFiles', () => {
@@ -61,5 +61,65 @@ describe('resolveModels', () => {
     const [first, second] = resolveModels({});
     expect(first).toBe(DEFAULT_EMBEDDING_MODEL);
     expect(second).toBe(DEFAULT_LLM_MODEL);
+  });
+});
+
+describe('LLM_MODEL_CHOICES', () => {
+  it('exports a non-empty curated list of model choices for the interactive picker', () => {
+    expect(LLM_MODEL_CHOICES.length).toBeGreaterThan(0);
+    for (const choice of LLM_MODEL_CHOICES) {
+      expect(choice).toHaveProperty('value');
+      expect(choice).toHaveProperty('label');
+      expect(choice).toHaveProperty('hint');
+    }
+  });
+
+  it('includes a 70B-class option as the lead choice', () => {
+    expect(LLM_MODEL_CHOICES[0]?.value).toBe('qwen2.5:72b');
+  });
+
+  it('includes the 9B-class default for smaller Studios', () => {
+    const values = LLM_MODEL_CHOICES.map((c) => c.value);
+    expect(values).toContain(DEFAULT_LLM_MODEL); // qwen3.5:9b
+  });
+
+  it('every hint mentions RAM or pull-time so operators can pick based on hardware', () => {
+    for (const choice of LLM_MODEL_CHOICES) {
+      expect(choice.hint).toMatch(/RAM|min|pull/i);
+    }
+  });
+
+  it('every option is a Qwen model (Spanish-language platform constraint)', () => {
+    // We deliberately curate Qwen-only because Qwen has the strongest
+    // multilingual + Spanish capability of the open-weight options in
+    // this size class. Operators who need a non-Qwen model use "Other…"
+    // at the prompt.
+    for (const choice of LLM_MODEL_CHOICES) {
+      expect(choice.value.toLowerCase()).toContain('qwen');
+    }
+  });
+});
+
+describe('estimatedPullTime', () => {
+  it('returns 9B-class estimate for small models', () => {
+    expect(estimatedPullTime('qwen3.5:9b')).toMatch(/3–5 min/);
+    expect(estimatedPullTime('mistral:7b')).toMatch(/3–5 min/);
+  });
+
+  it('returns 32B estimate for mid-tier models', () => {
+    expect(estimatedPullTime('qwen2.5:32b')).toMatch(/15–30 min/);
+  });
+
+  it('returns 70B estimate for large models', () => {
+    expect(estimatedPullTime('qwen2.5:72b')).toMatch(/30–60 min/);
+    expect(estimatedPullTime('llama3.3:70b')).toMatch(/30–60 min/);
+  });
+
+  it('returns frontier-MoE estimate for sparse-MoE shapes', () => {
+    expect(estimatedPullTime('mixtral:8x22b-q4')).toMatch(/60\+ min/);
+  });
+
+  it('returns a soft fallback for unrecognized shapes', () => {
+    expect(estimatedPullTime('unrecognized-model')).toMatch(/depends on/);
   });
 });

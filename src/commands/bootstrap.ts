@@ -130,15 +130,20 @@ export const bootstrapCommand = new Command('bootstrap')
       : ['docker-compose-prod.yml', 'docker-compose-backup.yml'];
     const composeFile = opts.composeFile ?? composeFileDefault;
 
-    // Model selection: defaults baked into ollama.ts; flags override. The
-    // resolved values flow to both Ollama (pull + warm) and the LaunchAgent
-    // (LLM_MODEL / EMBEDDINGS_MODEL env vars Docker Desktop inherits).
+    // Model selection: flags override > interactive prompt > defaults.
+    // The resolved values flow to both Ollama (pull + warm) and the
+    // LaunchAgent (LLM_MODEL / EMBEDDINGS_MODEL env vars Docker Desktop
+    // inherits).
     //
     // Note: the LaunchAgent ALWAYS exports both env vars now that they
     // default — bootstrap is the source of truth for what model runs.
     // The absence of a flag doesn't fall through to a compose default;
     // it falls through to the CLI's default. (N3)
-    const [embeddingModel, llmModel] = resolveModels(opts);
+    const llmModelChoice = opts.llmModel ?? (await selectLlmModel(opts));
+    const [embeddingModel, llmModel] = resolveModels({
+      llmModel: llmModelChoice,
+      ...(opts.embeddingModel !== undefined ? { embeddingModel: opts.embeddingModel } : {}),
+    });
 
     // ---- Phase 1: macOS sanity ----
     const sysSpin = p.spinner();
@@ -207,7 +212,7 @@ export const bootstrapCommand = new Command('bootstrap')
       }
 
       const brewSpin = p.spinner();
-      brewSpin.start('Installing Studio packages…');
+      brewSpin.start('Installing Studio packages… (~5–15 min first run)');
       const report = await installPackages(STUDIO_PACKAGES, (pkg, status) => {
         brewSpin.message(`${status}: ${pkg.name}`);
       });
@@ -344,7 +349,7 @@ export const bootstrapCommand = new Command('bootstrap')
     // ---- Phase 8: Ollama ----
     if (!opts.skipOllama) {
       const olSpin = p.spinner();
-      olSpin.start('Pulling + warming Ollama models…');
+      olSpin.start(`Pulling + warming Ollama models… (${estimatedPullTime(llmModel)})`);
       let olHealth = await checkOllamaHealth();
       if (!olHealth.reachable) {
         // S5 review fix: try to start the service before bailing. The
@@ -431,7 +436,7 @@ export const bootstrapCommand = new Command('bootstrap')
     }
 
     const pullSpin = p.spinner();
-    pullSpin.start('Pulling images from ghcr.io…');
+    pullSpin.start('Pulling images from ghcr.io… (~5–15 min first run, < 1 min cached)');
     const pull = await composePull(composeOpts);
     if (!pull.ok) {
       pullSpin.stop(pc.red('✗ compose pull failed.'));
@@ -452,7 +457,7 @@ export const bootstrapCommand = new Command('bootstrap')
 
     // ---- Phase 10: health-check loop ----
     const healthSpin = p.spinner();
-    healthSpin.start('Polling for healthy containers (5s, up to 5 minutes)…');
+    healthSpin.start('Polling for healthy containers… (every 5s, up to 5 min)');
     const outcome = await waitForHealthy(composeOpts, {
       onPoll: (snaps) => {
         const healthy = snaps.filter((s) => s.health === 'healthy').length;
@@ -557,6 +562,96 @@ export function resolveModels(opts: {
     opts.embeddingModel ?? DEFAULT_EMBEDDING_MODEL,
     opts.llmModel ?? DEFAULT_LLM_MODEL,
   ] as const;
+}
+
+/** Curated LLM choices shown in the interactive picker. Qwen-only because
+ *  the Opus Populi platform serves Spanish-speaking civic users and Qwen
+ *  has the strongest Spanish (and broader multilingual) capability of the
+ *  open-weight models in this tier. Other Ollama models are still
+ *  reachable via the "Other…" sentinel. Sized per
+ *  docs/docker-resources.md in the opuspopuli-node template.
+ *  Order = display order. */
+export const LLM_MODEL_CHOICES = [
+  {
+    value: 'qwen2.5:72b',
+    label: 'qwen2.5:72b',
+    hint: '72B, ~50 GB Ollama RAM. Recommended for 128 GB Studios. Best Spanish + multilingual quality. Pull ~40 GB, 30–60 min.',
+  },
+  {
+    value: 'qwen2.5:32b',
+    label: 'qwen2.5:32b',
+    hint: '32B, ~22 GB Ollama RAM. Middle-tier for 64 GB Studios. Solid Spanish, faster than 72B. Pull ~20 GB, 15–30 min.',
+  },
+  {
+    value: 'qwen3.5:9b',
+    label: 'qwen3.5:9b',
+    hint: '9B, ~8 GB Ollama RAM. Validation / smaller Studios (36–48 GB). Pull ~5 GB, 3–5 min.',
+  },
+] as const;
+
+const OTHER_SENTINEL = '__OTHER__';
+
+/**
+ * Prompt the operator to pick an LLM model. Skipped when `--yes` is set
+ * (returns the conservative default) or when `--llm-model` was passed
+ * (caller short-circuits before this is reached).
+ *
+ * Defaults the selection to llama3.3:70b — the 70B-class tier the
+ * documented Studio config (128 GB / M4 Max) targets. Operators on
+ * smaller Studios pick the 9B-class option.
+ *
+ * "Other..." branches to a text input validated against the same
+ * MODEL_NAME_RE the LaunchAgent uses for setenv injection safety.
+ */
+async function selectLlmModel(opts: { yes?: boolean }): Promise<string> {
+  if (opts.yes) return DEFAULT_LLM_MODEL;
+
+  const choice = unwrap(
+    await p.select({
+      message: 'Choose the LLM model to pull + run',
+      initialValue: 'qwen2.5:72b',
+      options: [
+        ...LLM_MODEL_CHOICES.map((c) => ({ value: c.value, label: c.label, hint: c.hint })),
+        {
+          value: OTHER_SENTINEL,
+          label: 'Other…',
+          hint: 'Specify any Ollama model name (e.g. mistral-small:24b)',
+        },
+      ],
+    }),
+  );
+
+  if (choice !== OTHER_SENTINEL) return choice;
+
+  return unwrap(
+    await p.text({
+      message: 'Ollama model name',
+      placeholder: 'e.g. mistral-small:24b',
+      validate: (v) =>
+        /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(v ?? '')
+          ? undefined
+          : 'Letters, digits, `.`, `:`, `_`, `-`, `/` only; must start with alphanumeric',
+    }),
+  );
+}
+
+/** Rough wall-clock estimate for pulling an Ollama model, based on the
+ *  size suffix in the tag. Used to populate the Ollama-pull spinner so
+ *  the operator knows whether to wait or step away. Estimates assume a
+ *  ~100 Mbps connection; faster networks finish proportionally sooner.
+ *
+ *  Sparse-MoE shapes (`8x22b`) are matched before the plain `Nb` parse
+ *  because their size suffix in the tag refers to per-expert size, not
+ *  the total model footprint. */
+export function estimatedPullTime(model: string): string {
+  if (/\d+x\d+b/i.test(model)) return '~60+ min for frontier MoE';
+  const match = /(\d+)b\b/i.exec(model);
+  if (!match) return 'time depends on model size';
+  const size = Number.parseInt(match[1]!, 10);
+  if (size <= 13) return '~3–5 min for ≤ 13B-class';
+  if (size <= 35) return '~15–30 min for ~32B-class';
+  if (size <= 80) return '~30–60 min for 70B-class';
+  return '~60+ min for frontier-class';
 }
 
 function kvBool(b: boolean): string {
