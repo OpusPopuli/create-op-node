@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/OpusPopuli/create-op-node/compare/v0.8.0...v0.9.0) (2026-06-20)
+
+
+### Features
+
+* auto-generate Supabase admin credentials into Keychain ([45e250c](https://github.com/OpusPopuli/create-op-node/commit/45e250c70a338b02dfd1a2728c41e01518fdbeec))
+* auto-generate Supabase admin credentials into Keychain ([685182b](https://github.com/OpusPopuli/create-op-node/commit/685182b767ef6eb22be4db50a386b46af1ad5425))
+
 ## [0.8.0](https://github.com/OpusPopuli/create-op-node/compare/v0.7.0...v0.8.0) (2026-06-20)
 
 
