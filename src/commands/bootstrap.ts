@@ -33,6 +33,7 @@ import {
   verifySupabaseJwt,
 } from '../lib/secrets.js';
 import { setupLaunchAgent } from '../lib/launchagent.js';
+import { writeEnvFile } from '../lib/env-file.js';
 import {
   composePull,
   composeRemoveService,
@@ -481,6 +482,46 @@ export const bootstrapCommand = new Command('bootstrap')
         ),
       );
     }
+
+    // ---- Phase 6b: write .env file for docker compose auto-load ----
+    //
+    // launchctl setenv only propagates to processes spawned BY launchd
+    // AFTER the setenv call. SSH-spawned shells and pre-existing
+    // Terminal.app instances never see the new vars — so docker compose
+    // run from those shells hard-fails on `${VAR:?…}` even after
+    // `launchctl getenv` confirms launchd has them.
+    //
+    // Writing `.env` to the repo root sidesteps the propagation problem:
+    // Docker Compose auto-loads `.env` from the directory containing the
+    // compose file. Bootstrap's own phase-9 subprocess, the operator's
+    // manual `docker compose up`, an unattended cron — all see the same
+    // values without any shell-env magic.
+    //
+    // The LaunchAgent stays in place as a parallel mechanism for tools
+    // that don't read from .env (none of ours today, but kept for
+    // forward-compat — e.g. when an operator scripts something outside
+    // the compose project).
+    const envSpin = p.spinner();
+    envSpin.start('Writing .env for docker compose auto-load…');
+    const envWrite = await writeEnvFile({
+      repoDir: repoPath,
+      pgsodiumRootKey: pgsodiumKey,
+      postgresPassword,
+      jwtSecret,
+      supabaseAnonKey,
+      supabaseServiceRoleKey,
+      dashboardPassword,
+      supabaseUrl,
+      ...(tunnelToken !== undefined ? { tunnelToken } : {}),
+      ...(llmModel !== undefined ? { llmModel } : {}),
+      ...(embeddingModel !== undefined ? { embeddingModel } : {}),
+    });
+    if (!envWrite.ok) {
+      envSpin.stop(pc.red('✗ .env write failed.'));
+      p.cancel(envWrite.reason ?? '.env write failed.');
+      process.exit(1);
+    }
+    envSpin.stop(pc.green(`✓ Wrote ${envWrite.path} (mode 0600).`));
 
     // ---- Phase 7: ghcr.io login ----
     const ghcrSpin = p.spinner();
