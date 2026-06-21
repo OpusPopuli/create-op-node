@@ -592,7 +592,7 @@ export const bootstrapCommand = new Command('bootstrap')
       SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
       DASHBOARD_PASSWORD: dashboardPassword,
       SUPABASE_URL: supabaseUrl,
-      AUTH_JWT_SECRET: process.env.AUTH_JWT_SECRET ?? jwtSecret,
+      AUTH_JWT_SECRET: process.env['AUTH_JWT_SECRET'] ?? jwtSecret,
       ...(tunnelToken !== undefined ? { TUNNEL_TOKEN: tunnelToken } : {}),
       ...(llmModel ? { LLM_MODEL: llmModel } : {}),
       ...(embeddingModel ? { EMBEDDINGS_MODEL: embeddingModel } : {}),
