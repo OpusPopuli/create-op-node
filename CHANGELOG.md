@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1](https://github.com/OpusPopuli/create-op-node/compare/v0.9.0...v0.9.1) (2026-06-21)
+
+
+### Bug Fixes
+
+* **bootstrap:** install op-compose wrapper for Keychain-on-demand env ([a519714](https://github.com/OpusPopuli/create-op-node/commit/a519714ea75859c0c355a5eb2f41f25c84360bcd))
+* **bootstrap:** install op-compose wrapper for Keychain-on-demand env ([3cdc744](https://github.com/OpusPopuli/create-op-node/commit/3cdc74419ab179c0eed69590f492c0c6ab9fe461))
+* **typecheck:** bracket-notation for ProcessEnv index access ([fe06046](https://github.com/OpusPopuli/create-op-node/commit/fe06046a6e4abb4d7f6891335809f116ac0006f7))
+
 ## [0.9.0](https://github.com/OpusPopuli/create-op-node/compare/v0.8.0...v0.9.0) (2026-06-20)
 
 
