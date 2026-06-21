@@ -88,6 +88,13 @@ export interface ComposeOptions {
    *  bootstrap in local-only mode passes an empty array so cloudflared
    *  stays down. */
   profiles?: ReadonlyArray<string>;
+  /** Extra env vars passed to the docker compose subprocess. Used by
+   *  bootstrap to hydrate Keychain-loaded secrets (POSTGRES_PASSWORD,
+   *  JWT_SECRET, the Supabase JWTs, etc.) at compose-invocation time
+   *  without writing them to a plaintext `.env` file on disk. Per the
+   *  vault-first principle (#811), the wrapper script (`bin/op-compose`)
+   *  is the operator-facing version of the same pattern. */
+  env?: NodeJS.ProcessEnv;
 }
 
 function composeArgs(opts: ComposeOptions, sub: string[]): string[] {
@@ -102,15 +109,21 @@ export interface ComposeResult {
   reason?: string;
 }
 
+/** Build the execa options object once — both env and cwd flow from
+ *  ComposeOptions to safeExeca so subprocess hydration works uniformly. */
+function execOpts(opts: ComposeOptions): { cwd: string; env?: NodeJS.ProcessEnv } {
+  return opts.env ? { cwd: opts.cwd, env: opts.env } : { cwd: opts.cwd };
+}
+
 /** `docker compose -f … pull`. Idempotent on first run; pulls new image tags. */
 export async function composePull(opts: ComposeOptions): Promise<ComposeResult> {
-  const res = await safeExeca('docker', composeArgs(opts, ['pull']));
+  const res = await safeExeca('docker', composeArgs(opts, ['pull']), execOpts(opts));
   return result(res, 'compose pull');
 }
 
 /** `docker compose -f … up -d --remove-orphans`. */
 export async function composeUp(opts: ComposeOptions): Promise<ComposeResult> {
-  const res = await safeExeca('docker', composeArgs(opts, ['up', '-d', '--remove-orphans']));
+  const res = await safeExeca('docker', composeArgs(opts, ['up', '-d', '--remove-orphans']), execOpts(opts));
   return result(res, 'compose up');
 }
 
@@ -128,7 +141,7 @@ export async function composeRemoveService(
   opts: ComposeOptions,
   service: string,
 ): Promise<ComposeResult> {
-  const res = await safeExeca('docker', composeArgs(opts, ['rm', '-sfv', service]));
+  const res = await safeExeca('docker', composeArgs(opts, ['rm', '-sfv', service]), execOpts(opts));
   return result(res, `compose rm ${service}`);
 }
 
@@ -162,7 +175,7 @@ export async function composeDown(opts: ComposeDownOptions): Promise<ComposeResu
   ]
     .filter(Boolean)
     .join(' ');
-  const res = await safeExeca('docker', composeArgs(opts, flags));
+  const res = await safeExeca('docker', composeArgs(opts, flags), execOpts(opts));
   return result(res, label);
 }
 
@@ -265,7 +278,7 @@ function normalize(raw: unknown): ContainerSnapshot {
  *   - `ContainerSnapshot[]` populated on success.
  */
 export async function composePs(opts: ComposeOptions): Promise<ContainerSnapshot[] | null> {
-  const res = await safeExeca('docker', composeArgs(opts, ['ps', '--format', 'json']));
+  const res = await safeExeca('docker', composeArgs(opts, ['ps', '--format', 'json']), execOpts(opts));
   if (res === null || res.exitCode !== 0) return null;
   return parseComposePs(res.stdout);
 }

@@ -33,7 +33,17 @@ export interface SafeExecaResult {
 export async function safeExeca(
   cmd: string,
   args: string[],
-  options?: { input?: string },
+  options?: {
+    input?: string;
+    /** Working directory for the child. Defaults to the parent's cwd. */
+    cwd?: string;
+    /** Extra env vars merged into the child's env (execa's default
+     *  extendEnv: true means these add to process.env rather than
+     *  replace). Used by bootstrap's compose subprocess calls so the
+     *  Keychain-loaded secrets reach docker compose without first
+     *  being written to a plaintext .env file on disk. */
+    env?: NodeJS.ProcessEnv;
+  },
 ): Promise<SafeExecaResult | null> {
   try {
     const result = await execa(cmd, args, { reject: false, ...options });
