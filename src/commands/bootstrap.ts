@@ -33,6 +33,7 @@ import {
   verifySupabaseJwt,
 } from '../lib/secrets.js';
 import { setupLaunchAgent } from '../lib/launchagent.js';
+import { installOpComposeWrapper } from '../lib/op-compose-install.js';
 import {
   composePull,
   composeRemoveService,
@@ -482,6 +483,28 @@ export const bootstrapCommand = new Command('bootstrap')
       );
     }
 
+    // ---- Phase 6b: install op-compose wrapper ----
+    //
+    // launchctl setenv doesn't reach pre-existing shells or sshd children,
+    // so operator-driven `docker compose` invocations would hard-fail on
+    // the `${VAR:?…}` enforcement in the template even though the values
+    // sit safely in Keychain. The wrapper reads Keychain on every
+    // invocation and exports the values only into the docker compose
+    // subprocess's env — vault-first principle (#811) applied to the
+    // bootstrap layer: secrets stay in FileVault-encrypted Keychain at
+    // rest, never on disk in plaintext.
+    //
+    // Operators run: ./bin/op-compose -f docker-compose-prod.yml up -d
+    const wrapperSpin = p.spinner();
+    wrapperSpin.start('Installing bin/op-compose wrapper…');
+    const wrapper = await installOpComposeWrapper({ repoDir: repoPath, region });
+    if (!wrapper.ok) {
+      wrapperSpin.stop(pc.red('✗ op-compose wrapper install failed.'));
+      p.cancel(wrapper.reason ?? 'op-compose wrapper install failed.');
+      process.exit(1);
+    }
+    wrapperSpin.stop(pc.green(`✓ Installed ${wrapper.path} (mode 0755).`));
+
     // ---- Phase 7: ghcr.io login ----
     const ghcrSpin = p.spinner();
     ghcrSpin.start('Authenticating Docker to ghcr.io…');
@@ -547,13 +570,33 @@ export const bootstrapCommand = new Command('bootstrap')
       const profileFlag = opts.localOnly ? '' : '--profile public ';
       p.outro(
         pc.cyan(
-          `Stack-up skipped. Run \`docker compose -f ${composeFile.join(' -f ')} ${profileFlag}pull && docker compose -f ${composeFile.join(' -f ')} ${profileFlag}up -d\` from ${repoPath} when ready.`,
+          `Stack-up skipped. Run \`./bin/op-compose -f ${composeFile.join(' -f ')} ${profileFlag}pull && ./bin/op-compose -f ${composeFile.join(' -f ')} ${profileFlag}up -d\` from ${repoPath} when ready. (op-compose hydrates Keychain secrets per-invocation; use it instead of raw \`docker compose\`.)`,
         ),
       );
       return;
     }
 
     const composeFiles = resolveComposeFiles(repoPath, composeFile);
+    // Hydrate every `${VAR:?…}`-enforced env var on the compose subprocess.
+    // launchctl setenv doesn't reach pre-existing shells or sshd children,
+    // so bootstrap's own compose calls would otherwise hard-fail even
+    // though every value sits in process scope from the loadSecret pass
+    // above. Pass them directly via execa's env option — no plaintext
+    // .env file lands on disk; the bin/op-compose wrapper does the same
+    // hydration just-in-time for operator-driven compose invocations.
+    const composeEnv: NodeJS.ProcessEnv = {
+      PGSODIUM_ROOT_KEY: pgsodiumKey,
+      POSTGRES_PASSWORD: postgresPassword,
+      JWT_SECRET: jwtSecret,
+      SUPABASE_ANON_KEY: supabaseAnonKey,
+      SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
+      DASHBOARD_PASSWORD: dashboardPassword,
+      SUPABASE_URL: supabaseUrl,
+      AUTH_JWT_SECRET: process.env['AUTH_JWT_SECRET'] ?? jwtSecret,
+      ...(tunnelToken !== undefined ? { TUNNEL_TOKEN: tunnelToken } : {}),
+      ...(llmModel ? { LLM_MODEL: llmModel } : {}),
+      ...(embeddingModel ? { EMBEDDINGS_MODEL: embeddingModel } : {}),
+    };
     // In production mode, activate the `public` compose profile so cloudflared
     // starts. In --local-only mode pass no profiles — the template gates
     // cloudflared behind `public`, so an empty profiles array keeps it down.
@@ -562,6 +605,7 @@ export const bootstrapCommand = new Command('bootstrap')
       cwd: repoPath,
       ...(opts.envFile ? { envFile: opts.envFile } : {}),
       profiles: opts.localOnly ? LOCAL_PROFILES : PUBLIC_PROFILES,
+      env: composeEnv,
     };
 
     // In --local-only mode, evict any cloudflared container left over from a
