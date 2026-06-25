@@ -32,7 +32,10 @@ export async function installOpComposeWrapper(
 ): Promise<InstallOpComposeResult> {
   let content: string;
   try {
-    content = renderOpComposeScript({ region: input.region });
+    content = renderOpComposeScript({
+      region: input.region,
+      ...(input.promptServiceUrl !== undefined ? { promptServiceUrl: input.promptServiceUrl } : {}),
+    });
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }

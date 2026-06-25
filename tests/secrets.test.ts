@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   generateDashboardPassword,
+  generateHmacApiKey,
   generateJwtSecret,
   generatePgsodiumRootKey,
   generatePostgresPassword,
@@ -83,6 +84,29 @@ describe('generateDashboardPassword', () => {
     expect(pw).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(pw).not.toMatch(/[+/=]/);
     expect(pw.length).toBeGreaterThanOrEqual(24);
+  });
+});
+
+describe('generateHmacApiKey', () => {
+  it('returns a URL-safe base64url string (no + / = chars)', () => {
+    const k = generateHmacApiKey();
+    // 32 bytes → 43 chars base64url unpadded
+    expect(k.length).toBeGreaterThanOrEqual(40);
+    expect(k).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(k).not.toMatch(/[+/=]/);
+  });
+
+  it('survives unescaped embedding in <region>:<key> comma-separated list', () => {
+    // The op-compose wrapper splices the key into PROMPT_SERVICE_API_KEYS as
+    // `<region>:<key>`. The key must NOT contain `:` or `,` or it'd corrupt
+    // the list. base64url alphabet guarantees this.
+    const k = generateHmacApiKey();
+    expect(k).not.toContain(':');
+    expect(k).not.toContain(',');
+  });
+
+  it('produces a different value on every call', () => {
+    expect(generateHmacApiKey()).not.toBe(generateHmacApiKey());
   });
 });
 

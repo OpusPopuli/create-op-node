@@ -40,6 +40,79 @@ describe('renderOpComposeScript', () => {
     expect(s).toMatch(/create-op-node bootstrap --region us-ca/);
   });
 
+  it('exports prompt-service credentials conditionally (optional_secret)', () => {
+    const s = renderOpComposeScript({ region: 'us-ca' });
+    expect(s).toContain('prompts-db-password');
+    expect(s).toContain('prompt-service-api-key');
+    expect(s).toContain('prompt-service-admin-api-key');
+    // The exports must be conditional — `if [ -n "$..." ]` guards so the
+    // wrapper works when the prompt-service overlay is NOT in use.
+    expect(s).toMatch(/if \[ -n "\$PROMPT_SERVICE_API_KEY_VAL" \]/);
+    expect(s).toMatch(/if \[ -n "\$PROMPTS_DB_PASSWORD_VAL" \]/);
+  });
+
+  it('renders PROMPT_SERVICE_API_KEYS as <region>:<key> for prompt-service env', () => {
+    // prompt-service expects API_KEYS=<region>:<key>,<region>:<key>; the
+    // backend sends just <key>. Wrapper has to bridge the two formats.
+    const s = renderOpComposeScript({ region: 'us-ca' });
+    expect(s).toMatch(/PROMPT_SERVICE_API_KEYS="us-ca:\$PROMPT_SERVICE_API_KEY_VAL"/);
+  });
+
+  it('refuses a region with shell metacharacters even for prompt-service exports', () => {
+    // The region slug is interpolated unescaped into PROMPT_SERVICE_API_KEYS;
+    // the region-validation regex must reject anything that could inject.
+    expect(() => renderOpComposeScript({ region: 'us-ca";rm -rf /;#' })).toThrow(
+      /not allowed in a launchd \/ Keychain service identifier/,
+    );
+  });
+
+  describe('PROMPT_SERVICE_URL handling', () => {
+    it('omits PROMPT_SERVICE_URL export when no URL is provided', () => {
+      const s = renderOpComposeScript({ region: 'us-ca' });
+      expect(s).not.toMatch(/export PROMPT_SERVICE_URL=/);
+    });
+
+    it('bakes the remote URL as a fallback the wrapper exports', () => {
+      const s = renderOpComposeScript({
+        region: 'us-ca',
+        promptServiceUrl: 'https://prompts.opuspopuli.org',
+      });
+      expect(s).toMatch(/export PROMPT_SERVICE_URL="\$\{PROMPT_SERVICE_URL:-https:\/\/prompts\.opuspopuli\.org\}"/);
+    });
+
+    it('bakes the in-network URL for colocated deployments', () => {
+      const s = renderOpComposeScript({
+        region: 'us-ca',
+        promptServiceUrl: 'http://opuspopuli-prompts:3210',
+      });
+      expect(s).toMatch(/http:\/\/opuspopuli-prompts:3210/);
+    });
+
+    it('refuses a promptServiceUrl with shell metacharacters', () => {
+      for (const bad of [
+        'https://prompts.opuspopuli.org;rm -rf $HOME',
+        'https://prompts$(echo pwn).org',
+        'has spaces',
+        'has`backtick',
+      ]) {
+        expect(() => renderOpComposeScript({ region: 'us-ca', promptServiceUrl: bad })).toThrow(
+          /promptServiceUrl.*not allowed/,
+        );
+      }
+    });
+
+    it('accepts realistic prompt-service URLs', () => {
+      for (const ok of [
+        'http://localhost:8000',
+        'http://opuspopuli-prompts:3210',
+        'https://prompts.opuspopuli.org',
+        'https://prompts-staging.opuspopuli.org/api',
+      ]) {
+        expect(() => renderOpComposeScript({ region: 'us-ca', promptServiceUrl: ok })).not.toThrow();
+      }
+    });
+  });
+
   it('uses `set -euo pipefail` so a Keychain-read failure fails the script', () => {
     const s = renderOpComposeScript({ region: 'us-ca' });
     expect(s).toMatch(/set -euo pipefail/);

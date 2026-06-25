@@ -42,6 +42,15 @@ describe('_internal naming', () => {
     expect(_internal.labelFor({ region: 'us-ca', account: 'dashboard-password' })).toContain(
       'dashboard',
     );
+    expect(_internal.labelFor({ region: 'us-ca', account: 'prompts-db-password' })).toContain(
+      'prompt-service Postgres',
+    );
+    expect(_internal.labelFor({ region: 'us-ca', account: 'prompt-service-api-key' })).toContain(
+      'prompt-service HMAC',
+    );
+    expect(
+      _internal.labelFor({ region: 'us-ca', account: 'prompt-service-admin-api-key' }),
+    ).toContain('prompt-service admin');
   });
 });
 

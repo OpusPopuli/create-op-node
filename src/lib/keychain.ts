@@ -32,7 +32,10 @@ export type SecretAccount =
   | 'jwt-secret'
   | 'supabase-anon-key'
   | 'supabase-service-role-key'
-  | 'dashboard-password';
+  | 'dashboard-password'
+  | 'prompts-db-password'
+  | 'prompt-service-api-key'
+  | 'prompt-service-admin-api-key';
 
 export interface SecretCoordinates {
   /** Region label, used to scope the service identifier. */
@@ -53,6 +56,9 @@ const FRIENDLY: Record<SecretAccount, string> = {
   'supabase-anon-key': 'Supabase anon key',
   'supabase-service-role-key': 'Supabase service role key',
   'dashboard-password': 'Supabase Studio dashboard password',
+  'prompts-db-password': 'prompt-service Postgres password',
+  'prompt-service-api-key': 'prompt-service HMAC API key',
+  'prompt-service-admin-api-key': 'prompt-service admin API key',
 };
 
 function labelFor(coords: SecretCoordinates): string {

@@ -62,6 +62,19 @@ export function generateDashboardPassword(): string {
 }
 
 /**
+ * 32-byte CSPRNG HMAC key rendered as base64url. Used for the prompt-service
+ * client HMAC: prompt-service's `API_KEYS` env is a comma-separated list of
+ * `<region>:<key>` pairs, and the consuming backend sends the same `<key>`
+ * value in its HMAC header.
+ *
+ * Base64url alphabet ensures the value survives the `<region>:<key>` join
+ * and any URL-component embedding without ambiguity.
+ */
+export function generateHmacApiKey(): string {
+  return base64url(randomBytes(32));
+}
+
+/**
  * 48-byte (384-bit) base64 secret used to sign every Supabase-issued JWT.
  *
  * gotrue, postgrest, storage, and studio all verify tokens against this

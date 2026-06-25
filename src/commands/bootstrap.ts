@@ -26,6 +26,7 @@ import {
 import { detectKeychain, readSecret, saveSecret, type SecretAccount } from '../lib/keychain.js';
 import {
   generateDashboardPassword,
+  generateHmacApiKey,
   generateJwtSecret,
   generatePgsodiumRootKey,
   generatePostgresPassword,
@@ -59,6 +60,30 @@ const PUBLIC_PROFILES = ['public'] as const;
  *  via the template's profile gating. */
 const LOCAL_PROFILES = [] as const;
 
+/** Node deployment topology — selects which docker compose stack(s) +
+ *  Keychain entries bootstrap provisions.
+ *
+ *  - `region` — standard region node (civic data for one region). Connects
+ *    to a REMOTE prompt-service via PROMPT_SERVICE_URL. The HMAC key for
+ *    that remote service is issued by the prompts team and pasted in;
+ *    bootstrap stores it under the same Keychain account as the colocated
+ *    case so the wrapper exports it transparently. This is the production
+ *    default for any operator who isn't on the prompts team.
+ *
+ *  - `region-with-prompts` — region node + colocated prompt-service overlay
+ *    (the us-ca / team / dev case). Bootstrap generates a local HMAC key,
+ *    a prompt-service admin key, and a prompts-db password — all stored
+ *    in Keychain — and the op-compose wrapper exports them so the
+ *    `docker-compose-prompt-service.yml` overlay can layer on top.
+ *
+ *  - `prompts-only` — STUB. Reserved for when the prompts team deploys the
+ *    central prompts.opuspopuli.org instance. No region services; only the
+ *    prompt-service + its DB. Bootstrap currently exits with a "not yet
+ *    implemented" message — the flag exists so the CLI surface is stable
+ *    for the future deployment.
+ */
+type NodeType = 'region' | 'region-with-prompts' | 'prompts-only';
+
 interface BootstrapOptions {
   region?: string;
   owner?: string;
@@ -76,6 +101,13 @@ interface BootstrapOptions {
    *  --local-only mode, otherwise `https://supabase.<domain>` — operator
    *  can override with --supabase-url. */
   supabaseUrl?: string;
+  /** Selects which deployment stack to provision. Defaults to `region`. */
+  nodeType?: NodeType;
+  /** For `--node-type region` (remote prompt-service): the URL of the
+   *  central prompt-service the backend should call. Defaults to
+   *  `https://prompts.opuspopuli.org`. Ignored in `region-with-prompts`
+   *  (the overlay pins it to the in-network hostname). */
+  promptServiceUrl?: string;
   yes?: boolean;
 }
 
@@ -119,6 +151,18 @@ export const bootstrapCommand = new Command('bootstrap')
       'Public-facing Supabase URL (what browsers + microservices use). Default: `http://localhost:8000` in --local-only mode, otherwise `https://supabase.<domain>` (which the operator can override).',
     ),
   )
+  .addOption(
+    new Option(
+      '--node-type <type>',
+      'Deployment topology. `region` (default) = region node connecting to remote prompt-service. `region-with-prompts` = region node + colocated prompt-service overlay (team/dev use). `prompts-only` = future stub for the central prompts deployment.',
+    ).choices(['region', 'region-with-prompts', 'prompts-only']),
+  )
+  .addOption(
+    new Option(
+      '--prompt-service-url <url>',
+      "Remote prompt-service URL. Only meaningful for --node-type=region (default: https://prompts.opuspopuli.org). Ignored for --node-type=region-with-prompts (the overlay pins it to http://opuspopuli-prompts:3210).",
+    ),
+  )
   .addOption(new Option('--skip-stack', "Stop before `docker compose pull && up`").default(false))
   .addOption(
     new Option(
@@ -129,6 +173,46 @@ export const bootstrapCommand = new Command('bootstrap')
   .addOption(new Option('-y, --yes', 'Skip confirmation prompts').default(false))
   .action(async (opts: BootstrapOptions) => {
     p.intro(pc.bgCyan(pc.black(' create-op-node bootstrap ')));
+
+    // ---- Node type (selects which stack to provision) ----
+    // Default is `region` — the common case for any operator who isn't
+    // on the prompts team. `region-with-prompts` covers the team/dev case
+    // where the operator runs prompt-service alongside the region stack.
+    // `prompts-only` is a documented stub for the future central prompts
+    // deployment — exits early to keep the CLI surface stable now.
+    const nodeType: NodeType = opts.nodeType
+      ? opts.nodeType
+      : (unwrap(
+          await p.select({
+            message: 'What kind of node are you provisioning?',
+            options: [
+              {
+                value: 'region',
+                label: 'Region node (civic data for one region, remote prompt-service)',
+              },
+              {
+                value: 'region-with-prompts',
+                label: 'Region + colocated prompt-service (team / dev)',
+              },
+              {
+                value: 'prompts-only',
+                label: 'Prompt-service node (central prompts deployment — future)',
+              },
+            ],
+            initialValue: 'region',
+          }),
+        ) as NodeType);
+
+    if (nodeType === 'prompts-only') {
+      p.cancel(
+        'prompts-only node deployment is not yet implemented. ' +
+          'This flag exists so the CLI surface is stable for when the prompts team ' +
+          'deploys the central prompts.opuspopuli.org instance — but the deployment ' +
+          'stack (compose file, healthchecks, observability) is filled in later, ' +
+          'when there is an actual central prompt-service to deploy.',
+      );
+      process.exit(1);
+    }
 
     // ---- Region label (required to find Keychain items + repo name) ------
     const region = opts.region
@@ -419,6 +503,85 @@ export const bootstrapCommand = new Command('bootstrap')
       generate: generateDashboardPassword,
     });
 
+    // ---- prompt-service credentials ----
+    //
+    // Generated unconditionally (cheap; rare Keychain entries). The
+    // op-compose wrapper exports them on every invocation so operators who
+    // layer the prompt-service overlay
+    // (`./bin/op-compose -f docker-compose-prod.yml -f
+    //   docker-compose-prompt-service.yml up`) have a working set of
+    // credentials with no extra steps.
+    //
+    // Operators who connect to a REMOTE prompt-service (Phase 2:
+    // prompts.opuspopuli.org) will receive their region-specific HMAC from
+    // the prompts team and overwrite this Keychain entry — wrapper
+    // continues to export it under the same name, so nothing else changes.
+    // ---- prompt-service credentials ----
+    //
+    // Branches on nodeType:
+    //   `region-with-prompts` — operator owns both ends. Generate all three
+    //     secrets (DB password + HMAC + admin HMAC); the colocated overlay
+    //     consumes them via env.
+    //   `region` — operator's prompt-service is REMOTE. They received an
+    //     HMAC key from the prompts team; bootstrap prompts them to paste
+    //     it. The DB password + admin key are skipped (no local DB, no
+    //     admin access from the operator's side).
+    if (nodeType === 'region-with-prompts') {
+      await loadSecret({
+        region,
+        account: 'prompts-db-password',
+        label: 'prompt-service Postgres password',
+        validate: (v) =>
+          URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+        generate: generatePostgresPassword,
+      });
+
+      await loadSecret({
+        region,
+        account: 'prompt-service-api-key',
+        label: 'prompt-service HMAC API key',
+        // Same URL-safe alphabet as other HMAC keys; embedded in the
+        // `<region>:<key>` API_KEYS list and in Authorization headers.
+        validate: (v) =>
+          URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+        generate: generateHmacApiKey,
+      });
+
+      await loadSecret({
+        region,
+        account: 'prompt-service-admin-api-key',
+        label: 'prompt-service admin API key',
+        validate: (v) =>
+          URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+        generate: generateHmacApiKey,
+      });
+    } else {
+      // nodeType === 'region': paste-only path. No `generate`, so loadSecret
+      // falls through to the operator-paste prompt.
+      await loadSecret({
+        region,
+        account: 'prompt-service-api-key',
+        label: 'prompt-service HMAC API key (issued by the prompts team)',
+        placeholder: 'paste the region-specific HMAC key',
+        validate: (v) =>
+          URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+      });
+    }
+
+    // Remote prompt-service URL — only resolved when NOT colocating.
+    // For region-with-prompts the overlay hardcodes http://opuspopuli-prompts:3210
+    // on the relevant services; no shell env needed.
+    const promptServiceUrl =
+      nodeType === 'region-with-prompts'
+        ? 'http://opuspopuli-prompts:3210'
+        : (opts.promptServiceUrl ?? 'https://prompts.opuspopuli.org');
+    if (!SAFE_URL_RE.test(promptServiceUrl)) {
+      p.cancel(
+        `--prompt-service-url ${JSON.stringify(promptServiceUrl)} contains characters outside the allowed URL set`,
+      );
+      process.exit(1);
+    }
+
     // SUPABASE_URL gets baked into gotrue's API_EXTERNAL_URL and into every
     // magic-link callback gotrue emails to users. localhost is only correct
     // in --local-only mode; for a Tunnel-exposed production node, emailing
@@ -497,7 +660,7 @@ export const bootstrapCommand = new Command('bootstrap')
     // Operators run: ./bin/op-compose -f docker-compose-prod.yml up -d
     const wrapperSpin = p.spinner();
     wrapperSpin.start('Installing bin/op-compose wrapper…');
-    const wrapper = await installOpComposeWrapper({ repoDir: repoPath, region });
+    const wrapper = await installOpComposeWrapper({ repoDir: repoPath, region, promptServiceUrl });
     if (!wrapper.ok) {
       wrapperSpin.stop(pc.red('✗ op-compose wrapper install failed.'));
       p.cancel(wrapper.reason ?? 'op-compose wrapper install failed.');
