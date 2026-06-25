@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1](https://github.com/OpusPopuli/create-op-node/compare/v0.10.0...v0.10.1) (2026-06-25)
+
+
+### Bug Fixes
+
+* **keychain:** SSH auto-unlock + errSecInteractionNotAllowed hint ([0b282b6](https://github.com/OpusPopuli/create-op-node/commit/0b282b68e0ffea6c8dc5d21b1e68293efe8cc9ec))
+* **keychain:** SSH auto-unlock + errSecInteractionNotAllowed hint ([eb576ef](https://github.com/OpusPopuli/create-op-node/commit/eb576ef6d2e02a100c363db0bea080d68fe267dd))
+
 ## [0.10.0](https://github.com/OpusPopuli/create-op-node/compare/v0.9.1...v0.10.0) (2026-06-25)
 
 
