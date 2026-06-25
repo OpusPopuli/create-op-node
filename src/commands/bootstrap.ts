@@ -23,7 +23,15 @@ import {
   enableAutoRestartOnPowerFailure,
   inspectSystem,
 } from '../lib/macos.js';
-import { detectKeychain, readSecret, saveSecret, type SecretAccount } from '../lib/keychain.js';
+import {
+  detectKeychain,
+  isKeychainLocked,
+  isSshSession,
+  readSecret,
+  saveSecret,
+  unlockKeychain,
+  type SecretAccount,
+} from '../lib/keychain.js';
 import {
   generateDashboardPassword,
   generateHmacApiKey,
@@ -400,6 +408,38 @@ export const bootstrapCommand = new Command('bootstrap')
         `${keychain.reason ?? 'Keychain unavailable'}. Bootstrap requires the macOS Keychain.`,
       );
       process.exit(1);
+    }
+
+    // SSH sessions don't auto-unlock the login keychain at session start.
+    // When the operator is over SSH AND the keychain is currently locked,
+    // every `security add-generic-password` call will fail with exit 36
+    // (errSecInteractionNotAllowed). Prompt for the login password once
+    // up front, unlock, then proceed — much better UX than 9 identical
+    // failures (one per secret) before the operator figures it out.
+    if (isSshSession() && (await isKeychainLocked())) {
+      p.note(
+        [
+          'SSH session detected with a locked login keychain.',
+          'macOS keychain operations require an unlocked keychain — your',
+          'login password will be used once to unlock it for this session.',
+          'The keychain remains unlocked until the session ends or it',
+          'idle-locks. To skip and unlock manually, press Ctrl+C and run',
+          '`security unlock-keychain` yourself.',
+        ].join('\n'),
+        'Keychain unlock required',
+      );
+      const pw = unwrap(
+        await p.password({
+          message: 'macOS login password (for `security unlock-keychain`):',
+          validate: (v) => (v && v.length > 0 ? undefined : 'password required'),
+        }),
+      );
+      const unlock = await unlockKeychain(pw);
+      if (!unlock.ok) {
+        p.cancel(unlock.reason ?? 'security unlock-keychain failed.');
+        process.exit(1);
+      }
+      p.note(`${pc.green('✓')} Keychain unlocked for this session.`, 'Keychain');
     }
 
     const pgsodiumKey = await loadSecret({
