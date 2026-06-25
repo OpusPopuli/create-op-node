@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/OpusPopuli/create-op-node/compare/v0.9.1...v0.10.0) (2026-06-25)
+
+
+### Features
+
+* **bootstrap:** --node-type flag + prompt-service Keychain credentials ([9ba3ce4](https://github.com/OpusPopuli/create-op-node/commit/9ba3ce45cc12d1ac942ff1a5b3fb0648175cb8bb))
+* **bootstrap:** --node-type flag + prompt-service Keychain credentials ([34094e7](https://github.com/OpusPopuli/create-op-node/commit/34094e767a8c6bb4cd8ae727eebc4c78330b86bb))
+
 ## [0.9.1](https://github.com/OpusPopuli/create-op-node/compare/v0.9.0...v0.9.1) (2026-06-21)
 
 
