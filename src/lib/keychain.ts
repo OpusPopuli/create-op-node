@@ -131,7 +131,7 @@ export async function saveSecret(
     return {
       written: false,
       updated,
-      reason: `security add-generic-password failed (${res.exitCode ?? 'signal'}): ${res.stderr || res.stdout}`,
+      reason: `security add-generic-password failed (${res.exitCode ?? 'signal'}): ${res.stderr || res.stdout}${formatKeychainHint(res.exitCode)}`,
     };
   }
   return { written: true, updated };
@@ -167,11 +167,99 @@ export async function deleteSecret(coords: SecretCoordinates): Promise<{ ok: boo
   ]);
   if (res === null) return { ok: false, reason: '`security` CLI not on PATH' };
   // Exit 44 (errSecItemNotFound) is fine — already gone.
-  if (res.exitCode === 0 || res.exitCode === 44) return { ok: true };
+  if (res.exitCode === 0 || res.exitCode === ERR_SEC_ITEM_NOT_FOUND) return { ok: true };
   return {
     ok: false,
-    reason: `security delete-generic-password failed (${res.exitCode ?? 'signal'}): ${res.stderr || res.stdout}`,
+    reason: `security delete-generic-password failed (${res.exitCode ?? 'signal'}): ${res.stderr || res.stdout}${formatKeychainHint(res.exitCode)}`,
   };
+}
+
+/**
+ * macOS `security` exit codes we care about. Defined as constants so callers
+ * can reason about them without sprinkling magic numbers.
+ *   36 = errSecInteractionNotAllowed — keychain is locked / no UI session
+ *   44 = errSecItemNotFound — item doesn't exist (treated as "ok" for delete)
+ */
+export const ERR_SEC_INTERACTION_NOT_ALLOWED = 36;
+export const ERR_SEC_ITEM_NOT_FOUND = 44;
+
+/** Append an operator-friendly remediation hint to a `security` error
+ *  message when the exit code maps to one we recognize. Returns empty
+ *  string when no hint applies, so the call site can safely concatenate. */
+function formatKeychainHint(exitCode: number | null | undefined): string {
+  if (exitCode === ERR_SEC_INTERACTION_NOT_ALLOWED) {
+    return (
+      `\n` +
+      `Hint: the login keychain is locked (SSH sessions don't auto-unlock it).\n` +
+      `Run \`security unlock-keychain ~/Library/Keychains/login.keychain-db\` and re-run bootstrap.`
+    );
+  }
+  return '';
+}
+
+/**
+ * Probe whether the login keychain is currently locked. Implemented by
+ * attempting a no-op `find-generic-password` against a service that won't
+ * exist: exit 44 (errSecItemNotFound) → unlocked, exit 36 → locked.
+ *
+ * Used by bootstrap to proactively prompt SSH operators for their login
+ * password before the first Keychain write — without this, the operator
+ * gets nine identical failures (one per secret) before they figure out
+ * the keychain is locked.
+ */
+export async function isKeychainLocked(): Promise<boolean> {
+  const res = await safeExeca('security', [
+    'find-generic-password',
+    '-s',
+    `${SERVICE_PREFIX}.__op_node_lock_probe__`,
+    '-a',
+    '__nothing_here__',
+  ]);
+  if (res === null) return false; // no security CLI; can't be locked
+  return res.exitCode === ERR_SEC_INTERACTION_NOT_ALLOWED;
+}
+
+export interface UnlockResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * Unlock the login keychain via `security unlock-keychain -p <password>`.
+ *
+ * argv-exposure caveat: the password is visible briefly to `ps -E` while
+ * the security child is alive. Same risk model as `saveSecret` writing
+ * the secret value via `-w`. The `security` CLI doesn't expose a stdin
+ * password form for unlock, so this is the cleanest option available.
+ *
+ * Callers should prompt the operator via clack's `p.password()` (which
+ * doesn't echo) and pass the value here.
+ */
+export async function unlockKeychain(password: string): Promise<UnlockResult> {
+  const res = await safeExeca('security', [
+    'unlock-keychain',
+    '-p',
+    password,
+    // Default keychain path — same as the operator's GUI login keychain
+    // on a stock macOS install. Lets us avoid a homedir lookup here.
+    `${process.env['HOME'] ?? ''}/Library/Keychains/login.keychain-db`,
+  ]);
+  if (res === null) return { ok: false, reason: '`security` CLI not on PATH' };
+  if (res.exitCode !== 0) {
+    return {
+      ok: false,
+      reason: `security unlock-keychain failed (${res.exitCode ?? 'signal'}): ${res.stderr || res.stdout}`,
+    };
+  }
+  return { ok: true };
+}
+
+/** Heuristic: are we running inside an SSH session?
+ *  `SSH_CONNECTION` is set by sshd on every interactive login. `SSH_TTY`
+ *  is set on TTY-allocated sessions; we check both. Process-env only —
+ *  no syscalls. */
+export function isSshSession(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env['SSH_CONNECTION'] ?? env['SSH_TTY']);
 }
 
 /** Exported for tests + the rare caller that needs the raw service string. */
