@@ -117,20 +117,72 @@ set -euo pipefail
 
 SVC="org.opuspopuli.${input.region}"
 
+# macOS \`security\` exit codes:
+#   0  = success
+#   36 = errSecInteractionNotAllowed (keychain is locked)
+#   44 = errSecItemNotFound (entry doesn't exist)
+# Earlier wrapper versions conflated 36 and 44 into a generic "missing"
+# message, which sent operators down the wrong path (re-bootstrap when
+# the real fix was \`security unlock-keychain\`).
 require_secret() {
   local account="$1"
   local value
-  if ! value=$(security find-generic-password -s "$SVC" -a "$account" -w 2>/dev/null); then
-    echo "op-compose: missing Keychain entry '$account' under service '$SVC'." >&2
-    echo "Run: create-op-node bootstrap --region ${input.region}" >&2
-    exit 1
-  fi
-  printf '%s' "$value"
+  local rc=0
+  value=$(security find-generic-password -s "$SVC" -a "$account" -w 2>/dev/null) || rc=$?
+  case "$rc" in
+    0)
+      printf '%s' "$value"
+      return 0
+      ;;
+    36)
+      cat >&2 <<EOM
+op-compose: keychain is LOCKED — could not read entry '$account'.
+SSH sessions don't auto-unlock the login keychain. Unlock with:
+  security unlock-keychain ~/Library/Keychains/login.keychain-db
+Then re-run this command.
+EOM
+      exit 1
+      ;;
+    44)
+      cat >&2 <<EOM
+op-compose: keychain entry '$account' is MISSING under service '$SVC'.
+Run: create-op-node bootstrap --region ${input.region}
+EOM
+      exit 1
+      ;;
+    *)
+      echo "op-compose: \`security\` failed reading '$account' (exit $rc)." >&2
+      exit 1
+      ;;
+  esac
 }
 
+# Used for entries that may legitimately not exist (TUNNEL_TOKEN in
+# local-only mode, prompt-service secrets when colocation isn't active).
+# Treats exit 44 (missing) as a silent OK — returns empty string.
+# Treats exit 36 (locked) as a hard error, since the require_secret calls
+# at the top of the wrapper would have caught this first in normal use;
+# reaching this path means something else bypassed the lock check.
 optional_secret() {
   local account="$1"
-  security find-generic-password -s "$SVC" -a "$account" -w 2>/dev/null || true
+  local value
+  local rc=0
+  value=$(security find-generic-password -s "$SVC" -a "$account" -w 2>/dev/null) || rc=$?
+  case "$rc" in
+    0) printf '%s' "$value" ;;
+    44) ;; # legitimately absent — empty string is correct
+    36)
+      cat >&2 <<EOM
+op-compose: keychain is LOCKED — could not probe optional entry '$account'.
+Unlock with: security unlock-keychain ~/Library/Keychains/login.keychain-db
+EOM
+      exit 1
+      ;;
+    *)
+      echo "op-compose: \`security\` failed reading '$account' (exit $rc)." >&2
+      exit 1
+      ;;
+  esac
 }
 
 # Bootstrap-critical: Postgres + Supabase admin credentials.
