@@ -40,6 +40,22 @@ describe('renderOpComposeScript', () => {
     expect(s).toMatch(/create-op-node bootstrap --region us-ca/);
   });
 
+  it('distinguishes Keychain LOCKED (exit 36) from MISSING (exit 44) in both helpers', () => {
+    // Earlier wrapper versions conflated 36 and 44 into a generic "missing"
+    // message, which sent SSH operators down the wrong path (re-bootstrap
+    // when the real fix was `security unlock-keychain`). The new bash
+    // case-arms must handle each code distinctly in BOTH require_secret
+    // and optional_secret.
+    const s = renderOpComposeScript({ region: 'us-ca' });
+    // Two case-arms per helper × two helpers = four matches expected.
+    expect((s.match(/^\s*36\)/gm) ?? []).length).toBe(2);
+    expect((s.match(/^\s*44\)/gm) ?? []).length).toBe(2);
+    // The hint for the locked case must include the remediation command.
+    expect(s).toMatch(/LOCKED.*\n.*?security unlock-keychain/s);
+    // The hint for the missing case must include the bootstrap command.
+    expect(s).toMatch(/MISSING under service.*\n.*?create-op-node bootstrap --region us-ca/s);
+  });
+
   it('exports prompt-service credentials conditionally (optional_secret)', () => {
     const s = renderOpComposeScript({ region: 'us-ca' });
     expect(s).toContain('prompts-db-password');
