@@ -180,10 +180,11 @@ export const regionCommand = new Command('region')
         await p.text({
           message: level === 'county' ? 'County FIPS (5 digits)?' : 'State FIPS (2 digits)?',
           placeholder: level === 'county' ? '06001' : '06',
-          validate: (v) =>
-            isValidFips(v ?? '', level)
-              ? undefined
-              : `Expected ${level === 'county' ? '5' : '2'} digits`,
+          validate: (v) => {
+            if (isValidFips(v ?? '', level)) return undefined;
+            const expectedDigits = level === 'county' ? '5' : '2';
+            return `Expected ${expectedDigits} digits`;
+          },
         }),
       );
     if (!isValidFips(fipsCode, level)) {

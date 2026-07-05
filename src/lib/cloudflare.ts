@@ -50,7 +50,10 @@ function shortError(body: unknown): string {
   ) {
     const errs = (body as { errors: Array<{ message?: string; code?: number }> }).errors;
     return errs
-      .map((e) => `${e.code ? `CF ${e.code}: ` : ''}${e.message ?? 'unknown'}`)
+      .map((e) => {
+        const prefix = e.code ? `CF ${e.code}: ` : '';
+        return `${prefix}${e.message ?? 'unknown'}`;
+      })
       .join('; ');
   }
   return 'no error message returned';
