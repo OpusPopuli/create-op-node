@@ -183,744 +183,862 @@ export const bootstrapCommand = new Command('bootstrap')
   .action(async (opts: BootstrapOptions) => {
     p.intro(pc.bgCyan(pc.black(' create-op-node bootstrap ')));
 
-    // ---- Node type (selects which stack to provision) ----
-    // Default is `region` — the common case for any operator who isn't
-    // on the prompts team. `region-with-prompts` covers the team/dev case
-    // where the operator runs prompt-service alongside the region stack.
-    // `prompts-only` is a documented stub for the future central prompts
-    // deployment — exits early to keep the CLI surface stable now.
-    const nodeType: NodeType = opts.nodeType
-      ? opts.nodeType
-      : (unwrap(
-          await p.select({
-            message: 'What kind of node are you provisioning?',
-            options: [
-              {
-                value: 'region',
-                label: 'Region node (civic data for one region, remote prompt-service)',
-              },
-              {
-                value: 'region-with-prompts',
-                label: 'Region + colocated prompt-service (team / dev)',
-              },
-              {
-                value: 'prompts-only',
-                label: 'Prompt-service node (central prompts deployment — future)',
-              },
-            ],
-            initialValue: 'region',
-          }),
-        ) as NodeType);
-
-    if (nodeType === 'prompts-only') {
-      p.cancel(
-        'prompts-only node deployment is not yet implemented. ' +
-          'This flag exists so the CLI surface is stable for when the prompts team ' +
-          'deploys the central prompts.opuspopuli.org instance — but the deployment ' +
-          'stack (compose file, healthchecks, observability) is filled in later, ' +
-          'when there is an actual central prompt-service to deploy.',
-      );
-      process.exit(1);
-    }
-
-    // ---- Region label (required to find Keychain items + repo name) ------
-    const region = opts.region
-      ? opts.region
-      : unwrap(
-          await p.text({
-            message: 'Region label (the slug used during init — e.g. us-ca)?',
-            placeholder: 'us-ca',
-            validate: (v) =>
-              /^[a-z0-9-]{2,32}$/.test(v ?? '') ? undefined : 'lowercase letters, digits, hyphens; 2–32 chars',
-          }),
-        );
-
+    const nodeType = await selectNodeType(opts);
+    const region = await resolveRegion(opts);
     const owner = opts.owner ?? 'OpusPopuli';
     const repoName = `opuspopuli-node-${region}`;
+    const composeFile = opts.composeFile ?? defaultComposeFiles(opts);
 
-    // Default compose file set by mode (review S4): production runs the
-    // backup stack (restic / rclone) alongside the main stack; local-only
-    // skips it (don't burn dev-machine disk on backups; don't try to push
-    // to an R2 bucket that may not exist). Operator can still override
-    // with explicit --compose-file flags.
-    const composeFileDefault = opts.localOnly
-      ? ['docker-compose-prod.yml']
-      : ['docker-compose-prod.yml', 'docker-compose-backup.yml'];
-    const composeFile = opts.composeFile ?? composeFileDefault;
-
-    // Model selection: flags override > interactive prompt > defaults.
-    // The resolved values flow to both Ollama (pull + warm) and the
-    // LaunchAgent (LLM_MODEL / EMBEDDINGS_MODEL env vars Docker Desktop
-    // inherits).
-    //
-    // Note: the LaunchAgent ALWAYS exports both env vars now that they
-    // default — bootstrap is the source of truth for what model runs.
-    // The absence of a flag doesn't fall through to a compose default;
-    // it falls through to the CLI's default. (N3)
+    // Model selection: flags override > interactive prompt > defaults. The
+    // resolved values flow to both Ollama (pull + warm) and the LaunchAgent
+    // (LLM_MODEL / EMBEDDINGS_MODEL). bootstrap is the source of truth for
+    // what model runs. (N3)
     const llmModelChoice = opts.llmModel ?? (await selectLlmModel(opts));
     const [embeddingModel, llmModel] = resolveModels({
       llmModel: llmModelChoice,
       ...(opts.embeddingModel !== undefined ? { embeddingModel: opts.embeddingModel } : {}),
     });
 
-    // ---- Phase 1: macOS sanity ----
-    const sysSpin = p.spinner();
-    sysSpin.start('Inspecting macOS…');
-    const snap = await inspectSystem();
-    sysSpin.stop(pc.green('✓ macOS inspected.'));
-
-    if (!snap.isAppleSilicon) {
-      p.cancel(
-        `Bootstrap requires an Apple Silicon Mac (the runbook targets M-series). Detected: ${snap.osVersion ?? 'unknown'} (uname -m != arm64).`,
-      );
-      process.exit(1);
-    }
-
-    p.note(
-      [
-        `Hostname:                 ${pc.cyan(snap.hostname)}`,
-        `macOS:                    ${pc.cyan(snap.osVersion ?? '(sw_vers failed)')}`,
-        `Auto-restart on power:    ${kvBool(snap.autoRestartOnPowerFailure)}`,
-        `Disk sleep disabled:      ${kvBool(snap.diskSleepDisabled)}`,
-        `FileVault:                ${kvFileVault(snap.fileVaultEnabled)}`,
-      ].join('\n'),
-      'System snapshot',
-    );
-
-    if (!snap.autoRestartOnPowerFailure) {
-      const fix = unwrap(
-        await p.confirm({
-          message: 'Auto-restart-on-power-failure is OFF. Enable now (requires sudo)?',
-          initialValue: true,
-        }),
-      );
-      if (fix) {
-        const r = await enableAutoRestartOnPowerFailure();
-        if (!r.ok) p.note(`${pc.red('✗')} ${r.reason}`, 'pmset failed');
-      }
-    }
-    if (!snap.diskSleepDisabled) {
-      const fix = unwrap(
-        await p.confirm({
-          message: 'Disk sleep is enabled. Disable now (requires sudo)?',
-          initialValue: true,
-        }),
-      );
-      if (fix) {
-        const r = await disableDiskSleep();
-        if (!r.ok) p.note(`${pc.red('✗')} ${r.reason}`, 'pmset failed');
-      }
-    }
-
-    // ---- Phase 2: Homebrew + tool installs ----
-    if (!opts.skipBrew) {
-      const brewInfo = await detectBrew();
-      if (!brewInfo.installed) {
-        p.note(
-          [
-            `Homebrew is not installed. Open another shell and run:`,
-            '',
-            pc.cyan(HOMEBREW_INSTALL_COMMAND),
-            '',
-            pc.dim('Then come back and press Enter.'),
-          ].join('\n'),
-          'Manual step',
-        );
-        unwrap(await p.confirm({ message: 'Homebrew installed?', initialValue: true }));
-      }
-
-      const brewSpin = p.spinner();
-      brewSpin.start('Installing Studio packages… (~5–15 min first run)');
-      const report = await installPackages(STUDIO_PACKAGES, (pkg, status) => {
-        brewSpin.message(`${status}: ${pkg.name}`);
-      });
-      brewSpin.stop(
-        report.failed.length === 0
-          ? pc.green(
-              `✓ ${report.installed.length} installed, ${report.alreadyPresent.length} already present`,
-            )
-          : pc.yellow(
-              `⚠ ${report.installed.length} installed, ${report.alreadyPresent.length} present, ${report.failed.length} failed`,
-            ),
-      );
-      if (report.failed.length > 0) {
-        p.note(
-          [
-            report.failed.map((f) => `${pc.red('•')} ${f.pkg.name}: ${f.reason}`).join('\n'),
-            '',
-            pc.dim('A partial install usually fails downstream (Docker / Ollama / compose).'),
-            pc.dim('Install the failed packages manually and re-run with --skip-brew.'),
-          ].join('\n'),
-          'Brew failures',
-        );
-        const cont = unwrap(
-          await p.confirm({
-            message: 'Continue anyway? (Default no — recommended to fix and re-run.)',
-            initialValue: false,
-          }),
-        );
-        if (!cont) process.exit(1);
-      }
-    }
-
-    // ---- Phase 3: GitHub + Tailscale auth ----
+    // ---- Phases 1–4: system checks, Homebrew, auth, locate repo ----
+    await runSystemChecksPhase();
+    await runBrewPhase(opts);
     await ensureGhAuth();
     await promptTailscaleSignin();
+    const repoPath = await locateRegionRepoPhase(opts, owner, repoName);
 
-    // ---- Phase 4: Locate / clone the region repo (fail-fast — S6 review fix) ----
-    // Moved up from Phase 8: a repo-not-found error after 5-10 minutes of
-    // brew + Ollama work is operator-hostile. The clone only needs `gh`
-    // (Phase 3), so we can validate the repo exists early and bail before
-    // the slow stuff if it doesn't.
-    const repoSpin = p.spinner();
-    repoSpin.start('Locating your region node repo…');
-    const located = await locateOrCloneRepo({
-      owner,
-      name: repoName,
-      cwd: process.cwd(),
-      ...(opts.repoDir ? { explicit: opts.repoDir } : {}),
-    });
-    const repoPath = repoPathFromLocate(located);
-    if (!repoPath) {
-      repoSpin.stop(pc.red('✗ Couldn\'t locate or clone the region repo.'));
-      handleLocateError(located, owner, repoName);
-      process.exit(1);
-    }
-    repoSpin.stop(
-      located.kind === 'cloned'
-        ? pc.green(`✓ Cloned ${owner}/${repoName} to ${repoPath}`)
-        : pc.green(`✓ Found region repo at ${repoPath}`),
+    // ---- Phase 5: secrets (Keychain unlock, load/generate, URLs) ----
+    await unlockKeychainPhase();
+
+    const secrets = await collectSecretsPhase({ region, nodeType, opts });
+    await runLaunchAgentPhase({ opts, secrets, llmModel, embeddingModel });
+    await installWrapperPhase({ repoPath, region, promptServiceUrl: secrets.promptServiceUrl });
+    await loginGhcrPhase();
+    await runOllamaPhase({ opts, embeddingModel, llmModel });
+    await runStackPhase({ opts, repoPath, region, composeFile, secrets, llmModel, embeddingModel });
+  });
+
+// ----------------------------------------------------------------------------
+// Bootstrap phases
+// ----------------------------------------------------------------------------
+// The command action delegates to these phase helpers so no single function
+// exceeds the cognitive-complexity budget. Each is behavior-preserving — the
+// interactive prompts, spinners, and `process.exit` calls are relocated
+// verbatim, not changed. The orchestrator threads values through explicitly.
+
+interface CollectedSecrets {
+  pgsodiumKey: string;
+  tunnelToken: string | undefined;
+  postgresPassword: string;
+  jwtSecret: string;
+  supabaseAnonKey: string;
+  supabaseServiceRoleKey: string;
+  dashboardPassword: string;
+  promptServiceUrl: string;
+  supabaseUrl: string;
+}
+
+// Default compose file set by mode (review S4): production runs the
+// backup stack (restic / rclone) alongside the main stack; local-only
+// skips it (don't burn dev-machine disk on backups; don't try to push
+// to an R2 bucket that may not exist). Operator can still override
+// with explicit --compose-file flags.
+function defaultComposeFiles(opts: BootstrapOptions): string[] {
+  return opts.localOnly
+    ? ['docker-compose-prod.yml']
+    : ['docker-compose-prod.yml', 'docker-compose-backup.yml'];
+}
+
+// Node type selects which stack to provision. Default is `region` — the
+// common case for any operator who isn't on the prompts team.
+// `region-with-prompts` covers the team/dev case where the operator runs
+// prompt-service alongside the region stack. `prompts-only` is a documented
+// stub for the future central prompts deployment — exits early to keep the
+// CLI surface stable now.
+async function selectNodeType(opts: BootstrapOptions): Promise<NodeType> {
+  const nodeType: NodeType = opts.nodeType
+    ? opts.nodeType
+    : (unwrap(
+        await p.select({
+          message: 'What kind of node are you provisioning?',
+          options: [
+            {
+              value: 'region',
+              label: 'Region node (civic data for one region, remote prompt-service)',
+            },
+            {
+              value: 'region-with-prompts',
+              label: 'Region + colocated prompt-service (team / dev)',
+            },
+            {
+              value: 'prompts-only',
+              label: 'Prompt-service node (central prompts deployment — future)',
+            },
+          ],
+          initialValue: 'region',
+        }),
+      ) as NodeType);
+
+  if (nodeType === 'prompts-only') {
+    p.cancel(
+      'prompts-only node deployment is not yet implemented. ' +
+        'This flag exists so the CLI surface is stable for when the prompts team ' +
+        'deploys the central prompts.opuspopuli.org instance — but the deployment ' +
+        'stack (compose file, healthchecks, observability) is filled in later, ' +
+        'when there is an actual central prompt-service to deploy.',
     );
+    process.exit(1);
+  }
+  return nodeType;
+}
 
-    // ---- Phase 5: secrets (Keychain → paste fallback → persist) ----
-    //
-    // The Keychain item is local to the machine that wrote it (`init` on
-    // the laptop). On a fresh Studio, both items will be missing on first
-    // run — bootstrap prompts the operator to paste, validates the format,
-    // and writes to the Studio's local Keychain for re-runs.
-    //
-    // In --local-only mode there's no Tunnel token at all (cloudflared
-    // stays down via compose profile gating). The pgsodium key is still
-    // required since the data services use it; if missing, we generate
-    // a fresh one inline rather than requiring an `init` call first.
-    const keychain = await detectKeychain();
-    if (!keychain.available) {
-      p.cancel(
-        `${keychain.reason ?? 'Keychain unavailable'}. Bootstrap requires the macOS Keychain.`,
-      );
-      process.exit(1);
-    }
-
-    // SSH sessions don't auto-unlock the login keychain at session start.
-    // When the operator is over SSH AND the keychain is currently locked,
-    // every `security add-generic-password` call will fail with exit 36
-    // (errSecInteractionNotAllowed). Prompt for the login password once
-    // up front, unlock, then proceed — much better UX than 9 identical
-    // failures (one per secret) before the operator figures it out.
-    if (isSshSession() && (await isKeychainLocked())) {
-      p.note(
-        [
-          'SSH session detected with a locked login keychain.',
-          'macOS keychain operations require an unlocked keychain — your',
-          'login password will be used once to unlock it for this session.',
-          'The keychain remains unlocked until the session ends or it',
-          'idle-locks. To skip and unlock manually, press Ctrl+C and run',
-          '`security unlock-keychain` yourself.',
-        ].join('\n'),
-        'Keychain unlock required',
-      );
-      const pw = unwrap(
-        await p.password({
-          message: 'macOS login password (for `security unlock-keychain`):',
-          validate: (v) => (v && v.length > 0 ? undefined : 'password required'),
+// Region label (required to find Keychain items + repo name).
+async function resolveRegion(opts: BootstrapOptions): Promise<string> {
+  return opts.region
+    ? opts.region
+    : unwrap(
+        await p.text({
+          message: 'Region label (the slug used during init — e.g. us-ca)?',
+          placeholder: 'us-ca',
+          validate: (v) =>
+            /^[a-z0-9-]{2,32}$/.test(v ?? '') ? undefined : 'lowercase letters, digits, hyphens; 2–32 chars',
         }),
       );
-      const unlock = await unlockKeychain(pw);
-      if (!unlock.ok) {
-        p.cancel(unlock.reason ?? 'security unlock-keychain failed.');
-        process.exit(1);
-      }
-      p.note(`${pc.green('✓')} Keychain unlocked for this session.`, 'Keychain');
+}
+
+// ---- Phase 1: macOS sanity ----
+async function runSystemChecksPhase(): Promise<void> {
+  const sysSpin = p.spinner();
+  sysSpin.start('Inspecting macOS…');
+  const snap = await inspectSystem();
+  sysSpin.stop(pc.green('✓ macOS inspected.'));
+
+  if (!snap.isAppleSilicon) {
+    p.cancel(
+      `Bootstrap requires an Apple Silicon Mac (the runbook targets M-series). Detected: ${snap.osVersion ?? 'unknown'} (uname -m != arm64).`,
+    );
+    process.exit(1);
+  }
+
+  p.note(
+    [
+      `Hostname:                 ${pc.cyan(snap.hostname)}`,
+      `macOS:                    ${pc.cyan(snap.osVersion ?? '(sw_vers failed)')}`,
+      `Auto-restart on power:    ${kvBool(snap.autoRestartOnPowerFailure)}`,
+      `Disk sleep disabled:      ${kvBool(snap.diskSleepDisabled)}`,
+      `FileVault:                ${kvFileVault(snap.fileVaultEnabled)}`,
+    ].join('\n'),
+    'System snapshot',
+  );
+
+  if (!snap.autoRestartOnPowerFailure) {
+    const fix = unwrap(
+      await p.confirm({
+        message: 'Auto-restart-on-power-failure is OFF. Enable now (requires sudo)?',
+        initialValue: true,
+      }),
+    );
+    if (fix) {
+      const r = await enableAutoRestartOnPowerFailure();
+      if (!r.ok) p.note(`${pc.red('✗')} ${r.reason}`, 'pmset failed');
     }
+  }
+  if (!snap.diskSleepDisabled) {
+    const fix = unwrap(
+      await p.confirm({
+        message: 'Disk sleep is enabled. Disable now (requires sudo)?',
+        initialValue: true,
+      }),
+    );
+    if (fix) {
+      const r = await disableDiskSleep();
+      if (!r.ok) p.note(`${pc.red('✗')} ${r.reason}`, 'pmset failed');
+    }
+  }
+}
 
-    const pgsodiumKey = await loadSecret({
+// ---- Phase 2: Homebrew + tool installs ----
+async function runBrewPhase(opts: BootstrapOptions): Promise<void> {
+  if (opts.skipBrew) return;
+
+  const brewInfo = await detectBrew();
+  if (!brewInfo.installed) {
+    p.note(
+      [
+        `Homebrew is not installed. Open another shell and run:`,
+        '',
+        pc.cyan(HOMEBREW_INSTALL_COMMAND),
+        '',
+        pc.dim('Then come back and press Enter.'),
+      ].join('\n'),
+      'Manual step',
+    );
+    unwrap(await p.confirm({ message: 'Homebrew installed?', initialValue: true }));
+  }
+
+  const brewSpin = p.spinner();
+  brewSpin.start('Installing Studio packages… (~5–15 min first run)');
+  const report = await installPackages(STUDIO_PACKAGES, (pkg, status) => {
+    brewSpin.message(`${status}: ${pkg.name}`);
+  });
+  brewSpin.stop(
+    report.failed.length === 0
+      ? pc.green(
+          `✓ ${report.installed.length} installed, ${report.alreadyPresent.length} already present`,
+        )
+      : pc.yellow(
+          `⚠ ${report.installed.length} installed, ${report.alreadyPresent.length} present, ${report.failed.length} failed`,
+        ),
+  );
+  if (report.failed.length > 0) {
+    p.note(
+      [
+        report.failed.map((f) => `${pc.red('•')} ${f.pkg.name}: ${f.reason}`).join('\n'),
+        '',
+        pc.dim('A partial install usually fails downstream (Docker / Ollama / compose).'),
+        pc.dim('Install the failed packages manually and re-run with --skip-brew.'),
+      ].join('\n'),
+      'Brew failures',
+    );
+    const cont = unwrap(
+      await p.confirm({
+        message: 'Continue anyway? (Default no — recommended to fix and re-run.)',
+        initialValue: false,
+      }),
+    );
+    if (!cont) process.exit(1);
+  }
+}
+
+// ---- Phase 4: Locate / clone the region repo (fail-fast — S6 review fix) ----
+// Moved up from Phase 8: a repo-not-found error after 5-10 minutes of
+// brew + Ollama work is operator-hostile. The clone only needs `gh`
+// (Phase 3), so we can validate the repo exists early and bail before
+// the slow stuff if it doesn't.
+async function locateRegionRepoPhase(
+  opts: BootstrapOptions,
+  owner: string,
+  repoName: string,
+): Promise<string> {
+  const repoSpin = p.spinner();
+  repoSpin.start('Locating your region node repo…');
+  const located = await locateOrCloneRepo({
+    owner,
+    name: repoName,
+    cwd: process.cwd(),
+    ...(opts.repoDir ? { explicit: opts.repoDir } : {}),
+  });
+  const repoPath = repoPathFromLocate(located);
+  if (!repoPath) {
+    repoSpin.stop(pc.red('✗ Couldn\'t locate or clone the region repo.'));
+    handleLocateError(located, owner, repoName);
+    process.exit(1);
+  }
+  repoSpin.stop(
+    located.kind === 'cloned'
+      ? pc.green(`✓ Cloned ${owner}/${repoName} to ${repoPath}`)
+      : pc.green(`✓ Found region repo at ${repoPath}`),
+  );
+  return repoPath;
+}
+
+// ---- Phase 5: keychain availability + SSH unlock ----
+//
+// The Keychain item is local to the machine that wrote it (`init` on the
+// laptop). On a fresh Studio, both items will be missing on first run —
+// bootstrap prompts the operator to paste, validates the format, and writes
+// to the Studio's local Keychain for re-runs.
+async function unlockKeychainPhase(): Promise<void> {
+  const keychain = await detectKeychain();
+  if (!keychain.available) {
+    p.cancel(
+      `${keychain.reason ?? 'Keychain unavailable'}. Bootstrap requires the macOS Keychain.`,
+    );
+    process.exit(1);
+  }
+
+  // SSH sessions don't auto-unlock the login keychain at session start.
+  // When the operator is over SSH AND the keychain is currently locked,
+  // every `security add-generic-password` call will fail with exit 36
+  // (errSecInteractionNotAllowed). Prompt for the login password once
+  // up front, unlock, then proceed — much better UX than 9 identical
+  // failures (one per secret) before the operator figures it out.
+  if (isSshSession() && (await isKeychainLocked())) {
+    p.note(
+      [
+        'SSH session detected with a locked login keychain.',
+        'macOS keychain operations require an unlocked keychain — your',
+        'login password will be used once to unlock it for this session.',
+        'The keychain remains unlocked until the session ends or it',
+        'idle-locks. To skip and unlock manually, press Ctrl+C and run',
+        '`security unlock-keychain` yourself.',
+      ].join('\n'),
+      'Keychain unlock required',
+    );
+    const pw = unwrap(
+      await p.password({
+        message: 'macOS login password (for `security unlock-keychain`):',
+        validate: (v) => (v && v.length > 0 ? undefined : 'password required'),
+      }),
+    );
+    const unlock = await unlockKeychain(pw);
+    if (!unlock.ok) {
+      p.cancel(unlock.reason ?? 'security unlock-keychain failed.');
+      process.exit(1);
+    }
+    p.note(`${pc.green('✓')} Keychain unlocked for this session.`, 'Keychain');
+  }
+}
+
+// ---- Phase 5a: pgsodium key, tunnel token, and Supabase self-hosted creds ----
+//
+// In --local-only mode there's no Tunnel token at all (cloudflared stays
+// down via compose profile gating). The pgsodium key is still required
+// since the data services use it; if missing, we generate a fresh one
+// inline rather than requiring an `init` call first.
+//
+// The five Supabase values (postgres password, JWT secret, anon +
+// service_role JWTs, dashboard password) are auto-generated on first run
+// via the same `loadSecret` path used for the pgsodium key. The two JWTs
+// are derived from JWT_SECRET and re-validated against it so a stale token
+// cached from a prior bootstrap can't silently break auth.
+async function collectCoreSecrets(args: {
+  region: string;
+  opts: BootstrapOptions;
+}): Promise<Omit<CollectedSecrets, 'promptServiceUrl' | 'supabaseUrl'>> {
+  const { region, opts } = args;
+  const pgsodiumKey = await loadSecret({
+    region,
+    account: 'pgsodium-root-key',
+    label: 'pgsodium master key',
+    validate: (v) =>
+      PGSODIUM_KEY_RE.test(v) ? undefined : 'must be exactly 64 lowercase hex characters',
+    ...(opts.localOnly ? { generate: generatePgsodiumRootKey } : {}),
+  });
+
+  const tunnelToken = opts.localOnly
+    ? undefined
+    : await loadSecret({
+        region,
+        account: 'tunnel-token',
+        label: 'Cloudflare Tunnel token',
+        placeholder: 'JWT-style base64url string from `terraform output tunnel_token`',
+        validate: (v) =>
+          TUNNEL_TOKEN_RE.test(v) ? undefined : 'tunnel token must be a base64-url JWT',
+      });
+
+  const postgresPassword = await loadSecret({
+    region,
+    account: 'postgres-password',
+    label: 'Postgres password',
+    // URL-safe alphabet required — value lands in postgres:// URIs where
+    // `+`/`/`/`=` cause parser ambiguity in gotrue/postgrest/storage.
+    validate: (v) =>
+      URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+    generate: generatePostgresPassword,
+  });
+
+  const jwtSecret = await loadSecret({
+    region,
+    account: 'jwt-secret',
+    label: 'JWT signing secret',
+    validate: (v) =>
+      SAFE_LAUNCHCTL_VALUE_RE.test(v) && v.length >= 32
+        ? undefined
+        : 'must be ≥32 base64 characters',
+    generate: generateJwtSecret,
+  });
+
+  // Derived JWTs MUST match the current jwtSecret's signature — otherwise
+  // a stale anon/service_role token (cached from a previous bootstrap with
+  // a different JWT_SECRET) sails past the shape check and breaks every
+  // auth call silently. verifySupabaseJwt re-runs the HMAC and rejects on
+  // mismatch, triggering regeneration with the current secret.
+  const supabaseAnonKey = await loadSecret({
+    region,
+    account: 'supabase-anon-key',
+    label: 'Supabase anon key',
+    validate: (v) =>
+      SAFE_LAUNCHCTL_VALUE_RE.test(v) && verifySupabaseJwt(v, jwtSecret)
+        ? undefined
+        : 'must be a base64url JWT signed by the current JWT_SECRET',
+    generate: () => signSupabaseJwt({ role: 'anon', secret: jwtSecret }),
+  });
+
+  const supabaseServiceRoleKey = await loadSecret({
+    region,
+    account: 'supabase-service-role-key',
+    label: 'Supabase service role key',
+    validate: (v) =>
+      SAFE_LAUNCHCTL_VALUE_RE.test(v) && verifySupabaseJwt(v, jwtSecret)
+        ? undefined
+        : 'must be a base64url JWT signed by the current JWT_SECRET',
+    generate: () => signSupabaseJwt({ role: 'service_role', secret: jwtSecret }),
+  });
+
+  const dashboardPassword = await loadSecret({
+    region,
+    account: 'dashboard-password',
+    label: 'Supabase Studio dashboard password',
+    // URL-safe alphabet required — value lands in basic-auth headers via
+    // kong's declarative config. Avoid `+`/`/`/`=` for the same reasons.
+    validate: (v) =>
+      URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+    generate: generateDashboardPassword,
+  });
+
+  return {
+    pgsodiumKey,
+    tunnelToken,
+    postgresPassword,
+    jwtSecret,
+    supabaseAnonKey,
+    supabaseServiceRoleKey,
+    dashboardPassword,
+  };
+}
+
+// ---- Phase 5b: prompt-service credentials + URL ----
+//
+// Branches on nodeType:
+//   `region-with-prompts` — operator owns both ends. Generate all three
+//     secrets (DB password + HMAC + admin HMAC); the colocated overlay
+//     consumes them via env.
+//   `region` — operator's prompt-service is REMOTE. They received an HMAC
+//     key from the prompts team; bootstrap prompts them to paste it. The DB
+//     password + admin key are skipped (no local DB, no admin access).
+async function collectPromptServiceSecrets(args: {
+  region: string;
+  nodeType: NodeType;
+  opts: BootstrapOptions;
+}): Promise<string> {
+  const { region, nodeType, opts } = args;
+  if (nodeType === 'region-with-prompts') {
+    await loadSecret({
       region,
-      account: 'pgsodium-root-key',
-      label: 'pgsodium master key',
-      validate: (v) =>
-        PGSODIUM_KEY_RE.test(v) ? undefined : 'must be exactly 64 lowercase hex characters',
-      ...(opts.localOnly ? { generate: generatePgsodiumRootKey } : {}),
-    });
-
-    const tunnelToken = opts.localOnly
-      ? undefined
-      : await loadSecret({
-          region,
-          account: 'tunnel-token',
-          label: 'Cloudflare Tunnel token',
-          placeholder: 'JWT-style base64url string from `terraform output tunnel_token`',
-          validate: (v) =>
-            TUNNEL_TOKEN_RE.test(v) ? undefined : 'tunnel token must be a base64-url JWT',
-        });
-
-    // ---- Phase 5b: Supabase self-hosted credentials ----
-    //
-    // The template's docker-compose-prod.yml runs the full self-hosted
-    // Supabase stack (kong, auth, rest, storage, meta, optional studio).
-    // Every one of those containers + every microservice in the platform
-    // needs the same shared values: POSTGRES_PASSWORD for DB connections,
-    // JWT_SECRET for auth, and the long-lived anon/service_role JWTs that
-    // @supabase/supabase-js authenticates with.
-    //
-    // All five are auto-generated on first run via the same `loadSecret`
-    // path used for the pgsodium key — Keychain hit → reuse; miss →
-    // generate fresh + persist + hard-fail if persist fails (so the next
-    // re-run doesn't silently mint a different password and lock us out
-    // of the old DB).
-    //
-    // The two Supabase JWTs are derived from JWT_SECRET so they're not
-    // independent secrets — but we cache them in Keychain anyway because:
-    //   (a) re-signing on every bootstrap means the `iat`/`exp` claims
-    //       drift, which is fine functionally but noisy in audit logs,
-    //   (b) it lets operators rotate ANON without rotating JWT_SECRET
-    //       by manually replacing the Keychain item.
-    const postgresPassword = await loadSecret({
-      region,
-      account: 'postgres-password',
-      label: 'Postgres password',
-      // URL-safe alphabet required — value lands in postgres:// URIs where
-      // `+`/`/`/`=` cause parser ambiguity in gotrue/postgrest/storage.
+      account: 'prompts-db-password',
+      label: 'prompt-service Postgres password',
       validate: (v) =>
         URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
       generate: generatePostgresPassword,
     });
 
-    const jwtSecret = await loadSecret({
+    await loadSecret({
       region,
-      account: 'jwt-secret',
-      label: 'JWT signing secret',
-      validate: (v) =>
-        SAFE_LAUNCHCTL_VALUE_RE.test(v) && v.length >= 32
-          ? undefined
-          : 'must be ≥32 base64 characters',
-      generate: generateJwtSecret,
-    });
-
-    // Derived JWTs MUST match the current jwtSecret's signature — otherwise
-    // a stale anon/service_role token (cached from a previous bootstrap with
-    // a different JWT_SECRET) sails past the shape check and breaks every
-    // auth call silently. verifySupabaseJwt re-runs the HMAC and rejects on
-    // mismatch, triggering regeneration with the current secret.
-    const supabaseAnonKey = await loadSecret({
-      region,
-      account: 'supabase-anon-key',
-      label: 'Supabase anon key',
-      validate: (v) =>
-        SAFE_LAUNCHCTL_VALUE_RE.test(v) && verifySupabaseJwt(v, jwtSecret)
-          ? undefined
-          : 'must be a base64url JWT signed by the current JWT_SECRET',
-      generate: () => signSupabaseJwt({ role: 'anon', secret: jwtSecret }),
-    });
-
-    const supabaseServiceRoleKey = await loadSecret({
-      region,
-      account: 'supabase-service-role-key',
-      label: 'Supabase service role key',
-      validate: (v) =>
-        SAFE_LAUNCHCTL_VALUE_RE.test(v) && verifySupabaseJwt(v, jwtSecret)
-          ? undefined
-          : 'must be a base64url JWT signed by the current JWT_SECRET',
-      generate: () => signSupabaseJwt({ role: 'service_role', secret: jwtSecret }),
-    });
-
-    const dashboardPassword = await loadSecret({
-      region,
-      account: 'dashboard-password',
-      label: 'Supabase Studio dashboard password',
-      // URL-safe alphabet required — value lands in basic-auth headers via
-      // kong's declarative config. Avoid `+`/`/`/`=` for the same reasons.
+      account: 'prompt-service-api-key',
+      label: 'prompt-service HMAC API key',
+      // Same URL-safe alphabet as other HMAC keys; embedded in the
+      // `<region>:<key>` API_KEYS list and in Authorization headers.
       validate: (v) =>
         URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
-      generate: generateDashboardPassword,
+      generate: generateHmacApiKey,
     });
 
-    // ---- prompt-service credentials ----
-    //
-    // Generated unconditionally (cheap; rare Keychain entries). The
-    // op-compose wrapper exports them on every invocation so operators who
-    // layer the prompt-service overlay
-    // (`./bin/op-compose -f docker-compose-prod.yml -f
-    //   docker-compose-prompt-service.yml up`) have a working set of
-    // credentials with no extra steps.
-    //
-    // Operators who connect to a REMOTE prompt-service (Phase 2:
-    // prompts.opuspopuli.org) will receive their region-specific HMAC from
-    // the prompts team and overwrite this Keychain entry — wrapper
-    // continues to export it under the same name, so nothing else changes.
-    // ---- prompt-service credentials ----
-    //
-    // Branches on nodeType:
-    //   `region-with-prompts` — operator owns both ends. Generate all three
-    //     secrets (DB password + HMAC + admin HMAC); the colocated overlay
-    //     consumes them via env.
-    //   `region` — operator's prompt-service is REMOTE. They received an
-    //     HMAC key from the prompts team; bootstrap prompts them to paste
-    //     it. The DB password + admin key are skipped (no local DB, no
-    //     admin access from the operator's side).
-    if (nodeType === 'region-with-prompts') {
-      await loadSecret({
-        region,
-        account: 'prompts-db-password',
-        label: 'prompt-service Postgres password',
-        validate: (v) =>
-          URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
-        generate: generatePostgresPassword,
-      });
-
-      await loadSecret({
-        region,
-        account: 'prompt-service-api-key',
-        label: 'prompt-service HMAC API key',
-        // Same URL-safe alphabet as other HMAC keys; embedded in the
-        // `<region>:<key>` API_KEYS list and in Authorization headers.
-        validate: (v) =>
-          URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
-        generate: generateHmacApiKey,
-      });
-
-      await loadSecret({
-        region,
-        account: 'prompt-service-admin-api-key',
-        label: 'prompt-service admin API key',
-        validate: (v) =>
-          URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
-        generate: generateHmacApiKey,
-      });
-    } else {
-      // nodeType === 'region': paste-only path. No `generate`, so loadSecret
-      // falls through to the operator-paste prompt.
-      await loadSecret({
-        region,
-        account: 'prompt-service-api-key',
-        label: 'prompt-service HMAC API key (issued by the prompts team)',
-        placeholder: 'paste the region-specific HMAC key',
-        validate: (v) =>
-          URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
-      });
-    }
-
-    // Remote prompt-service URL — only resolved when NOT colocating.
-    // For region-with-prompts the overlay hardcodes http://opuspopuli-prompts:3210
-    // on the relevant services; no shell env needed.
-    const promptServiceUrl =
-      nodeType === 'region-with-prompts'
-        ? // eslint-disable-next-line sonarjs/no-clear-text-protocols -- in-network (docker) prompt-service URL is legitimately plaintext http; no TLS on the internal bridge
-          'http://opuspopuli-prompts:3210'
-        : (opts.promptServiceUrl ?? 'https://prompts.opuspopuli.org');
-    if (!SAFE_URL_RE.test(promptServiceUrl)) {
-      p.cancel(
-        `--prompt-service-url ${JSON.stringify(promptServiceUrl)} contains characters outside the allowed URL set`,
-      );
-      process.exit(1);
-    }
-
-    // SUPABASE_URL gets baked into gotrue's API_EXTERNAL_URL and into every
-    // magic-link callback gotrue emails to users. localhost is only correct
-    // in --local-only mode; for a Tunnel-exposed production node, emailing
-    // links pointing at http://localhost:8000 silently breaks signups.
-    //
-    // Resolution order:
-    //   --local-only mode → default http://localhost:8000 (no prompt)
-    //   non-local-only   → require --supabase-url OR prompt for the
-    //                       public-facing URL (typically
-    //                       https://supabase.<region-domain>)
-    let supabaseUrl: string;
-    if (opts.supabaseUrl) {
-      supabaseUrl = opts.supabaseUrl;
-    } else if (opts.localOnly) {
-      supabaseUrl = 'http://localhost:8000';
-    } else {
-      supabaseUrl = unwrap(
-        await p.text({
-          message: 'Public-facing Supabase URL (what browsers + microservices use to reach kong)?',
-          placeholder: 'https://supabase.civicfeed.tx',
-          validate: (v) => {
-            if (!v) return 'required';
-            return SAFE_URL_RE.test(v)
-              ? undefined
-              : 'contains characters outside the allowed URL set';
-          },
-        }),
-      );
-    }
-    if (!SAFE_URL_RE.test(supabaseUrl)) {
-      p.cancel(
-        `--supabase-url ${JSON.stringify(supabaseUrl)} contains characters outside the allowed URL set`,
-      );
-      process.exit(1);
-    }
-
-    // ---- Phase 6: LaunchAgent ----
-    if (!opts.skipLaunchAgent) {
-      const laSpin = p.spinner();
-      laSpin.start('Writing pgsodium key file + LaunchAgent plist…');
-      const la = await setupLaunchAgent({
-        pgsodiumKey,
-        ...(tunnelToken !== undefined ? { tunnelToken } : {}),
-        llmModel,
-        embeddingModel,
-        postgresPassword,
-        jwtSecret,
-        supabaseAnonKey,
-        supabaseServiceRoleKey,
-        dashboardPassword,
-        supabaseUrl,
-      });
-      if (!la.ok) {
-        laSpin.stop(pc.red(`✗ LaunchAgent step ${la.step} failed.`));
-        p.cancel(la.reason ?? 'LaunchAgent setup failed.');
-        process.exit(1);
-      }
-      laSpin.stop(
-        pc.green(
-          `✓ LaunchAgent loaded (${la.paths.plistFile})${opts.localOnly ? ' — local-only mode, no TUNNEL_TOKEN set' : ''}.`,
-        ),
-      );
-    }
-
-    // ---- Phase 6b: install op-compose wrapper ----
-    //
-    // launchctl setenv doesn't reach pre-existing shells or sshd children,
-    // so operator-driven `docker compose` invocations would hard-fail on
-    // the `${VAR:?…}` enforcement in the template even though the values
-    // sit safely in Keychain. The wrapper reads Keychain on every
-    // invocation and exports the values only into the docker compose
-    // subprocess's env — vault-first principle (#811) applied to the
-    // bootstrap layer: secrets stay in FileVault-encrypted Keychain at
-    // rest, never on disk in plaintext.
-    //
-    // Operators run: ./bin/op-compose -f docker-compose-prod.yml up -d
-    const wrapperSpin = p.spinner();
-    wrapperSpin.start('Installing bin/op-compose wrapper…');
-    const wrapper = await installOpComposeWrapper({ repoDir: repoPath, region, promptServiceUrl });
-    if (!wrapper.ok) {
-      wrapperSpin.stop(pc.red('✗ op-compose wrapper install failed.'));
-      p.cancel(wrapper.reason ?? 'op-compose wrapper install failed.');
-      process.exit(1);
-    }
-    wrapperSpin.stop(pc.green(`✓ Installed ${wrapper.path} (mode 0755).`));
-
-    // ---- Phase 7: ghcr.io login ----
-    const ghcrSpin = p.spinner();
-    ghcrSpin.start('Authenticating Docker to ghcr.io…');
-    const ghcr = await loginToGhcr();
-    if (!ghcr.ok) {
-      ghcrSpin.stop(pc.red('✗ ghcr.io login failed.'));
-      p.cancel(ghcr.reason ?? 'ghcr.io login failed.');
-      process.exit(1);
-    }
-    ghcrSpin.stop(pc.green('✓ Logged in to ghcr.io.'));
-
-    // ---- Phase 8: Ollama ----
-    if (!opts.skipOllama) {
-      const olSpin = p.spinner();
-      olSpin.start(`Pulling + warming Ollama models… (${estimatedPullTime(llmModel)})`);
-      let olHealth = await checkOllamaHealth();
-      if (!olHealth.reachable) {
-        // S5 review fix: try to start the service before bailing. The
-        // operator's pretty much always going to want this anyway, and
-        // `brew services start` is no-op-safe.
-        olSpin.message('Ollama not reachable — running `brew services start ollama`…');
-        const start = await startOllamaService();
-        if (!start.ok) {
-          olSpin.stop(pc.red('✗ Couldn\'t start Ollama service.'));
-          p.cancel(
-            `${start.reason ?? 'unknown'} — start it manually with \`brew services start ollama\` and re-run with --skip-brew --skip-launch-agent.`,
-          );
-          process.exit(1);
-        }
-        // Brew services start returns immediately; the daemon needs a few
-        // seconds before /api/tags responds. Quick wait + re-probe.
-        await new Promise((res) => setTimeout(res, 3000));
-        olHealth = await checkOllamaHealth();
-        if (!olHealth.reachable) {
-          olSpin.stop(
-            pc.yellow('⚠ Ollama service started but daemon not yet answering on :11434.'),
-          );
-          p.cancel(
-            'Give it another few seconds, then re-run with --skip-brew --skip-launch-agent.',
-          );
-          process.exit(1);
-        }
-      }
-      const modelReport = await setupModels([embeddingModel, llmModel], (model, status) => {
-        olSpin.message(`${status}: ${model}`);
-      });
-      olSpin.stop(
-        modelReport.failed.length === 0
-          ? pc.green(
-              `✓ ${modelReport.pulled.length} pulled, ${modelReport.alreadyPresent.length} present, ${modelReport.warmed.length} warmed`,
-            )
-          : pc.yellow(`⚠ ${modelReport.failed.length} model pull(s) failed`),
-      );
-      const probe = await probeHostDockerInternal();
-      if (!probe.ok) {
-        p.note(`${pc.yellow('⚠')} ${probe.reason}`, 'Docker host networking');
-      }
-    }
-
-    // ---- Phase 9: docker compose pull + up ----
-    // (Phase 4 already located the repo.)
-    if (opts.skipStack) {
-      const profileFlag = opts.localOnly ? '' : '--profile public ';
-      p.outro(
-        pc.cyan(
-          `Stack-up skipped. Run \`./bin/op-compose -f ${composeFile.join(' -f ')} ${profileFlag}pull && ./bin/op-compose -f ${composeFile.join(' -f ')} ${profileFlag}up -d\` from ${repoPath} when ready. (op-compose hydrates Keychain secrets per-invocation; use it instead of raw \`docker compose\`.)`,
-        ),
-      );
-      return;
-    }
-
-    const composeFiles = resolveComposeFiles(repoPath, composeFile);
-    // Hydrate every `${VAR:?…}`-enforced env var on the compose subprocess.
-    // launchctl setenv doesn't reach pre-existing shells or sshd children,
-    // so bootstrap's own compose calls would otherwise hard-fail even
-    // though every value sits in process scope from the loadSecret pass
-    // above. Pass them directly via execa's env option — no plaintext
-    // .env file lands on disk; the bin/op-compose wrapper does the same
-    // hydration just-in-time for operator-driven compose invocations.
-    const composeEnv: NodeJS.ProcessEnv = {
-      PGSODIUM_ROOT_KEY: pgsodiumKey,
-      POSTGRES_PASSWORD: postgresPassword,
-      JWT_SECRET: jwtSecret,
-      SUPABASE_ANON_KEY: supabaseAnonKey,
-      SUPABASE_SERVICE_ROLE_KEY: supabaseServiceRoleKey,
-      DASHBOARD_PASSWORD: dashboardPassword,
-      SUPABASE_URL: supabaseUrl,
-      AUTH_JWT_SECRET: process.env['AUTH_JWT_SECRET'] ?? jwtSecret,
-      ...(tunnelToken !== undefined ? { TUNNEL_TOKEN: tunnelToken } : {}),
-      ...(llmModel ? { LLM_MODEL: llmModel } : {}),
-      ...(embeddingModel ? { EMBEDDINGS_MODEL: embeddingModel } : {}),
-    };
-    // In production mode, activate the `public` compose profile so cloudflared
-    // starts. In --local-only mode pass no profiles — the template gates
-    // cloudflared behind `public`, so an empty profiles array keeps it down.
-    const composeOpts = {
-      files: composeFiles,
-      cwd: repoPath,
-      ...(opts.envFile ? { envFile: opts.envFile } : {}),
-      profiles: opts.localOnly ? LOCAL_PROFILES : PUBLIC_PROFILES,
-      env: composeEnv,
-    };
-
-    // In --local-only mode, evict any cloudflared container left over from a
-    // prior public bootstrap on this Studio. Without this, `compose ps` would
-    // still list cloudflared and the health-check loop would demand it reach
-    // healthy with no TUNNEL_TOKEN — hanging until timeout. (review S3)
-    if (opts.localOnly) {
-      const evict = p.spinner();
-      evict.start('Evicting any cloudflared from a prior public bootstrap…');
-      const rm = await composeRemoveService(
-        { ...composeOpts, profiles: PUBLIC_PROFILES },
-        'cloudflared',
-      );
-      evict.stop(
-        rm.ok
-          ? pc.green('✓ cloudflared not present (or removed).')
-          : pc.yellow(`⚠ cloudflared eviction reported: ${rm.reason ?? 'unknown'} — continuing.`),
-      );
-    }
-
-    const pullSpin = p.spinner();
-    pullSpin.start('Pulling images from ghcr.io… (~5–15 min first run, < 1 min cached)');
-    const pull = await composePull(composeOpts);
-    if (!pull.ok) {
-      pullSpin.stop(pc.red('✗ compose pull failed.'));
-      p.cancel(pull.reason ?? 'compose pull failed.');
-      process.exit(1);
-    }
-    pullSpin.stop(pc.green('✓ Images pulled.'));
-
-    const upSpin = p.spinner();
-    upSpin.start('Starting the stack…');
-    const up = await composeUp(composeOpts);
-    if (!up.ok) {
-      upSpin.stop(pc.red('✗ compose up failed.'));
-      p.cancel(up.reason ?? 'compose up failed.');
-      process.exit(1);
-    }
-    upSpin.stop(pc.green('✓ Containers started — waiting for healthy…'));
-
-    // ---- Phase 10: health-check loop ----
-    const healthSpin = p.spinner();
-    healthSpin.start('Polling for healthy containers… (every 5s, up to 5 min)');
-    const outcome = await waitForHealthy(composeOpts, {
-      onPoll: (snaps) => {
-        const healthy = snaps.filter((s) => s.health === 'healthy').length;
-        const running = snaps.filter((s) => s.state === 'running').length;
-        healthSpin.message(`${healthy}/${running} healthy`);
-      },
+    await loadSecret({
+      region,
+      account: 'prompt-service-admin-api-key',
+      label: 'prompt-service admin API key',
+      validate: (v) =>
+        URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+      generate: generateHmacApiKey,
     });
+  } else {
+    // nodeType === 'region': paste-only path. No `generate`, so loadSecret
+    // falls through to the operator-paste prompt.
+    await loadSecret({
+      region,
+      account: 'prompt-service-api-key',
+      label: 'prompt-service HMAC API key (issued by the prompts team)',
+      placeholder: 'paste the region-specific HMAC key',
+      validate: (v) =>
+        URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+    });
+  }
 
-    switch (outcome.kind) {
-      case 'healthy':
-        healthSpin.stop(pc.green(`✓ All ${outcome.snapshots.length} containers healthy.`));
-        if (opts.localOnly) {
-          p.outro(
-            pc.cyan(
-              [
-                `Region ${region} is up locally (no public Cloudflare Tunnel — cloudflared stays down).`,
-                `Access from your laptop over Tailscale at this Studio's tailnet IP.`,
-                `When you're ready to expose publicly, re-run \`bootstrap\` without --local-only.`,
-              ].join('\n'),
-            ),
-          );
-        } else {
-          p.outro(
-            pc.cyan(
-              `Region ${region} is up. Next: verify off-LAN with \`npx create-op-node verify --domain <your-domain>\`.`,
-            ),
-          );
-        }
-        return;
-      case 'unhealthy':
-        healthSpin.stop(pc.red(`✗ ${outcome.problem}`));
-        // Surface the full snapshot table for diagnosis — N10 review fix.
-        p.note(
-          outcome.snapshots
-            .map((s) => `  ${kvHealth(s.health)} ${s.name} (${s.state})`)
-            .join('\n'),
-          'Container state',
-        );
-        p.cancel(
-          `Inspect with \`docker compose -f ${composeFiles.join(' -f ')} logs\`. Fix and re-run.`,
-        );
-        process.exit(1);
-      // eslint-disable-next-line no-fallthrough
-      case 'timeout':
-        healthSpin.stop(pc.yellow('⚠ Timed out waiting for all containers to report healthy.'));
-        p.note(
-          outcome.snapshots
-            .map((s) => `  ${kvHealth(s.health)} ${s.name} (${s.state})`)
-            .join('\n'),
-          'Container state at timeout',
-        );
-        // B1 review fix: don't print the success outro. The stack hasn't
-        // settled and `verify` would mislead — instruct the operator to
-        // re-poll and exit non-zero.
-        p.cancel(
-          `Re-run \`create-op-node bootstrap --skip-brew --skip-launch-agent --skip-ollama\` to skip the already-done phases and poll again once containers settle.`,
-        );
-        process.exit(1);
-      // eslint-disable-next-line no-fallthrough
-      default: {
-        // Exhaustiveness check — adding a new HealthOutcome variant without
-        // updating this switch fails the type check.
-        assertNever(outcome);
-        return;
-      }
-    }
+  // Remote prompt-service URL — only resolved when NOT colocating.
+  // For region-with-prompts the overlay hardcodes http://opuspopuli-prompts:3210
+  // on the relevant services; no shell env needed.
+  const promptServiceUrl =
+    nodeType === 'region-with-prompts'
+      ? // eslint-disable-next-line sonarjs/no-clear-text-protocols -- in-network (docker) prompt-service URL is legitimately plaintext http; no TLS on the internal bridge
+        'http://opuspopuli-prompts:3210'
+      : (opts.promptServiceUrl ?? 'https://prompts.opuspopuli.org');
+  if (!SAFE_URL_RE.test(promptServiceUrl)) {
+    p.cancel(
+      `--prompt-service-url ${JSON.stringify(promptServiceUrl)} contains characters outside the allowed URL set`,
+    );
+    process.exit(1);
+  }
+  return promptServiceUrl;
+}
+
+// SUPABASE_URL gets baked into gotrue's API_EXTERNAL_URL and into every
+// magic-link callback gotrue emails to users. localhost is only correct
+// in --local-only mode; for a Tunnel-exposed production node, emailing
+// links pointing at http://localhost:8000 silently breaks signups.
+//
+// Resolution order:
+//   --local-only mode → default http://localhost:8000 (no prompt)
+//   non-local-only   → require --supabase-url OR prompt for the
+//                       public-facing URL.
+async function resolveSupabaseUrl(opts: BootstrapOptions): Promise<string> {
+  let supabaseUrl: string;
+  if (opts.supabaseUrl) {
+    supabaseUrl = opts.supabaseUrl;
+  } else if (opts.localOnly) {
+    supabaseUrl = 'http://localhost:8000';
+  } else {
+    supabaseUrl = unwrap(
+      await p.text({
+        message: 'Public-facing Supabase URL (what browsers + microservices use to reach kong)?',
+        placeholder: 'https://supabase.civicfeed.tx',
+        validate: (v) => {
+          if (!v) return 'required';
+          return SAFE_URL_RE.test(v)
+            ? undefined
+            : 'contains characters outside the allowed URL set';
+        },
+      }),
+    );
+  }
+  if (!SAFE_URL_RE.test(supabaseUrl)) {
+    p.cancel(
+      `--supabase-url ${JSON.stringify(supabaseUrl)} contains characters outside the allowed URL set`,
+    );
+    process.exit(1);
+  }
+  return supabaseUrl;
+}
+
+// Phase 5 aggregate: run all secret-collection sub-phases in order.
+async function collectSecretsPhase(args: {
+  region: string;
+  nodeType: NodeType;
+  opts: BootstrapOptions;
+}): Promise<CollectedSecrets> {
+  const core = await collectCoreSecrets({ region: args.region, opts: args.opts });
+  const promptServiceUrl = await collectPromptServiceSecrets(args);
+  const supabaseUrl = await resolveSupabaseUrl(args.opts);
+  return { ...core, promptServiceUrl, supabaseUrl };
+}
+
+// ---- Phase 6: LaunchAgent ----
+async function runLaunchAgentPhase(args: {
+  opts: BootstrapOptions;
+  secrets: CollectedSecrets;
+  llmModel: string;
+  embeddingModel: string;
+}): Promise<void> {
+  const { opts, secrets, llmModel, embeddingModel } = args;
+  if (opts.skipLaunchAgent) return;
+
+  const laSpin = p.spinner();
+  laSpin.start('Writing pgsodium key file + LaunchAgent plist…');
+  const la = await setupLaunchAgent({
+    pgsodiumKey: secrets.pgsodiumKey,
+    ...(secrets.tunnelToken !== undefined ? { tunnelToken: secrets.tunnelToken } : {}),
+    llmModel,
+    embeddingModel,
+    postgresPassword: secrets.postgresPassword,
+    jwtSecret: secrets.jwtSecret,
+    supabaseAnonKey: secrets.supabaseAnonKey,
+    supabaseServiceRoleKey: secrets.supabaseServiceRoleKey,
+    dashboardPassword: secrets.dashboardPassword,
+    supabaseUrl: secrets.supabaseUrl,
   });
+  if (!la.ok) {
+    laSpin.stop(pc.red(`✗ LaunchAgent step ${la.step} failed.`));
+    p.cancel(la.reason ?? 'LaunchAgent setup failed.');
+    process.exit(1);
+  }
+  laSpin.stop(
+    pc.green(
+      `✓ LaunchAgent loaded (${la.paths.plistFile})${opts.localOnly ? ' — local-only mode, no TUNNEL_TOKEN set' : ''}.`,
+    ),
+  );
+}
+
+// ---- Phase 6b: install op-compose wrapper ----
+//
+// launchctl setenv doesn't reach pre-existing shells or sshd children, so
+// operator-driven `docker compose` invocations would hard-fail on the
+// `${VAR:?…}` enforcement in the template even though the values sit safely
+// in Keychain. The wrapper reads Keychain on every invocation and exports
+// the values only into the docker compose subprocess's env.
+async function installWrapperPhase(args: {
+  repoPath: string;
+  region: string;
+  promptServiceUrl: string;
+}): Promise<void> {
+  const { repoPath, region, promptServiceUrl } = args;
+  const wrapperSpin = p.spinner();
+  wrapperSpin.start('Installing bin/op-compose wrapper…');
+  const wrapper = await installOpComposeWrapper({ repoDir: repoPath, region, promptServiceUrl });
+  if (!wrapper.ok) {
+    wrapperSpin.stop(pc.red('✗ op-compose wrapper install failed.'));
+    p.cancel(wrapper.reason ?? 'op-compose wrapper install failed.');
+    process.exit(1);
+  }
+  wrapperSpin.stop(pc.green(`✓ Installed ${wrapper.path} (mode 0755).`));
+}
+
+// ---- Phase 7: ghcr.io login ----
+async function loginGhcrPhase(): Promise<void> {
+  const ghcrSpin = p.spinner();
+  ghcrSpin.start('Authenticating Docker to ghcr.io…');
+  const ghcr = await loginToGhcr();
+  if (!ghcr.ok) {
+    ghcrSpin.stop(pc.red('✗ ghcr.io login failed.'));
+    p.cancel(ghcr.reason ?? 'ghcr.io login failed.');
+    process.exit(1);
+  }
+  ghcrSpin.stop(pc.green('✓ Logged in to ghcr.io.'));
+}
+
+// ---- Phase 8: Ollama ----
+async function runOllamaPhase(args: {
+  opts: BootstrapOptions;
+  embeddingModel: string;
+  llmModel: string;
+}): Promise<void> {
+  const { opts, embeddingModel, llmModel } = args;
+  if (opts.skipOllama) return;
+
+  const olSpin = p.spinner();
+  olSpin.start(`Pulling + warming Ollama models… (${estimatedPullTime(llmModel)})`);
+  let olHealth = await checkOllamaHealth();
+  if (!olHealth.reachable) {
+    // S5 review fix: try to start the service before bailing. The
+    // operator's pretty much always going to want this anyway, and
+    // `brew services start` is no-op-safe.
+    olSpin.message('Ollama not reachable — running `brew services start ollama`…');
+    const start = await startOllamaService();
+    if (!start.ok) {
+      olSpin.stop(pc.red('✗ Couldn\'t start Ollama service.'));
+      p.cancel(
+        `${start.reason ?? 'unknown'} — start it manually with \`brew services start ollama\` and re-run with --skip-brew --skip-launch-agent.`,
+      );
+      process.exit(1);
+    }
+    // Brew services start returns immediately; the daemon needs a few
+    // seconds before /api/tags responds. Quick wait + re-probe.
+    await new Promise((res) => setTimeout(res, 3000));
+    olHealth = await checkOllamaHealth();
+    if (!olHealth.reachable) {
+      olSpin.stop(
+        pc.yellow('⚠ Ollama service started but daemon not yet answering on :11434.'),
+      );
+      p.cancel(
+        'Give it another few seconds, then re-run with --skip-brew --skip-launch-agent.',
+      );
+      process.exit(1);
+    }
+  }
+  const modelReport = await setupModels([embeddingModel, llmModel], (model, status) => {
+    olSpin.message(`${status}: ${model}`);
+  });
+  olSpin.stop(
+    modelReport.failed.length === 0
+      ? pc.green(
+          `✓ ${modelReport.pulled.length} pulled, ${modelReport.alreadyPresent.length} present, ${modelReport.warmed.length} warmed`,
+        )
+      : pc.yellow(`⚠ ${modelReport.failed.length} model pull(s) failed`),
+  );
+  const probe = await probeHostDockerInternal();
+  if (!probe.ok) {
+    p.note(`${pc.yellow('⚠')} ${probe.reason}`, 'Docker host networking');
+  }
+}
+
+// Hydrate every `${VAR:?…}`-enforced env var on the compose subprocess.
+// launchctl setenv doesn't reach pre-existing shells or sshd children, so
+// bootstrap's own compose calls would otherwise hard-fail even though every
+// value sits in process scope from the loadSecret pass. Pure builder — kept
+// separate so the env-hydration rule stays unit-testable.
+export function buildComposeEnv(args: {
+  secrets: CollectedSecrets;
+  llmModel: string;
+  embeddingModel: string;
+}): NodeJS.ProcessEnv {
+  const { secrets, llmModel, embeddingModel } = args;
+  return {
+    PGSODIUM_ROOT_KEY: secrets.pgsodiumKey,
+    POSTGRES_PASSWORD: secrets.postgresPassword,
+    JWT_SECRET: secrets.jwtSecret,
+    SUPABASE_ANON_KEY: secrets.supabaseAnonKey,
+    SUPABASE_SERVICE_ROLE_KEY: secrets.supabaseServiceRoleKey,
+    DASHBOARD_PASSWORD: secrets.dashboardPassword,
+    SUPABASE_URL: secrets.supabaseUrl,
+    AUTH_JWT_SECRET: process.env['AUTH_JWT_SECRET'] ?? secrets.jwtSecret,
+    ...(secrets.tunnelToken !== undefined ? { TUNNEL_TOKEN: secrets.tunnelToken } : {}),
+    ...(llmModel ? { LLM_MODEL: llmModel } : {}),
+    ...(embeddingModel ? { EMBEDDINGS_MODEL: embeddingModel } : {}),
+  };
+}
+
+// ---- Phase 9 + 10: docker compose pull + up, then health-check loop ----
+async function runStackPhase(args: {
+  opts: BootstrapOptions;
+  repoPath: string;
+  region: string;
+  composeFile: string[];
+  secrets: CollectedSecrets;
+  llmModel: string;
+  embeddingModel: string;
+}): Promise<void> {
+  const { opts, repoPath, region, composeFile, secrets, llmModel, embeddingModel } = args;
+
+  if (opts.skipStack) {
+    const profileFlag = opts.localOnly ? '' : '--profile public ';
+    p.outro(
+      pc.cyan(
+        `Stack-up skipped. Run \`./bin/op-compose -f ${composeFile.join(' -f ')} ${profileFlag}pull && ./bin/op-compose -f ${composeFile.join(' -f ')} ${profileFlag}up -d\` from ${repoPath} when ready. (op-compose hydrates Keychain secrets per-invocation; use it instead of raw \`docker compose\`.)`,
+      ),
+    );
+    return;
+  }
+
+  const composeFiles = resolveComposeFiles(repoPath, composeFile);
+  const composeEnv = buildComposeEnv({ secrets, llmModel, embeddingModel });
+  // In production mode, activate the `public` compose profile so cloudflared
+  // starts. In --local-only mode pass no profiles — the template gates
+  // cloudflared behind `public`, so an empty profiles array keeps it down.
+  const composeOpts = {
+    files: composeFiles,
+    cwd: repoPath,
+    ...(opts.envFile ? { envFile: opts.envFile } : {}),
+    profiles: opts.localOnly ? LOCAL_PROFILES : PUBLIC_PROFILES,
+    env: composeEnv,
+  };
+
+  // In --local-only mode, evict any cloudflared container left over from a
+  // prior public bootstrap on this Studio. Without this, `compose ps` would
+  // still list cloudflared and the health-check loop would demand it reach
+  // healthy with no TUNNEL_TOKEN — hanging until timeout. (review S3)
+  if (opts.localOnly) {
+    const evict = p.spinner();
+    evict.start('Evicting any cloudflared from a prior public bootstrap…');
+    const rm = await composeRemoveService(
+      { ...composeOpts, profiles: PUBLIC_PROFILES },
+      'cloudflared',
+    );
+    evict.stop(
+      rm.ok
+        ? pc.green('✓ cloudflared not present (or removed).')
+        : pc.yellow(`⚠ cloudflared eviction reported: ${rm.reason ?? 'unknown'} — continuing.`),
+    );
+  }
+
+  const pullSpin = p.spinner();
+  pullSpin.start('Pulling images from ghcr.io… (~5–15 min first run, < 1 min cached)');
+  const pull = await composePull(composeOpts);
+  if (!pull.ok) {
+    pullSpin.stop(pc.red('✗ compose pull failed.'));
+    p.cancel(pull.reason ?? 'compose pull failed.');
+    process.exit(1);
+  }
+  pullSpin.stop(pc.green('✓ Images pulled.'));
+
+  const upSpin = p.spinner();
+  upSpin.start('Starting the stack…');
+  const up = await composeUp(composeOpts);
+  if (!up.ok) {
+    upSpin.stop(pc.red('✗ compose up failed.'));
+    p.cancel(up.reason ?? 'compose up failed.');
+    process.exit(1);
+  }
+  upSpin.stop(pc.green('✓ Containers started — waiting for healthy…'));
+
+  // ---- Phase 10: health-check loop ----
+  const healthSpin = p.spinner();
+  healthSpin.start('Polling for healthy containers… (every 5s, up to 5 min)');
+  const outcome = await waitForHealthy(composeOpts, {
+    onPoll: (snaps) => {
+      const healthy = snaps.filter((s) => s.health === 'healthy').length;
+      const running = snaps.filter((s) => s.state === 'running').length;
+      healthSpin.message(`${healthy}/${running} healthy`);
+    },
+  });
+  healthSpin.stop(healthOutcomeHeadline(outcome));
+  finishHealthOutcome(outcome, { region, opts, composeFiles });
+}
+
+// Spinner headline for the terminal state of the health loop.
+function healthOutcomeHeadline(
+  outcome: Awaited<ReturnType<typeof waitForHealthy>>,
+): string {
+  switch (outcome.kind) {
+    case 'healthy':
+      return pc.green(`✓ All ${outcome.snapshots.length} containers healthy.`);
+    case 'unhealthy':
+      return pc.red(`✗ ${outcome.problem}`);
+    case 'timeout':
+      return pc.yellow('⚠ Timed out waiting for all containers to report healthy.');
+    default:
+      return assertNever(outcome) as never;
+  }
+}
+
+// Print the outro / diagnostics and exit for the terminal health state.
+function finishHealthOutcome(
+  outcome: Awaited<ReturnType<typeof waitForHealthy>>,
+  args: { region: string; opts: BootstrapOptions; composeFiles: string[] },
+): void {
+  const { region, opts, composeFiles } = args;
+  switch (outcome.kind) {
+    case 'healthy':
+      if (opts.localOnly) {
+        p.outro(
+          pc.cyan(
+            [
+              `Region ${region} is up locally (no public Cloudflare Tunnel — cloudflared stays down).`,
+              `Access from your laptop over Tailscale at this Studio's tailnet IP.`,
+              `When you're ready to expose publicly, re-run \`bootstrap\` without --local-only.`,
+            ].join('\n'),
+          ),
+        );
+      } else {
+        p.outro(
+          pc.cyan(
+            `Region ${region} is up. Next: verify off-LAN with \`npx create-op-node verify --domain <your-domain>\`.`,
+          ),
+        );
+      }
+      return;
+    case 'unhealthy':
+      // Surface the full snapshot table for diagnosis — N10 review fix.
+      p.note(
+        outcome.snapshots
+          .map((s) => `  ${kvHealth(s.health)} ${s.name} (${s.state})`)
+          .join('\n'),
+        'Container state',
+      );
+      p.cancel(
+        `Inspect with \`docker compose -f ${composeFiles.join(' -f ')} logs\`. Fix and re-run.`,
+      );
+      process.exit(1);
+    // eslint-disable-next-line no-fallthrough
+    case 'timeout':
+      p.note(
+        outcome.snapshots
+          .map((s) => `  ${kvHealth(s.health)} ${s.name} (${s.state})`)
+          .join('\n'),
+        'Container state at timeout',
+      );
+      // B1 review fix: don't print the success outro. The stack hasn't
+      // settled and `verify` would mislead — instruct the operator to
+      // re-poll and exit non-zero.
+      p.cancel(
+        `Re-run \`create-op-node bootstrap --skip-brew --skip-launch-agent --skip-ollama\` to skip the already-done phases and poll again once containers settle.`,
+      );
+      process.exit(1);
+    // eslint-disable-next-line no-fallthrough
+    default:
+      // Exhaustiveness check — adding a new HealthOutcome variant without
+      // updating this switch fails the type check.
+      assertNever(outcome);
+      return;
+  }
+}
 
 // ----------------------------------------------------------------------------
 // Helpers
