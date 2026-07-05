@@ -1065,8 +1065,11 @@ async function selectLlmModel(opts: { yes?: boolean }): Promise<string> {
  *  because their size suffix in the tag refers to per-expert size, not
  *  the total model footprint. */
 export function estimatedPullTime(model: string): string {
-  if (/\d+x\d+b/i.test(model)) return '~60+ min for frontier MoE';
-  const match = /(\d+)b\b/i.exec(model);
+  // Bounded digit runs (real Ollama tags never exceed 3-digit expert counts
+  // / 4-digit sizes) so the search can't backtrack super-linearly on a long
+  // input.
+  if (/\d{1,3}x\d{1,3}b/i.test(model)) return '~60+ min for frontier MoE';
+  const match = /(\d{1,4})b\b/i.exec(model);
   if (!match) return 'time depends on model size';
   const size = Number.parseInt(match[1]!, 10);
   if (size <= 13) return '~3–5 min for ≤ 13B-class';

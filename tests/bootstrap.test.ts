@@ -117,6 +117,14 @@ describe('estimatedPullTime', () => {
 
   it('returns frontier-MoE estimate for sparse-MoE shapes', () => {
     expect(estimatedPullTime('mixtral:8x22b-q4')).toMatch(/60\+ min/);
+    // two-digit expert count still matches the bounded MoE pattern
+    expect(estimatedPullTime('deepseek:16x17b')).toMatch(/60\+ min/);
+  });
+
+  it('returns frontier-class estimate for 3-digit sizes', () => {
+    // e.g. DeepSeek 671B — the bounded `\d{1,4}b` group must still capture it
+    expect(estimatedPullTime('deepseek-r1:671b')).toMatch(/60\+ min for frontier-class/);
+    expect(estimatedPullTime('llama3.1:405b')).toMatch(/60\+ min for frontier-class/);
   });
 
   it('returns a soft fallback for unrecognized shapes', () => {

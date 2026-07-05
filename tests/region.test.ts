@@ -67,6 +67,13 @@ describe('slugify', () => {
     expect(slugify('Doña Ana')).toBe('dona-ana');
     expect(slugify('  St. Louis  ')).toBe('st-louis');
   });
+
+  it('trims leading and trailing separators (quantifier-free edge trim)', () => {
+    expect(slugify('.us-ca.')).toBe('us-ca');
+    expect(slugify('---California---')).toBe('california');
+    expect(slugify('!!!')).toBe('');
+    expect(slugify('&')).toBe('');
+  });
 });
 
 describe('validators', () => {

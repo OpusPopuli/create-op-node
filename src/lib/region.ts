@@ -114,7 +114,10 @@ export function slugify(input: string): string {
     .replace(/[̀-ͯ]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+    // The collapse above leaves at most a single hyphen at each edge, so a
+    // quantifier-free `^-|-$` trim is equivalent to `^-+|-+$` and can't
+    // backtrack super-linearly.
+    .replace(/^-|-$/g, '');
 }
 
 export function isValidSlug(v: string): boolean {
