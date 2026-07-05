@@ -1,6 +1,6 @@
 {
   "name": "create-op-node",
-  "version": "0.10.5",
+  "version": "0.10.6",
   "description": "Interactive bootstrap for an Opus Populi node — Cloudflare infrastructure, Mac Studio, ghcr.io image pull. From sealed box to public API in one command.",
   "type": "module",
   "engines": {

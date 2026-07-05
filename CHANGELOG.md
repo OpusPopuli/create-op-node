@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.6](https://github.com/OpusPopuli/create-op-node/compare/v0.10.5...v0.10.6) (2026-07-05)
+
+
+### Refactors
+
+* **bootstrap:** extract phase helpers to cut handler complexity ([d5799df](https://github.com/OpusPopuli/create-op-node/commit/d5799dfba567ffa36536f111921e083835407845))
+* **bootstrap:** extract phase helpers to cut handler complexity ([407caf4](https://github.com/OpusPopuli/create-op-node/commit/407caf434a7778ccefa9bb75d625d6f289579274)), closes [#37](https://github.com/OpusPopuli/create-op-node/issues/37)
+
 ## [0.10.5](https://github.com/OpusPopuli/create-op-node/compare/v0.10.4...v0.10.5) (2026-07-05)
 
 
