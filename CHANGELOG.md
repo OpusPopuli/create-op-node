@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.4](https://github.com/OpusPopuli/create-op-node/compare/v0.10.3...v0.10.4) (2026-07-05)
+
+
+### Refactors
+
+* **lint:** clear cheap sonar findings in src ([68e8921](https://github.com/OpusPopuli/create-op-node/commit/68e892131c6260d7626292ed1f1cdefb45573047))
+
 ## [0.10.3](https://github.com/OpusPopuli/create-op-node/compare/v0.10.2...v0.10.3) (2026-07-05)
 
 
