@@ -1,7 +1,57 @@
 import { describe, expect, it } from 'vitest';
 
-import { estimatedPullTime, LLM_MODEL_CHOICES, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
+import { buildComposeEnv, estimatedPullTime, LLM_MODEL_CHOICES, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_LLM_MODEL } from '../src/lib/ollama.js';
+
+const SECRETS = {
+  pgsodiumKey: 'a'.repeat(64),
+  tunnelToken: 'ey.tunnel.tok',
+  postgresPassword: 'pg-pw',
+  jwtSecret: 'jwt-secret-value',
+  supabaseAnonKey: 'anon.jwt',
+  supabaseServiceRoleKey: 'service.jwt',
+  dashboardPassword: 'dash-pw',
+  promptServiceUrl: 'https://prompts.opuspopuli.org',
+  supabaseUrl: 'https://supabase.example.org',
+};
+
+describe('buildComposeEnv', () => {
+  it('maps every secret to its compose env var', () => {
+    const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'qwen3.5:9b', embeddingModel: 'nomic-embed-text' });
+    expect(env).toMatchObject({
+      PGSODIUM_ROOT_KEY: SECRETS.pgsodiumKey,
+      POSTGRES_PASSWORD: SECRETS.postgresPassword,
+      JWT_SECRET: SECRETS.jwtSecret,
+      SUPABASE_ANON_KEY: SECRETS.supabaseAnonKey,
+      SUPABASE_SERVICE_ROLE_KEY: SECRETS.supabaseServiceRoleKey,
+      DASHBOARD_PASSWORD: SECRETS.dashboardPassword,
+      SUPABASE_URL: SECRETS.supabaseUrl,
+      TUNNEL_TOKEN: SECRETS.tunnelToken,
+      LLM_MODEL: 'qwen3.5:9b',
+      EMBEDDINGS_MODEL: 'nomic-embed-text',
+    });
+  });
+
+  it('omits TUNNEL_TOKEN in local-only mode (tunnelToken undefined)', () => {
+    const env = buildComposeEnv({
+      secrets: { ...SECRETS, tunnelToken: undefined },
+      llmModel: 'qwen3.5:9b',
+      embeddingModel: 'nomic-embed-text',
+    });
+    expect(env).not.toHaveProperty('TUNNEL_TOKEN');
+  });
+
+  it('defaults AUTH_JWT_SECRET to the JWT secret when not set in the environment', () => {
+    const prev = process.env['AUTH_JWT_SECRET'];
+    delete process.env['AUTH_JWT_SECRET'];
+    try {
+      const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'm', embeddingModel: 'e' });
+      expect(env.AUTH_JWT_SECRET).toBe(SECRETS.jwtSecret);
+    } finally {
+      if (prev !== undefined) process.env['AUTH_JWT_SECRET'] = prev;
+    }
+  });
+});
 
 describe('resolveComposeFiles', () => {
   it('uses the default compose path when no flag is passed', () => {
