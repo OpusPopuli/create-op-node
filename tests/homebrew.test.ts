@@ -178,7 +178,7 @@ describe('installPackages', () => {
 
     const report = await installPackages(PACKAGES);
 
-    expect(report.failed.length).toBe(1);
+    expect(report.failed).toHaveLength(1);
     expect(report.failed[0]?.pkg.name).toBe('git');
     expect(report.failed[0]?.reason).toContain('install borked');
     expect(report.installed.map((p) => p.name)).toEqual(['docker']);

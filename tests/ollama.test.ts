@@ -226,7 +226,7 @@ describe('setupModels', () => {
       .mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
 
     const report = await setupModels(['qwen3.5:9b', 'nomic-embed-text']);
-    expect(report.failed.length).toBe(1);
+    expect(report.failed).toHaveLength(1);
     expect(report.failed[0]?.model).toBe('qwen3.5:9b');
     expect(report.pulled).toEqual(['nomic-embed-text']);
     // Should still warm nomic-embed-text (first model in the list that's

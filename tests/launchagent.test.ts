@@ -58,6 +58,7 @@ describe('renderLaunchAgentPlist', () => {
   });
 
   it('refuses a keyFilePath with shell metacharacters (injection guard)', () => {
+    /* eslint-disable sonarjs/publicly-writable-directories -- these /tmp paths are hostile test fixtures asserting the injection guard rejects them; nothing is written */
     for (const evil of [
       '/tmp/key;rm -rf $HOME',
       '/tmp/key$(echo pwned)',
@@ -65,6 +66,7 @@ describe('renderLaunchAgentPlist', () => {
       '/tmp/key"quoted"',
       '/tmp/key\nnewline',
     ]) {
+      /* eslint-enable sonarjs/publicly-writable-directories */
       expect(() =>
         renderLaunchAgentPlist({ keyFilePath: evil, tunnelToken: VALID_TOKEN }),
       ).toThrow(/launchd path interpolation/);
@@ -101,6 +103,7 @@ describe('renderLaunchAgentPlist', () => {
 
   it('still validates keyFilePath in local-only mode', () => {
     expect(() =>
+      // eslint-disable-next-line sonarjs/publicly-writable-directories -- hostile test fixture asserting the guard rejects it; nothing is written
       renderLaunchAgentPlist({ keyFilePath: '/tmp/key;rm -rf $HOME' }),
     ).toThrow(/launchd path interpolation/);
   });
@@ -228,6 +231,7 @@ describe('renderLaunchAgentPlist', () => {
       expect(() =>
         renderLaunchAgentPlist({
           keyFilePath: '/k',
+          // eslint-disable-next-line sonarjs/no-clear-text-protocols -- hostile test fixture asserting the shell-metacharacter guard rejects it
           supabaseUrl: 'http://localhost;rm -rf /',
         }),
       ).toThrow(/supabaseUrl.*not allowed/);
