@@ -23,7 +23,7 @@ describe('httpProbe', () => {
     const fetchImpl = mockFetch(() => ({ status: 200, body: big }));
     const r = await httpProbe({ url: 'https://api.example.org/health', fetchImpl });
     if (!r.ok) throw new Error('expected ok');
-    expect(r.bodyPreview.length).toBe(200);
+    expect(r.bodyPreview).toHaveLength(200);
   });
 
   it('fails when the status does not match expectedStatus', async () => {

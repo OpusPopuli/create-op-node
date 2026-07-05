@@ -204,7 +204,7 @@ describe('runVerify orchestration', () => {
     const seen: VerifyPhase[] = [];
     const deps = depsFor({ onPhase: (ph) => seen.push(ph) });
     const report = await runVerify(baseInput, deps);
-    expect(seen.length).toBe(report.phases.length);
+    expect(seen).toHaveLength(report.phases.length);
     expect(seen.map((ph) => ph.name)).toEqual(report.phases.map((ph) => ph.name));
   });
 
@@ -219,6 +219,6 @@ describe('runVerify orchestration', () => {
     // Compile-time check disguised as a runtime test — if this build
     // succeeds we got the readonly guarantee.
     const report: VerifyReport = { phases: [] };
-    expect(report.phases.length).toBe(0);
+    expect(report.phases).toHaveLength(0);
   });
 });
