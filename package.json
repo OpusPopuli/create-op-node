@@ -20,8 +20,8 @@
     "dev": "tsx src/cli.ts",
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint",
-    "lint:eslint": "eslint .",
+    "lint": "eslint .",
+    "lint:sonar": "eslint . --config eslint.sonar.config.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
@@ -37,12 +37,14 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@eslint/js": "^9.18.0",
     "@types/node": "^22.10.6",
     "eslint": "^9.18.0",
-    "oxlint": "^0.16.0",
+    "eslint-plugin-sonarjs": "^4.0.3",
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.0.0",
     "vitest": "^3.0.0"
   },
   "keywords": [

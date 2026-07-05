@@ -53,7 +53,7 @@ export const URL_SAFE_PASSWORD_RE = /^[A-Za-z0-9_-]+$/;
 /** Same shape as TUNNEL_TOKEN_RE but documented separately because the
  *  SUPABASE_URL value also lands in the plist and we want to allow `://`
  *  and `:` for the port. Letters, digits, `-`, `_`, `.`, `:`, `/`. */
-export const SAFE_URL_RE = /^[A-Za-z0-9:/_.\-]+$/;
+export const SAFE_URL_RE = /^[A-Za-z0-9:/_.-]+$/;
 
 /** Default network timeout used by `verify`'s probes (TLS handshake, HTTP
  *  GET /health, GraphQL POST). One number so tls.ts and http.ts don't drift. */
