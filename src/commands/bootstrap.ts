@@ -61,6 +61,7 @@ import {
 import { locateOrCloneRepo, type LocateOutcome } from '../lib/noderepo.js';
 import { safeExeca } from '../lib/exec.js';
 import { unwrap } from '../lib/prompts.js';
+import { assertNever } from '../lib/assert.js';
 
 /** Compose profile set used in production mode — activates cloudflared. */
 const PUBLIC_PROFILES = ['public'] as const;
@@ -613,7 +614,8 @@ export const bootstrapCommand = new Command('bootstrap')
     // on the relevant services; no shell env needed.
     const promptServiceUrl =
       nodeType === 'region-with-prompts'
-        ? 'http://opuspopuli-prompts:3210'
+        ? // eslint-disable-next-line sonarjs/no-clear-text-protocols -- in-network (docker) prompt-service URL is legitimately plaintext http; no TLS on the internal bridge
+          'http://opuspopuli-prompts:3210'
         : (opts.promptServiceUrl ?? 'https://prompts.opuspopuli.org');
     if (!SAFE_URL_RE.test(promptServiceUrl)) {
       p.cancel(
@@ -642,12 +644,12 @@ export const bootstrapCommand = new Command('bootstrap')
         await p.text({
           message: 'Public-facing Supabase URL (what browsers + microservices use to reach kong)?',
           placeholder: 'https://supabase.civicfeed.tx',
-          validate: (v) =>
-            !v
-              ? 'required'
-              : SAFE_URL_RE.test(v)
-                ? undefined
-                : 'contains characters outside the allowed URL set',
+          validate: (v) => {
+            if (!v) return 'required';
+            return SAFE_URL_RE.test(v)
+              ? undefined
+              : 'contains characters outside the allowed URL set';
+          },
         }),
       );
     }
@@ -914,8 +916,7 @@ export const bootstrapCommand = new Command('bootstrap')
       default: {
         // Exhaustiveness check — adding a new HealthOutcome variant without
         // updating this switch fails the type check.
-        const _exhaustive: never = outcome;
-        void _exhaustive;
+        assertNever(outcome);
         return;
       }
     }
@@ -1130,8 +1131,7 @@ function handleLocateError(out: LocateOutcome, owner: string, name: string): voi
     default: {
       // Compile-time exhaustiveness — if LocateOutcome gains a new variant
       // and isn't handled above, TypeScript fails this assignment.
-      const _exhaustive: never = out;
-      void _exhaustive;
+      assertNever(out);
       return;
     }
   }

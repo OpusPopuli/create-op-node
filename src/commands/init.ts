@@ -182,13 +182,14 @@ export const initCommand = new Command('init')
     p.note(kcNote, 'Secret store');
 
     // ---- Plan summary + confirm ----------------------------------------
+    const orgWriteAccess = pc.dim(`required for ${owner}`);
     p.note(
       opts.localOnly
         ? [
             `Region label:        ${pc.cyan(region)}`,
             `New node repo:       ${pc.cyan(newRepoFull)}`,
             `Template:            ${pc.dim(opts.template ?? 'OpusPopuli/opuspopuli-node')}`,
-            `GH org write access: ${pc.dim(`required for ${owner}`)}`,
+            `GH org write access: ${orgWriteAccess}`,
             ``,
             `Will create the repo from template (private, no Cloudflare),`,
             `and store a fresh pgsodium key in Keychain. That's it — no PR,`,
@@ -201,7 +202,7 @@ export const initCommand = new Command('init')
             `New node repo:       ${pc.cyan(newRepoFull)}`,
             `Template:            ${pc.dim(opts.template ?? 'OpusPopuli/opuspopuli-node')}`,
             `TFC organization:    ${pc.cyan(publicConfig?.tfOrg ?? '')}`,
-            `GH org write access: ${pc.dim(`required for ${owner}`)}`,
+            `GH org write access: ${orgWriteAccess}`,
             ``,
             `Will create the repo, seed 5 secrets, write prod.tfvars on a branch,`,
             `open a PR, generate a fresh pgsodium key, and (after you merge) wait`,
@@ -267,9 +268,9 @@ export const initCommand = new Command('init')
       }
       // Synthesize the same shape `createRepoFromTemplate` returns so the rest
       // of the flow doesn't care which path got us here.
-      // TODO: query the actual default branch via gh API instead of assuming
-      // `main` — a pre-existing repo could have been initialized with a
-      // different default (older operator habit, organization defaults).
+      // Deferred (#41): query the actual default branch via gh API instead of
+      // assuming `main` — a pre-existing repo could have been initialized with
+      // a different default (older operator habit, organization defaults).
       created = {
         fullName: newRepoFull,
         htmlUrl: `https://github.com/${newRepoFull}`,
@@ -602,7 +603,10 @@ async function collectPublicConfig(opts: InitOptions): Promise<PublicConfig> {
         await p.text({
           message: 'Domain registered in Cloudflare?',
           placeholder: 'example.org',
-          validate: (v) => (!v ? 'Required' : v.includes('.') ? undefined : 'Missing a TLD?'),
+          validate: (v) => {
+            if (!v) return 'Required';
+            return v.includes('.') ? undefined : 'Missing a TLD?';
+          },
         }),
       );
 
@@ -654,9 +658,10 @@ async function collectPublicConfig(opts: InitOptions): Promise<PublicConfig> {
     p.cancel('Fix the token / org, then re-run.');
     process.exit(1);
   }
+  const asUser = tfProbe.userName ? ` (as ${tfProbe.userName})` : '';
   tfSpin.stop(
     pc.green(
-      `✓ TFC token valid${tfProbe.userName ? ` (as ${tfProbe.userName})` : ''}, org "${tfOrg}" reachable.`,
+      `✓ TFC token valid${asUser}, org "${tfOrg}" reachable.`,
     ),
   );
 

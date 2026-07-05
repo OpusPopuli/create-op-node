@@ -30,6 +30,7 @@ import { composeDown, composePs, dockerLogout, GHCR_REGISTRY } from '../lib/dock
 import { defaultPaths as defaultLaunchAgentPaths, teardownLaunchAgent } from '../lib/launchagent.js';
 import { locateOrCloneRepo, NODE_REPO_MARKERS } from '../lib/noderepo.js';
 import { unwrap } from '../lib/prompts.js';
+import { assertNever } from '../lib/assert.js';
 import type { ContainerSnapshot } from '../lib/docker.js';
 import type { LaunchAgentPaths, TeardownResult } from '../lib/launchagent.js';
 
@@ -381,8 +382,7 @@ export const resetCommand = new Command('reset')
           stackSkipReason = `unexpected outcome ${located.kind} from locateOrCloneRepo with allowClone=false`;
           break;
         default: {
-          const _exhaustive: never = located;
-          void _exhaustive;
+          assertNever(located);
         }
       }
     } else {
@@ -398,6 +398,14 @@ export const resetCommand = new Command('reset')
       });
     }
 
+    let runningContainersLabel: string;
+    if (runningContainers === null) {
+      runningContainersLabel = pc.dim('unknown');
+    } else if (runningContainers.length === 0) {
+      runningContainersLabel = pc.dim('none');
+    } else {
+      runningContainersLabel = pc.cyan(`${runningContainers.length} listed by compose ps`);
+    }
     p.note(
       [
         `Region:                ${pc.cyan(region)}`,
@@ -406,13 +414,7 @@ export const resetCommand = new Command('reset')
             ? pc.cyan(repoPath)
             : pc.dim(`not used (${stackSkipReason ?? 'no repo path resolved'})`)
         }`,
-        `Running containers:    ${
-          runningContainers === null
-            ? pc.dim('unknown')
-            : runningContainers.length === 0
-              ? pc.dim('none')
-              : pc.cyan(`${runningContainers.length} listed by compose ps`)
-        }`,
+        `Running containers:    ${runningContainersLabel}`,
         `LaunchAgent plist:     ${plistExists ? pc.cyan(launchAgentPaths.plistFile) : pc.dim('not present')}`,
         `pgsodium key file:     ${keyFileExists ? pc.cyan(launchAgentPaths.keyFile) : pc.dim('not present')}`,
         `Registry to log out:   ${pc.cyan(opts.registry ?? GHCR_REGISTRY)}`,

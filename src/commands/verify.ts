@@ -322,10 +322,9 @@ export const verifyCommand = new Command('verify')
     const visible = (opts.showSkipped ?? false)
       ? report.phases
       : report.phases.filter((ph) => ph.status !== 'skipped');
-    const lines = visible.map((ph, i) => {
+    const lines = visible.map((ph) => {
       const idx = report.phases.indexOf(ph) + 1;
       return `${phaseIcon(ph)} [${idx}/${totalPhases}] ${ph.name}: ${pc.dim(ph.detail)}`;
-      void i;
     });
     const skippedCount = report.phases.length - visible.length;
     if (skippedCount > 0 && !opts.showSkipped) {
@@ -335,11 +334,11 @@ export const verifyCommand = new Command('verify')
 
     const summary = summarize(report);
     if (summary.ok) {
-      p.outro(
-        summary.warned === 0
-          ? pc.green('All checks passed.')
-          : pc.yellow(`Passed with ${summary.warned} warning${summary.warned === 1 ? '' : 's'}.`),
-      );
+      if (summary.warned === 0) {
+        p.outro(pc.green('All checks passed.'));
+      } else {
+        p.outro(pc.yellow(`Passed with ${summary.warned} warning${summary.warned === 1 ? '' : 's'}.`));
+      }
     } else {
       p.outro(pc.red(`${summary.failed} check${summary.failed === 1 ? '' : 's'} failed.`));
       process.exit(1);
@@ -355,12 +354,17 @@ function phaseIcon(ph: VerifyPhase): string {
   }
 }
 
+function phaseColor(status: VerifyPhase['status']): (text: string) => string {
+  switch (status) {
+    case 'ok': return pc.green;
+    case 'warn': return pc.yellow;
+    case 'skipped': return pc.dim;
+    case 'fail': return pc.red;
+  }
+}
+
 function formatPhaseLine(prefix: string, ph: VerifyPhase): string {
   const icon = phaseIcon(ph);
-  const colorize =
-    ph.status === 'ok' ? pc.green :
-    ph.status === 'warn' ? pc.yellow :
-    ph.status === 'skipped' ? pc.dim :
-    pc.red;
+  const colorize = phaseColor(ph.status);
   return colorize(`${icon} ${prefix}: ${ph.detail}`);
 }
