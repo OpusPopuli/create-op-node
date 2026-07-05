@@ -532,7 +532,7 @@ The CLI itself never holds any credentials beyond the scope of a single command 
 - [`zod`](https://github.com/colinhacks/zod) for runtime validation
 - [`vitest`](https://vitest.dev) for tests
 - [`tsup`](https://tsup.egoist.dev) for the single-file ESM build
-- `oxlint` (fast, Rust-based) for pre-commit lint; ESLint v9 flat config for the full CI pass
+- ESLint v9 flat config for linting: a base pass (`pnpm lint`) plus a separate SonarJS pass (`pnpm lint:sonar`) for cognitive-complexity and hot-spot rules, mirroring the `@opuspopuli/regions` setup
 
 ## Contributing
 
@@ -541,6 +541,7 @@ This is a young project against the still-stabilizing `opuspopuli-node` template
 ```bash
 pnpm install
 pnpm dev -- --help          # run from source
+pnpm lint                   # eslint base pass
 pnpm test                   # vitest
 pnpm build                  # tsup → dist/
 node dist/cli.js --help     # test the built binary
