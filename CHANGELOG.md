@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.5](https://github.com/OpusPopuli/create-op-node/compare/v0.10.4...v0.10.5) (2026-07-05)
+
+
+### Bug Fixes
+
+* **lint:** rewrite super-linear regexes in src ([9b5789c](https://github.com/OpusPopuli/create-op-node/commit/9b5789ca38ad9bb28afd0ac4e0e13d3944326557))
+
 ## [0.10.4](https://github.com/OpusPopuli/create-op-node/compare/v0.10.3...v0.10.4) (2026-07-05)
 
 
