@@ -28,7 +28,9 @@ function base64url(input: Buffer | string): string {
   const buf = typeof input === 'string' ? Buffer.from(input) : input;
   return buf
     .toString('base64')
-    .replace(/=+$/, '')
+    // base64 padding `=` only ever appears at the end, so stripping every `=`
+    // is equivalent to `/=+$/` and avoids the anchored-quantifier backtracking.
+    .replace(/=/g, '')
     .replace(/\+/g, '-')
     .replace(/\//g, '_');
 }
