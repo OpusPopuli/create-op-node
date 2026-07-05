@@ -264,7 +264,7 @@ describe('runReset', () => {
     const seen: ResetPhase[] = [];
     const deps = depsFor({ onPhase: (ph) => seen.push(ph) });
     const report = await runReset(fullInput(), deps);
-    expect(seen.length).toBe(report.phases.length);
+    expect(seen).toHaveLength(report.phases.length);
     expect(seen.map((p) => p.name)).toEqual(report.phases.map((p) => p.name));
   });
 });

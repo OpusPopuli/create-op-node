@@ -48,12 +48,12 @@ describe('renderOpComposeScript', () => {
     // and optional_secret.
     const s = renderOpComposeScript({ region: 'us-ca' });
     // Two case-arms per helper × two helpers = four matches expected.
-    expect((s.match(/^\s*36\)/gm) ?? []).length).toBe(2);
-    expect((s.match(/^\s*44\)/gm) ?? []).length).toBe(2);
+    expect(s.match(/^[ \t]*36\)/gm) ?? []).toHaveLength(2);
+    expect(s.match(/^[ \t]*44\)/gm) ?? []).toHaveLength(2);
     // The hint for the locked case must include the remediation command.
-    expect(s).toMatch(/LOCKED.*\n.*?security unlock-keychain/s);
+    expect(s).toMatch(/LOCKED[^\n]*\n[\s\S]*?security unlock-keychain/);
     // The hint for the missing case must include the bootstrap command.
-    expect(s).toMatch(/MISSING under service.*\n.*?create-op-node bootstrap --region us-ca/s);
+    expect(s).toMatch(/MISSING under service[^\n]*\n[\s\S]*?create-op-node bootstrap --region us-ca/);
   });
 
   it('exports prompt-service credentials conditionally (optional_secret)', () => {
@@ -99,6 +99,7 @@ describe('renderOpComposeScript', () => {
     it('bakes the in-network URL for colocated deployments', () => {
       const s = renderOpComposeScript({
         region: 'us-ca',
+        // eslint-disable-next-line sonarjs/no-clear-text-protocols -- in-network (docker) prompt-service URL is legitimately plaintext http; no TLS on the internal bridge
         promptServiceUrl: 'http://opuspopuli-prompts:3210',
       });
       expect(s).toMatch(/http:\/\/opuspopuli-prompts:3210/);
@@ -119,8 +120,10 @@ describe('renderOpComposeScript', () => {
 
     it('accepts realistic prompt-service URLs', () => {
       for (const ok of [
+        /* eslint-disable sonarjs/no-clear-text-protocols -- localhost + in-network prompt-service URLs are legitimately plaintext http (no TLS on loopback / docker bridge) */
         'http://localhost:8000',
         'http://opuspopuli-prompts:3210',
+        /* eslint-enable sonarjs/no-clear-text-protocols */
         'https://prompts.opuspopuli.org',
         'https://prompts-staging.opuspopuli.org/api',
       ]) {

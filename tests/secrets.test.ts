@@ -151,10 +151,11 @@ describe('signSupabaseJwt', () => {
   it('produces a valid HS256 signature', () => {
     const jwt = signSupabaseJwt({ role: 'anon', secret: SECRET, issuedAtSeconds: 1 });
     const [h, p, sig] = jwt.split('.');
+    // eslint-disable-next-line sonarjs/hardcoded-secret-signatures -- SECRET is a local test constant, not a real credential
     const expected = createHmac('sha256', SECRET)
       .update(`${h}.${p}`)
       .digest('base64')
-      .replace(/=+$/, '')
+      .replace(/=/g, '')
       .replace(/\+/g, '-')
       .replace(/\//g, '_');
     expect(sig).toBe(expected);

@@ -469,7 +469,7 @@ describe('waitForHealthy', () => {
       { timeoutMs: 1000, pollMs: 100, onPoll: (s) => snaps.push(s) },
       deps,
     );
-    expect(snaps.length).toBe(1);
+    expect(snaps).toHaveLength(1);
     expect(snaps[0]?.[0]?.name).toBe('api');
   });
 });
