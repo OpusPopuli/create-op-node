@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3](https://github.com/OpusPopuli/create-op-node/compare/v0.10.2...v0.10.3) (2026-07-05)
+
+
+### Bug Fixes
+
+* **lint:** restore working eslint gate on org-standard config ([a6e586d](https://github.com/OpusPopuli/create-op-node/commit/a6e586de999f3ec4ba1efdec6b83c9fb0c7b697e))
+* **lint:** restore working eslint gate on org-standard config ([55979aa](https://github.com/OpusPopuli/create-op-node/commit/55979aaa724e4e7c0a6d9154bd17ad736b6c0aa8)), closes [#30](https://github.com/OpusPopuli/create-op-node/issues/30)
+
 ## [0.10.2](https://github.com/OpusPopuli/create-op-node/compare/v0.10.1...v0.10.2) (2026-06-26)
 
 
