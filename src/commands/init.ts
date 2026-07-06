@@ -88,446 +88,525 @@ export const initCommand = new Command('init')
   .addOption(new Option('-y, --yes', 'Skip the final confirmation').default(false))
   .action(async (opts: InitOptions) => {
     p.intro(pc.bgCyan(pc.black(' create-op-node init ')));
+    printWelcomeNote(opts);
 
-    p.note(
-      opts.localOnly
-        ? [
-            'Local-only setup — creates the region repo from template + a pgsodium key.',
-            'No Cloudflare, no Terraform Cloud, no public exposure.',
-            '',
-            pc.dim('Phase 1: laptop side (now) — GitHub repo from template + Keychain.'),
-            pc.dim('Phase 2: Studio side — `create-op-node bootstrap --local-only`.'),
-            '',
-            pc.dim('When you\'re ready to expose publicly, re-run `init` without --local-only.'),
-          ].join('\n')
-        : [
-            'This walks you from a sealed Mac Studio + a Cloudflare account to a',
-            'live federation node serving traffic at api.<your-domain>.',
-            '',
-            pc.dim('Phase 1: laptop side (now) — Cloudflare, GitHub, Terraform Cloud.'),
-            pc.dim('Phase 2: Studio side — run `create-op-node bootstrap` on the Mac.'),
-          ].join('\n'),
-      'Welcome',
-    );
-
-    // ---- Region values --------------------------------------------------
-    const region = opts.region
-      ? opts.region
-      : unwrap(
-          await p.text({
-            message: 'Short region label (used as the Keychain service suffix + R2 prefix)?',
-            placeholder: 'us-ca',
-            validate: (v) =>
-              /^[a-z0-9-]{2,32}$/.test(v ?? '') ? undefined : 'lowercase letters, digits, hyphens; 2–32 chars',
-          }),
-        );
-
+    const region = await resolveRegion(opts);
     const owner = opts.owner ?? 'OpusPopuli';
     const newRepoName = `opuspopuli-node-${region}`;
     const newRepoFull = `${owner}/${newRepoName}`;
-
-    // Warn if the operator passed flags that don't apply to --local-only.
-    // They'd otherwise be silently ignored and the operator would wonder why
-    // their token/domain/etc. seemed to do nothing. (S2/S3)
-    if (opts.localOnly) {
-      const ignored = listIgnoredLocalOnlyFlags(opts);
-      if (ignored.length > 0) {
-        p.note(
-          pc.yellow(
-            `⚠ The following ${ignored.length === 1 ? 'flag is' : 'flags are'} ignored with --local-only:\n` +
-              `  ${ignored.join(', ')}\n` +
-              pc.dim(
-                'These configure Cloudflare / TFC / PR-merge flow, which --local-only skips.',
-              ),
-          ),
-          'Notice',
-        );
-      }
-    }
+    warnIgnoredLocalOnlyFlags(opts);
 
     // Collect domain + Cloudflare + TFC creds when running in production mode.
-    // Returns null in --local-only — downstream code branches on this once,
-    // and the typed presence carries through (no non-null assertions). (S1)
+    // Returns null in --local-only — downstream branches on this once and the
+    // typed presence carries through (no non-null assertions). (S1)
     const publicConfig = opts.localOnly ? null : await collectPublicConfig(opts);
-
-    // ---- GitHub auth ---------------------------------------------------
-    let ghToken = opts.ghToken;
-    if (!ghToken) {
-      const fromCli = await ghTokenFromCli();
-      if (fromCli) {
-        const useCli = unwrap(
-          await p.confirm({
-            message: 'Found a signed-in `gh` CLI — use its token?',
-            initialValue: true,
-          }),
-        );
-        if (useCli) ghToken = fromCli;
-      }
-    }
-    if (!ghToken) {
-      ghToken = await collectSecret(
-        undefined,
-        'GitHub Personal Access Token (repo scope)',
-        'github',
-      );
-    }
-
-    // ---- Keychain availability -----------------------------------------
+    const ghToken = await resolveGhToken(opts);
     const keychain = await detectKeychain();
-    const kcNote = keychain.available
-      ? `✓ macOS Keychain available — pgsodium key + Tunnel token will be saved to your login keychain.\n` +
-        pc.dim('Note: items don\'t sync to iCloud Keychain via the security CLI.\n') +
-        pc.dim('On the Studio, bootstrap will read locally and prompt you to paste if missing.')
-      : `⚠ ${keychain.reason ?? 'Keychain unavailable'}. Secrets will be printed for manual stash.`;
-    p.note(kcNote, 'Secret store');
+    printSecretStoreNote(keychain);
 
-    // ---- Plan summary + confirm ----------------------------------------
-    const orgWriteAccess = pc.dim(`required for ${owner}`);
-    p.note(
-      opts.localOnly
-        ? [
-            `Region label:        ${pc.cyan(region)}`,
-            `New node repo:       ${pc.cyan(newRepoFull)}`,
-            `Template:            ${pc.dim(opts.template ?? 'OpusPopuli/opuspopuli-node')}`,
-            `GH org write access: ${orgWriteAccess}`,
-            ``,
-            `Will create the repo from template (private, no Cloudflare),`,
-            `and store a fresh pgsodium key in Keychain. That's it — no PR,`,
-            `no terraform, no tunnel token. Bootstrap on the Studio with`,
-            `\`bootstrap --local-only --region ${region}\` next.`,
-          ].join('\n')
-        : [
-            `Region label:        ${pc.cyan(region)}`,
-            `Domain:              ${pc.cyan(publicConfig?.domain ?? '')}`,
-            `New node repo:       ${pc.cyan(newRepoFull)}`,
-            `Template:            ${pc.dim(opts.template ?? 'OpusPopuli/opuspopuli-node')}`,
-            `TFC organization:    ${pc.cyan(publicConfig?.tfOrg ?? '')}`,
-            `GH org write access: ${orgWriteAccess}`,
-            ``,
-            `Will create the repo, seed 5 secrets, write prod.tfvars on a branch,`,
-            `open a PR, generate a fresh pgsodium key, and (after you merge) wait`,
-            `for terraform apply to finish and retrieve the Tunnel token.`,
-          ].join('\n'),
-      'Plan',
-    );
+    await confirmPlan({ opts, region, owner, newRepoFull, publicConfig });
 
-    if (!opts.yes) {
-      const go = unwrap(
-        await p.confirm({ message: 'Proceed?', initialValue: true }),
-      );
-      if (!go) {
-        p.cancel('Cancelled.');
-        process.exit(0);
-      }
-    }
-
-    // ---- Execute: create repo ------------------------------------------
-    const repoSpin = p.spinner();
-    repoSpin.start(`Creating ${newRepoFull} from ${opts.template}…`);
-    let created;
-    try {
-      created = await createRepoFromTemplate({
-        token: ghToken,
-        template: opts.template ?? 'OpusPopuli/opuspopuli-node',
-        owner,
-        name: newRepoName,
-        description: `Opus Populi node deployment for ${region}`,
-      });
-      repoSpin.stop(pc.green(`✓ Created ${created.fullName}`));
-    } catch (err) {
-      // The most likely re-run failure mode: the repo already exists from a
-      // previous partial run. The GitHub API responds with HTTP 422 for that
-      // case — status code is the API contract, message text isn't. Don't
-      // regex on the message; it can change.
-      const status =
-        typeof err === 'object' && err !== null && 'status' in err
-          ? (err as { status: number }).status
-          : 0;
-      const message = (err as Error).message ?? 'unknown error';
-
-      if (status !== 422) {
-        repoSpin.stop(pc.red(`✗ Couldn't create repo: ${message}`));
-        p.cancel('Fix the issue and re-run.');
-        process.exit(1);
-      }
-
-      repoSpin.stop(pc.yellow(`⚠ ${newRepoFull} already exists.`));
-      const reuse =
-        opts.useExistingRepo ||
-        unwrap(
-          await p.confirm({
-            message: `Continue with the existing ${newRepoFull}? (Re-seeds secrets + re-commits prod.tfvars on a fresh branch.)`,
-            initialValue: true,
-          }),
-        );
-      if (!reuse) {
-        p.cancel(
-          `Delete ${newRepoFull} on GitHub and re-run, or pass --use-existing-repo to skip this prompt.`,
-        );
-        process.exit(0);
-      }
-      // Synthesize the same shape `createRepoFromTemplate` returns so the rest
-      // of the flow doesn't care which path got us here.
-      // Deferred (#41): query the actual default branch via gh API instead of
-      // assuming `main` — a pre-existing repo could have been initialized with
-      // a different default (older operator habit, organization defaults).
-      created = {
-        fullName: newRepoFull,
-        htmlUrl: `https://github.com/${newRepoFull}`,
-        defaultBranch: 'main',
-      };
-    }
-
-    // ---- Execute: seed 5 secrets (skipped in --local-only) ---------------
+    const created = await createRegionRepo({ opts, ghToken, owner, newRepoName, newRepoFull, region });
     if (publicConfig) {
-      const secrets: Array<{ name: string; value: string }> = [
-        { name: 'CLOUDFLARE_API_TOKEN', value: publicConfig.cfToken },
-        { name: 'CLOUDFLARE_ACCOUNT_ID', value: publicConfig.cfAccount },
-        { name: 'CLOUDFLARE_ZONE_ID', value: publicConfig.cfZone },
-        { name: 'TF_API_TOKEN', value: publicConfig.tfToken },
-        { name: 'TF_CLOUD_ORGANIZATION', value: publicConfig.tfOrg },
-      ];
-      const secSpin = p.spinner();
-      secSpin.start(`Seeding ${secrets.length} repo secrets…`);
-      const seeded: string[] = [];
-      for (const s of secrets) {
-        const r = await setRepoSecret({ repo: newRepoFull, name: s.name, value: s.value });
-        if (!r.written) {
-          secSpin.stop(pc.red(`✗ Failed to set ${s.name}: ${r.reason ?? 'unknown'}`));
-          const remaining = secrets
-            .slice(secrets.findIndex((x) => x.name === s.name))
-            .map((x) => x.name);
-          p.cancel(
-            [
-              seeded.length > 0
-                ? `Already seeded on ${newRepoFull}: ${seeded.join(', ')}.`
-                : `Nothing seeded yet on ${newRepoFull}.`,
-              `Still pending: ${remaining.join(', ')}.`,
-              '',
-              `Make sure \`gh\` is installed and signed in (\`gh auth login\`).`,
-              `Re-run with --use-existing-repo to retry (GitHub will overwrite the already-set secrets idempotently).`,
-            ].join('\n'),
-          );
-          process.exit(1);
-        }
-        seeded.push(s.name);
-      }
-      secSpin.stop(pc.green(`✓ Seeded ${secrets.length} secrets on ${newRepoFull}`));
+      await seedRepoSecrets({ publicConfig, newRepoFull });
     }
+    const pr = publicConfig
+      ? await openInfraPr({ opts, ghToken, region, newRepoFull, publicConfig, created })
+      : null;
 
-    // ---- Execute: branch + tfvars + PR (skipped in --local-only) ---------
-    // Branch name is timestamped (ISO compact, UTC) so re-runs don't collide
-    // with a leftover branch from a previous partial run. Keeps the PR list
-    // readable and avoids a separate "branch already exists" idempotency
-    // case.
-    let pr: { number: number; htmlUrl: string } | null = null;
-    if (publicConfig) {
-      const branch = `init/region-${region}-${isoStampUtc(new Date())}`;
-      const setupSpin = p.spinner();
-      setupSpin.start(`Writing prod.tfvars on branch ${branch}…`);
-      try {
-        await createBranch({
-          token: ghToken,
-          repo: newRepoFull,
-          branch,
-          fromBranch: created.defaultBranch,
-        });
-        const tfvars = renderProdTfvars({
-          project: opts.project ?? 'opuspopuli',
-          domain: publicConfig.domain,
-        });
-        await commitFile({
-          token: ghToken,
-          repo: newRepoFull,
-          branch,
-          path: 'infra/cloudflare/environments/prod.tfvars',
-          content: tfvars,
-          message: `init: prod.tfvars for ${region}`,
-        });
-      } catch (err) {
-        setupSpin.stop(pc.red(`✗ Couldn't write tfvars: ${(err as Error).message}`));
-        p.cancel('The repo exists but the branch / commit failed. Open it on GitHub and inspect.');
-        process.exit(1);
-      }
-      setupSpin.stop(pc.green('✓ Wrote prod.tfvars'));
+    await persistPgsodiumKey({ keychain, opts, region });
 
-      const prSpin = p.spinner();
-      prSpin.start('Opening pull request…');
-      try {
-        pr = await openPullRequest({
-          token: ghToken,
-          repo: newRepoFull,
-          head: branch,
-          base: created.defaultBranch,
-          title: `init: bring up region ${region}`,
-          body: [
-            `Initial region deployment for **${region}** (${publicConfig.domain}).`,
-            '',
-            'Adds `infra/cloudflare/environments/prod.tfvars`. Merging this PR triggers',
-            '`cloudflare-infra.yml` which runs `terraform apply` against the',
-            `\`${publicConfig.tfOrg}\` Terraform Cloud organization, provisioning the Cloudflare`,
-            'Tunnel, DNS records, R2 buckets, and Pages project.',
-            '',
-            `Generated by \`create-op-node init\`.`,
-          ].join('\n'),
-        });
-      } catch (err) {
-        prSpin.stop(pc.red(`✗ Couldn't open PR: ${(err as Error).message}`));
-        p.cancel('Branch + tfvars are committed; open the PR by hand on GitHub.');
-        process.exit(1);
-      }
-      prSpin.stop(pc.green(`✓ Opened PR #${pr.number}`));
-    }
-
-    // ---- pgsodium master key (read existing OR generate fresh) ----------
-    //
-    // Three branches:
-    //   1. Keychain available + key already present + no --overwrite →
-    //      surface the existing key (don't generate a fresh one and
-    //      silently drop it).
-    //   2. Keychain available + no key OR --overwrite → generate fresh,
-    //      save to Keychain.
-    //   3. Keychain unavailable → generate fresh, print for manual stash.
-    const pgsodiumCoords = { region, account: 'pgsodium-root-key' as const };
-    const keyLabel = `org.opuspopuli.${region}/pgsodium-root-key`;
-
-    if (keychain.available) {
-      const existing = opts.overwrite ? null : await readSecret(pgsodiumCoords);
-      if (existing && /^[a-f0-9]{64}$/.test(existing)) {
-        p.note(
-          `${pc.green('✓')} Re-using existing pgsodium master key from Keychain (${pc.cyan(keyLabel)}). Pass --overwrite to rotate.`,
-          'Secret',
-        );
-      } else {
-        const fresh = generatePgsodiumRootKey();
-        const r = await saveSecret(pgsodiumCoords, fresh);
-        if (r.written) {
-          p.note(
-            `${pc.green('✓')} pgsodium master key${r.updated ? ' rotated' : ' saved'} to Keychain as ${pc.cyan(keyLabel)}.`,
-            'Secret',
-          );
-        } else {
-          await printKeyForManualSave(fresh, keyLabel, r.reason);
-        }
-      }
-    } else {
-      const fresh = generatePgsodiumRootKey();
-      await printKeyForManualSave(fresh, keyLabel);
-    }
-
-    // ---- Local-only short-circuit --------------------------------------
-    // No PR to merge, no terraform to apply, no tunnel token to retrieve.
-    // The local-only flow ends here. Gating on publicConfig (rather than
-    // opts.localOnly) lets TS narrow publicConfig to non-null for the rest
-    // of the function — no non-null assertions in the TFC poll block below.
+    // Local-only flow ends here. Gating on publicConfig (not opts.localOnly)
+    // lets TS narrow it to non-null for the TFC poll block below.
     if (!publicConfig) {
-      p.outro(
-        pc.cyan(
-          [
-            `Region ${region} provisioned for local-only mode.`,
-            `Repo: https://github.com/${newRepoFull}`,
-            ``,
-            `Next: on the Studio (fresh or otherwise — bootstrap installs`,
-            `brew packages it needs), run:`,
-            `  npx create-op-node bootstrap --region ${region} --local-only`,
-            ``,
-            `When you're ready to expose publicly, re-run BOTH \`init\` and`,
-            `\`bootstrap\` without --local-only. Same region repo + pgsodium key`,
-            `promote cleanly to the production-shaped deploy.`,
-          ].join('\n'),
-        ),
-      );
+      printLocalOnlyOutro({ region, newRepoFull });
       return;
     }
-
-    // Production continuation starts here. pr was assigned above inside the
-    // same publicConfig-truthy branch; both gates evaluate to the same
-    // condition, but TS can't track that across separate conditionals.
-    // Defensive narrow rather than `pr!`.
     if (!pr) {
       throw new Error('init: PR creation step did not run despite publicConfig present');
     }
 
-    // ---- Pause for operator to merge PR --------------------------------
-    if (opts.skipWait) {
-      p.outro(
-        pc.cyan(
-          `Review + merge ${pr.htmlUrl} when ready. Re-run with no --skip-wait or run \`npx create-op-node verify\` afterwards.`,
-        ),
+    const proceed = await pauseForMerge({ pr, opts });
+    if (!proceed) return;
+
+    const tunnelToken = await fetchTunnelToken({ publicConfig });
+    await persistTunnelToken({ keychain, region, tunnelToken });
+    printDoneOutro(region);
+  });
+
+// ----------------------------------------------------------------------------
+// Init phases
+// ----------------------------------------------------------------------------
+// The command action delegates to these phase helpers so no single function
+// exceeds the cognitive-complexity budget. Each is behavior-preserving — the
+// interactive prompts, spinners, and process.exit calls are relocated
+// verbatim, restructured only with early returns to flatten nesting.
+
+function printWelcomeNote(opts: InitOptions): void {
+  p.note(
+    opts.localOnly
+      ? [
+          'Local-only setup — creates the region repo from template + a pgsodium key.',
+          'No Cloudflare, no Terraform Cloud, no public exposure.',
+          '',
+          pc.dim('Phase 1: laptop side (now) — GitHub repo from template + Keychain.'),
+          pc.dim('Phase 2: Studio side — `create-op-node bootstrap --local-only`.'),
+          '',
+          pc.dim('When you\'re ready to expose publicly, re-run `init` without --local-only.'),
+        ].join('\n')
+      : [
+          'This walks you from a sealed Mac Studio + a Cloudflare account to a',
+          'live federation node serving traffic at api.<your-domain>.',
+          '',
+          pc.dim('Phase 1: laptop side (now) — Cloudflare, GitHub, Terraform Cloud.'),
+          pc.dim('Phase 2: Studio side — run `create-op-node bootstrap` on the Mac.'),
+        ].join('\n'),
+    'Welcome',
+  );
+}
+
+// Region label (used as the Keychain service suffix + R2 prefix).
+async function resolveRegion(opts: InitOptions): Promise<string> {
+  return opts.region
+    ? opts.region
+    : unwrap(
+        await p.text({
+          message: 'Short region label (used as the Keychain service suffix + R2 prefix)?',
+          placeholder: 'us-ca',
+          validate: (v) =>
+            /^[a-z0-9-]{2,32}$/.test(v ?? '') ? undefined : 'lowercase letters, digits, hyphens; 2–32 chars',
+        }),
       );
-      return;
+}
+
+// Warn if the operator passed flags that don't apply to --local-only. They'd
+// otherwise be silently ignored and the operator would wonder why their
+// token/domain/etc. seemed to do nothing. (S2/S3)
+function warnIgnoredLocalOnlyFlags(opts: InitOptions): void {
+  if (!opts.localOnly) return;
+  const ignored = listIgnoredLocalOnlyFlags(opts);
+  if (ignored.length === 0) return;
+  p.note(
+    pc.yellow(
+      `⚠ The following ${ignored.length === 1 ? 'flag is' : 'flags are'} ignored with --local-only:\n` +
+        `  ${ignored.join(', ')}\n` +
+        pc.dim('These configure Cloudflare / TFC / PR-merge flow, which --local-only skips.'),
+    ),
+    'Notice',
+  );
+}
+
+// ---- GitHub auth: flag > signed-in gh CLI > paste prompt ----
+async function resolveGhToken(opts: InitOptions): Promise<string> {
+  let ghToken = opts.ghToken;
+  if (!ghToken) {
+    const fromCli = await ghTokenFromCli();
+    if (fromCli) {
+      const useCli = unwrap(
+        await p.confirm({
+          message: 'Found a signed-in `gh` CLI — use its token?',
+          initialValue: true,
+        }),
+      );
+      if (useCli) ghToken = fromCli;
+    }
+  }
+  if (!ghToken) {
+    ghToken = await collectSecret(
+      undefined,
+      'GitHub Personal Access Token (repo scope)',
+      'github',
+    );
+  }
+  return ghToken;
+}
+
+function printSecretStoreNote(keychain: Awaited<ReturnType<typeof detectKeychain>>): void {
+  const kcNote = keychain.available
+    ? `✓ macOS Keychain available — pgsodium key + Tunnel token will be saved to your login keychain.\n` +
+      pc.dim('Note: items don\'t sync to iCloud Keychain via the security CLI.\n') +
+      pc.dim('On the Studio, bootstrap will read locally and prompt you to paste if missing.')
+    : `⚠ ${keychain.reason ?? 'Keychain unavailable'}. Secrets will be printed for manual stash.`;
+  p.note(kcNote, 'Secret store');
+}
+
+// ---- Plan summary + confirm ----
+async function confirmPlan(args: {
+  opts: InitOptions;
+  region: string;
+  owner: string;
+  newRepoFull: string;
+  publicConfig: PublicConfig | null;
+}): Promise<void> {
+  const { opts, region, owner, newRepoFull, publicConfig } = args;
+  const orgWriteAccess = pc.dim(`required for ${owner}`);
+  p.note(
+    opts.localOnly
+      ? [
+          `Region label:        ${pc.cyan(region)}`,
+          `New node repo:       ${pc.cyan(newRepoFull)}`,
+          `Template:            ${pc.dim(opts.template ?? 'OpusPopuli/opuspopuli-node')}`,
+          `GH org write access: ${orgWriteAccess}`,
+          ``,
+          `Will create the repo from template (private, no Cloudflare),`,
+          `and store a fresh pgsodium key in Keychain. That's it — no PR,`,
+          `no terraform, no tunnel token. Bootstrap on the Studio with`,
+          `\`bootstrap --local-only --region ${region}\` next.`,
+        ].join('\n')
+      : [
+          `Region label:        ${pc.cyan(region)}`,
+          `Domain:              ${pc.cyan(publicConfig?.domain ?? '')}`,
+          `New node repo:       ${pc.cyan(newRepoFull)}`,
+          `Template:            ${pc.dim(opts.template ?? 'OpusPopuli/opuspopuli-node')}`,
+          `TFC organization:    ${pc.cyan(publicConfig?.tfOrg ?? '')}`,
+          `GH org write access: ${orgWriteAccess}`,
+          ``,
+          `Will create the repo, seed 5 secrets, write prod.tfvars on a branch,`,
+          `open a PR, generate a fresh pgsodium key, and (after you merge) wait`,
+          `for terraform apply to finish and retrieve the Tunnel token.`,
+        ].join('\n'),
+    'Plan',
+  );
+
+  if (opts.yes) return;
+  const go = unwrap(await p.confirm({ message: 'Proceed?', initialValue: true }));
+  if (!go) {
+    p.cancel('Cancelled.');
+    process.exit(0);
+  }
+}
+
+// ---- Execute: create repo (idempotent on HTTP 422 already-exists) ----
+async function createRegionRepo(args: {
+  opts: InitOptions;
+  ghToken: string;
+  owner: string;
+  newRepoName: string;
+  newRepoFull: string;
+  region: string;
+}): Promise<{ fullName: string; defaultBranch: string }> {
+  const { opts, ghToken, owner, newRepoName, newRepoFull, region } = args;
+  const repoSpin = p.spinner();
+  repoSpin.start(`Creating ${newRepoFull} from ${opts.template}…`);
+  try {
+    const created = await createRepoFromTemplate({
+      token: ghToken,
+      template: opts.template ?? 'OpusPopuli/opuspopuli-node',
+      owner,
+      name: newRepoName,
+      description: `Opus Populi node deployment for ${region}`,
+    });
+    repoSpin.stop(pc.green(`✓ Created ${created.fullName}`));
+    return { fullName: created.fullName, defaultBranch: created.defaultBranch };
+  } catch (err) {
+    // The most likely re-run failure mode: the repo already exists from a
+    // previous partial run. The GitHub API responds with HTTP 422 for that
+    // case — status code is the API contract, message text isn't. Don't
+    // regex on the message; it can change.
+    const status =
+      typeof err === 'object' && err !== null && 'status' in err
+        ? (err as { status: number }).status
+        : 0;
+    const message = (err as Error).message ?? 'unknown error';
+
+    if (status !== 422) {
+      repoSpin.stop(pc.red(`✗ Couldn't create repo: ${message}`));
+      p.cancel('Fix the issue and re-run.');
+      process.exit(1);
     }
 
-    p.note(
-      [
-        `Open the PR: ${pc.cyan(pr.htmlUrl)}`,
+    repoSpin.stop(pc.yellow(`⚠ ${newRepoFull} already exists.`));
+    const reuse =
+      opts.useExistingRepo ||
+      unwrap(
+        await p.confirm({
+          message: `Continue with the existing ${newRepoFull}? (Re-seeds secrets + re-commits prod.tfvars on a fresh branch.)`,
+          initialValue: true,
+        }),
+      );
+    if (!reuse) {
+      p.cancel(
+        `Delete ${newRepoFull} on GitHub and re-run, or pass --use-existing-repo to skip this prompt.`,
+      );
+      process.exit(0);
+    }
+    // Synthesize the same shape `createRepoFromTemplate` returns so the rest
+    // of the flow doesn't care which path got us here.
+    // Deferred (#41): query the actual default branch via gh API instead of
+    // assuming `main` — a pre-existing repo could have been initialized with
+    // a different default (older operator habit, organization defaults).
+    return { fullName: newRepoFull, defaultBranch: 'main' };
+  }
+}
+
+// ---- Execute: seed 5 repo secrets (production mode only) ----
+async function seedRepoSecrets(args: {
+  publicConfig: PublicConfig;
+  newRepoFull: string;
+}): Promise<void> {
+  const { publicConfig, newRepoFull } = args;
+  const secrets: Array<{ name: string; value: string }> = [
+    { name: 'CLOUDFLARE_API_TOKEN', value: publicConfig.cfToken },
+    { name: 'CLOUDFLARE_ACCOUNT_ID', value: publicConfig.cfAccount },
+    { name: 'CLOUDFLARE_ZONE_ID', value: publicConfig.cfZone },
+    { name: 'TF_API_TOKEN', value: publicConfig.tfToken },
+    { name: 'TF_CLOUD_ORGANIZATION', value: publicConfig.tfOrg },
+  ];
+  const secSpin = p.spinner();
+  secSpin.start(`Seeding ${secrets.length} repo secrets…`);
+  const seeded: string[] = [];
+  for (const s of secrets) {
+    const r = await setRepoSecret({ repo: newRepoFull, name: s.name, value: s.value });
+    if (!r.written) {
+      secSpin.stop(pc.red(`✗ Failed to set ${s.name}: ${r.reason ?? 'unknown'}`));
+      const remaining = secrets
+        .slice(secrets.findIndex((x) => x.name === s.name))
+        .map((x) => x.name);
+      p.cancel(
+        [
+          seeded.length > 0
+            ? `Already seeded on ${newRepoFull}: ${seeded.join(', ')}.`
+            : `Nothing seeded yet on ${newRepoFull}.`,
+          `Still pending: ${remaining.join(', ')}.`,
+          '',
+          `Make sure \`gh\` is installed and signed in (\`gh auth login\`).`,
+          `Re-run with --use-existing-repo to retry (GitHub will overwrite the already-set secrets idempotently).`,
+        ].join('\n'),
+      );
+      process.exit(1);
+    }
+    seeded.push(s.name);
+  }
+  secSpin.stop(pc.green(`✓ Seeded ${secrets.length} secrets on ${newRepoFull}`));
+}
+
+// ---- Execute: branch + tfvars + PR (production mode only) ----
+// Branch name is timestamped (ISO compact, UTC) so re-runs don't collide
+// with a leftover branch from a previous partial run.
+async function openInfraPr(args: {
+  opts: InitOptions;
+  ghToken: string;
+  region: string;
+  newRepoFull: string;
+  publicConfig: PublicConfig;
+  created: { defaultBranch: string };
+}): Promise<Awaited<ReturnType<typeof openPullRequest>>> {
+  const { opts, ghToken, region, newRepoFull, publicConfig, created } = args;
+  const branch = `init/region-${region}-${isoStampUtc(new Date())}`;
+  const setupSpin = p.spinner();
+  setupSpin.start(`Writing prod.tfvars on branch ${branch}…`);
+  try {
+    await createBranch({
+      token: ghToken,
+      repo: newRepoFull,
+      branch,
+      fromBranch: created.defaultBranch,
+    });
+    const tfvars = renderProdTfvars({
+      project: opts.project ?? 'opuspopuli',
+      domain: publicConfig.domain,
+    });
+    await commitFile({
+      token: ghToken,
+      repo: newRepoFull,
+      branch,
+      path: 'infra/cloudflare/environments/prod.tfvars',
+      content: tfvars,
+      message: `init: prod.tfvars for ${region}`,
+    });
+  } catch (err) {
+    setupSpin.stop(pc.red(`✗ Couldn't write tfvars: ${(err as Error).message}`));
+    p.cancel('The repo exists but the branch / commit failed. Open it on GitHub and inspect.');
+    process.exit(1);
+  }
+  setupSpin.stop(pc.green('✓ Wrote prod.tfvars'));
+
+  const prSpin = p.spinner();
+  prSpin.start('Opening pull request…');
+  try {
+    const pr = await openPullRequest({
+      token: ghToken,
+      repo: newRepoFull,
+      head: branch,
+      base: created.defaultBranch,
+      title: `init: bring up region ${region}`,
+      body: [
+        `Initial region deployment for **${region}** (${publicConfig.domain}).`,
         '',
-        'Review the `terraform plan` comment, then merge to main.',
-        'The workflow then runs `terraform apply` against Terraform Cloud.',
+        'Adds `infra/cloudflare/environments/prod.tfvars`. Merging this PR triggers',
+        '`cloudflare-infra.yml` which runs `terraform apply` against the',
+        `\`${publicConfig.tfOrg}\` Terraform Cloud organization, provisioning the Cloudflare`,
+        'Tunnel, DNS records, R2 buckets, and Pages project.',
+        '',
+        `Generated by \`create-op-node init\`.`,
       ].join('\n'),
-      'Next step: review + merge',
-    );
-    const merged = unwrap(
-      await p.confirm({ message: 'PR merged?', initialValue: false }),
-    );
-    if (!merged) {
-      p.outro(
-        pc.cyan(`No worries — re-run \`create-op-node init --skip-wait\` later to skip this step, or finish manually.`),
-      );
-      return;
-    }
-
-    // ---- Poll TFC for apply completion ---------------------------------
-    const ws = await findWorkspace({
-      token: publicConfig.tfToken,
-      organization: publicConfig.tfOrg,
-      tags: ['opuspopuli', 'cloudflare'],
     });
-    if (!ws) {
-      p.cancel(
-        `Couldn't find a TFC workspace tagged opuspopuli + cloudflare in ${publicConfig.tfOrg}. ` +
-          `Check the workflow's run log; the workspace is created on first apply.`,
-      );
-      process.exit(1);
-    }
+    prSpin.stop(pc.green(`✓ Opened PR #${pr.number}`));
+    return pr;
+  } catch (err) {
+    prSpin.stop(pc.red(`✗ Couldn't open PR: ${(err as Error).message}`));
+    p.cancel('Branch + tfvars are committed; open the PR by hand on GitHub.');
+    process.exit(1);
+  }
+}
 
-    const tunnelToken = await waitForApplyAndFetchTunnelToken({
-      token: publicConfig.tfToken,
-      organization: publicConfig.tfOrg,
-      workspaceId: ws.id,
-      runId: ws.currentRunId,
-    });
-    if (!tunnelToken) {
-      p.cancel(
-        `Terraform apply didn't produce a tunnel_token output. Check the run on TFC; if it succeeded, the output may be named differently — patch and re-run, or fetch via 'terraform output -raw tunnel_token'.`,
-      );
-      process.exit(1);
-    }
+// ---- pgsodium master key (read existing OR generate fresh) ----
+//
+// Three branches: Keychain hit + key present + no --overwrite → surface the
+// existing key; Keychain hit + missing/--overwrite → generate + save; no
+// Keychain → generate + print for manual stash.
+async function persistPgsodiumKey(args: {
+  keychain: Awaited<ReturnType<typeof detectKeychain>>;
+  opts: InitOptions;
+  region: string;
+}): Promise<void> {
+  const { keychain, opts, region } = args;
+  const pgsodiumCoords = { region, account: 'pgsodium-root-key' as const };
+  const keyLabel = `org.opuspopuli.${region}/pgsodium-root-key`;
 
-    // ---- Save Tunnel token ----------------------------------------------
-    const tunnelCoords = { region, account: 'tunnel-token' as const };
-    const tunnelLabel = `org.opuspopuli.${region}/tunnel-token`;
-    if (keychain.available) {
-      const r = await saveSecret(tunnelCoords, tunnelToken);
-      if (r.written) {
-        p.note(
-          `${pc.green('✓')} Tunnel token saved to Keychain as ${pc.cyan(tunnelLabel)}.`,
-          'Secret',
-        );
-      } else {
-        await printKeyForManualSave(tunnelToken, tunnelLabel, r.reason);
-      }
-    } else {
-      await printKeyForManualSave(tunnelToken, tunnelLabel);
-    }
+  if (!keychain.available) {
+    const fresh = generatePgsodiumRootKey();
+    await printKeyForManualSave(fresh, keyLabel);
+    return;
+  }
 
-    // ---- Done -----------------------------------------------------------
+  const existing = opts.overwrite ? null : await readSecret(pgsodiumCoords);
+  if (existing && /^[a-f0-9]{64}$/.test(existing)) {
+    p.note(
+      `${pc.green('✓')} Re-using existing pgsodium master key from Keychain (${pc.cyan(keyLabel)}). Pass --overwrite to rotate.`,
+      'Secret',
+    );
+    return;
+  }
+
+  const fresh = generatePgsodiumRootKey();
+  const r = await saveSecret(pgsodiumCoords, fresh);
+  if (r.written) {
+    p.note(
+      `${pc.green('✓')} pgsodium master key${r.updated ? ' rotated' : ' saved'} to Keychain as ${pc.cyan(keyLabel)}.`,
+      'Secret',
+    );
+  } else {
+    await printKeyForManualSave(fresh, keyLabel, r.reason);
+  }
+}
+
+function printLocalOnlyOutro(args: { region: string; newRepoFull: string }): void {
+  const { region, newRepoFull } = args;
+  p.outro(
+    pc.cyan(
+      [
+        `Region ${region} provisioned for local-only mode.`,
+        `Repo: https://github.com/${newRepoFull}`,
+        ``,
+        `Next: on the Studio (fresh or otherwise — bootstrap installs`,
+        `brew packages it needs), run:`,
+        `  npx create-op-node bootstrap --region ${region} --local-only`,
+        ``,
+        `When you're ready to expose publicly, re-run BOTH \`init\` and`,
+        `\`bootstrap\` without --local-only. Same region repo + pgsodium key`,
+        `promote cleanly to the production-shaped deploy.`,
+      ].join('\n'),
+    ),
+  );
+}
+
+// Pause for the operator to merge the infra PR. Returns false when the flow
+// should stop here (--skip-wait, or the operator hasn't merged yet).
+async function pauseForMerge(args: {
+  pr: { htmlUrl: string };
+  opts: InitOptions;
+}): Promise<boolean> {
+  const { pr, opts } = args;
+  if (opts.skipWait) {
     p.outro(
       pc.cyan(
-        `Region ${region} is provisioned. Next: \`npx create-op-node bootstrap\` on the Mac Studio.`,
+        `Review + merge ${pr.htmlUrl} when ready. Re-run with no --skip-wait or run \`npx create-op-node verify\` afterwards.`,
       ),
     );
+    return false;
+  }
+
+  p.note(
+    [
+      `Open the PR: ${pc.cyan(pr.htmlUrl)}`,
+      '',
+      'Review the `terraform plan` comment, then merge to main.',
+      'The workflow then runs `terraform apply` against Terraform Cloud.',
+    ].join('\n'),
+    'Next step: review + merge',
+  );
+  const merged = unwrap(await p.confirm({ message: 'PR merged?', initialValue: false }));
+  if (!merged) {
+    p.outro(
+      pc.cyan(`No worries — re-run \`create-op-node init --skip-wait\` later to skip this step, or finish manually.`),
+    );
+    return false;
+  }
+  return true;
+}
+
+// ---- Poll TFC for apply completion + fetch the tunnel token ----
+async function fetchTunnelToken(args: { publicConfig: PublicConfig }): Promise<string> {
+  const { publicConfig } = args;
+  const ws = await findWorkspace({
+    token: publicConfig.tfToken,
+    organization: publicConfig.tfOrg,
+    tags: ['opuspopuli', 'cloudflare'],
   });
+  if (!ws) {
+    p.cancel(
+      `Couldn't find a TFC workspace tagged opuspopuli + cloudflare in ${publicConfig.tfOrg}. ` +
+        `Check the workflow's run log; the workspace is created on first apply.`,
+    );
+    process.exit(1);
+  }
+
+  const tunnelToken = await waitForApplyAndFetchTunnelToken({
+    token: publicConfig.tfToken,
+    organization: publicConfig.tfOrg,
+    workspaceId: ws.id,
+    runId: ws.currentRunId,
+  });
+  if (!tunnelToken) {
+    p.cancel(
+      `Terraform apply didn't produce a tunnel_token output. Check the run on TFC; if it succeeded, the output may be named differently — patch and re-run, or fetch via 'terraform output -raw tunnel_token'.`,
+    );
+    process.exit(1);
+  }
+  return tunnelToken;
+}
+
+async function persistTunnelToken(args: {
+  keychain: Awaited<ReturnType<typeof detectKeychain>>;
+  region: string;
+  tunnelToken: string;
+}): Promise<void> {
+  const { keychain, region, tunnelToken } = args;
+  const tunnelCoords = { region, account: 'tunnel-token' as const };
+  const tunnelLabel = `org.opuspopuli.${region}/tunnel-token`;
+  if (!keychain.available) {
+    await printKeyForManualSave(tunnelToken, tunnelLabel);
+    return;
+  }
+  const r = await saveSecret(tunnelCoords, tunnelToken);
+  if (r.written) {
+    p.note(
+      `${pc.green('✓')} Tunnel token saved to Keychain as ${pc.cyan(tunnelLabel)}.`,
+      'Secret',
+    );
+  } else {
+    await printKeyForManualSave(tunnelToken, tunnelLabel, r.reason);
+  }
+}
+
+function printDoneOutro(region: string): void {
+  p.outro(
+    pc.cyan(
+      `Region ${region} is provisioned. Next: \`npx create-op-node bootstrap\` on the Mac Studio.`,
+    ),
+  );
+}
 
 // ----------------------------------------------------------------------------
 // Helpers
