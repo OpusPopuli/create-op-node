@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  buildResetInput,
   RESET_PHASES,
   runReset,
   type ResetDeps,
@@ -49,6 +50,68 @@ describe('RESET_PHASES', () => {
       LAUNCH_AGENT: 'LaunchAgent',
       DOCKER_LOGOUT: 'docker logout',
     });
+  });
+});
+
+describe('buildResetInput', () => {
+  const paths = { keyFile: '/k', plistFile: '/p.plist' };
+  const base = {
+    opts: {},
+    repoPath: undefined as string | undefined,
+    plistExists: false,
+    launchAgentPaths: paths,
+    wipeData: false,
+    wipeImages: false,
+    removeOrphans: true,
+  };
+
+  it('includes the stack (with resolved compose files) when a repo path is present', () => {
+    const input = buildResetInput({
+      ...base,
+      repoPath: '/repo',
+      wipeData: true,
+      wipeImages: true,
+    });
+    expect(input.stack).toEqual({
+      repoPath: '/repo',
+      composeFiles: ['/repo/docker-compose-prod.yml'],
+      wipeVolumes: true,
+      wipeImages: true,
+      removeOrphans: true,
+    });
+  });
+
+  it('omits the stack when no repo path is resolved', () => {
+    expect(buildResetInput({ ...base, repoPath: undefined }).stack).toBeUndefined();
+  });
+
+  it('includes the LaunchAgent only when the plist exists and it is not skipped', () => {
+    expect(buildResetInput({ ...base, plistExists: true }).launchAgent).toEqual({
+      paths,
+      keepKeyFile: false,
+    });
+    expect(buildResetInput({ ...base, plistExists: false }).launchAgent).toBeUndefined();
+    expect(
+      buildResetInput({ ...base, plistExists: true, opts: { skipLaunchAgent: true } }).launchAgent,
+    ).toBeUndefined();
+  });
+
+  it('honors --keep-key-file', () => {
+    const input = buildResetInput({ ...base, plistExists: true, opts: { keepKeyFile: true } });
+    expect(input.launchAgent?.keepKeyFile).toBe(true);
+  });
+
+  it('includes docker-logout with the default registry unless skipped', () => {
+    expect(buildResetInput(base).dockerLogout).toEqual({ registry: 'ghcr.io' });
+    expect(
+      buildResetInput({ ...base, opts: { registry: 'registry.example.com' } }).dockerLogout,
+    ).toEqual({ registry: 'registry.example.com' });
+    expect(buildResetInput({ ...base, opts: { skipDockerLogout: true } }).dockerLogout).toBeUndefined();
+  });
+
+  it('defaults dryRun to false when the flag is absent', () => {
+    expect(buildResetInput(base).dryRun).toBe(false);
+    expect(buildResetInput({ ...base, opts: { dryRun: true } }).dryRun).toBe(true);
   });
 });
 
