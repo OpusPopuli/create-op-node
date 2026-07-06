@@ -85,52 +85,69 @@ const DEFAULT_DEPS: VerifyDeps = {
   cosign: cosignVerifyImage,
 };
 
+type PushVerifyPhase = (ph: VerifyPhase) => void;
+
 export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_DEPS): Promise<VerifyReport> {
+  // Each phase pushes its result(s) via push(), which records + fires onPhase
+  // in lockstep. push is threaded into the phase helpers (rather than having
+  // them return arrays) so the cosign loop keeps firing onPhase per-image,
+  // interleaved with its async calls — exactly as the original inline loop.
   const phases: VerifyPhase[] = [];
-  const push = (ph: VerifyPhase): void => {
+  const push: PushVerifyPhase = (ph) => {
     phases.push(ph);
     deps.onPhase?.(ph);
   };
 
-  // ---- Phase 1: TLS handshake ---------------------------------------
+  await verifyTlsPhase(input, deps, push);
+  await verifyHealthPhase(input, deps, push);
+  await verifyGraphqlPhase(input, deps, push);
+  await verifyCloudflarePhase(input, deps, push);
+  await verifyCosignPhase(input, deps, push);
+
+  return { phases };
+}
+
+// ---- Phase 1: TLS handshake ---------------------------------------
+async function verifyTlsPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   const tls = await deps.tls({ host: input.apiHost });
   if (!tls.ok) {
     push({ name: 'TLS handshake', status: 'fail', detail: tls.reason });
-  } else {
-    const line = `subject=${tls.subject}, issuer=${tls.issuer}, ${formatExpiry(tls.daysToExpiry)}`;
-    const warn = tls.daysToExpiry < input.certWarnDays;
-    if (warn) {
-      push({
-        name: 'TLS handshake',
-        status: 'warn',
-        detail: tls.daysToExpiry < 0
-          ? line
-          : `${line} (< warn threshold ${input.certWarnDays}d)`,
-      });
-    } else {
-      push({ name: 'TLS handshake', status: 'ok', detail: line });
-    }
+    return;
   }
+  const line = `subject=${tls.subject}, issuer=${tls.issuer}, ${formatExpiry(tls.daysToExpiry)}`;
+  if (tls.daysToExpiry < input.certWarnDays) {
+    push({
+      name: 'TLS handshake',
+      status: 'warn',
+      detail: tls.daysToExpiry < 0 ? line : `${line} (< warn threshold ${input.certWarnDays}d)`,
+    });
+    return;
+  }
+  push({ name: 'TLS handshake', status: 'ok', detail: line });
+}
 
-  // ---- Phase 2: GET /health ------------------------------------------
-  const healthUrl = `https://${input.apiHost}/health`;
-  const health = await deps.http({ url: healthUrl });
+// ---- Phase 2: GET /health ------------------------------------------
+async function verifyHealthPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
+  const health = await deps.http({ url: `https://${input.apiHost}/health` });
   if (health.ok) {
     push({ name: 'GET /health', status: 'ok', detail: `HTTP ${health.status}` });
   } else {
     push({ name: 'GET /health', status: 'fail', detail: health.reason });
   }
+}
 
-  // ---- Phase 3: GraphQL { __typename } -------------------------------
-  const gqlUrl = `https://${input.apiHost}/api`;
-  const gql = await deps.graphql({ url: gqlUrl });
+// ---- Phase 3: GraphQL { __typename } -------------------------------
+async function verifyGraphqlPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
+  const gql = await deps.graphql({ url: `https://${input.apiHost}/api` });
   if (gql.ok) {
     push({ name: 'GraphQL { __typename }', status: 'ok', detail: `typename=${gql.typename}` });
   } else {
     push({ name: 'GraphQL { __typename }', status: 'fail', detail: gql.reason });
   }
+}
 
-  // ---- Phase 4: Cloudflare Tunnel status (optional) ------------------
+// ---- Phase 4: Cloudflare Tunnel status (optional) ------------------
+async function verifyCloudflarePhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   const cfFields: ReadonlyArray<[string, string | undefined]> = [
     ['--cf-token', input.cf?.token],
     ['--cf-account-id', input.cf?.accountId],
@@ -143,7 +160,9 @@ export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_D
       status: 'skipped',
       detail: 'pass --cf-token + --cf-account-id + --tunnel-id to enable',
     });
-  } else if (cfSet.length < cfFields.length) {
+    return;
+  }
+  if (cfSet.length < cfFields.length) {
     // (review S1) Partial config is operator-hostile — they almost certainly
     // meant to enable the check. Warn so the missing flag names are visible.
     const missing = cfFields.filter(([, v]) => v === undefined || v === '').map(([name]) => name).join(', ');
@@ -152,50 +171,50 @@ export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_D
       status: 'warn',
       detail: `partial CF config — missing ${missing}; check skipped`,
     });
-  } else {
-    const tun = await deps.tunnel({
-      token: input.cf!.token!,
-      accountId: input.cf!.accountId!,
-      tunnelId: input.cf!.tunnelId!,
-    });
-    if (!tun.ok) {
-      push({ name: 'Cloudflare Tunnel', status: 'fail', detail: tun.reason });
-    } else if (tun.connections === 0) {
-      push({
-        name: 'Cloudflare Tunnel',
-        status: 'warn',
-        detail: `status=${tun.status}, 0 connections — cloudflared on the Studio appears offline`,
-      });
-    } else {
-      push({
-        name: 'Cloudflare Tunnel',
-        status: 'ok',
-        detail: `${tun.connections} connections, status=${tun.status}`,
-      });
-    }
+    return;
   }
+  const tun = await deps.tunnel({
+    token: input.cf!.token!,
+    accountId: input.cf!.accountId!,
+    tunnelId: input.cf!.tunnelId!,
+  });
+  if (!tun.ok) {
+    push({ name: 'Cloudflare Tunnel', status: 'fail', detail: tun.reason });
+  } else if (tun.connections === 0) {
+    push({
+      name: 'Cloudflare Tunnel',
+      status: 'warn',
+      detail: `status=${tun.status}, 0 connections — cloudflared on the Studio appears offline`,
+    });
+  } else {
+    push({
+      name: 'Cloudflare Tunnel',
+      status: 'ok',
+      detail: `${tun.connections} connections, status=${tun.status}`,
+    });
+  }
+}
 
-  // ---- Phase 5: cosign signature check (optional) --------------------
+// ---- Phase 5: cosign signature check (optional) --------------------
+async function verifyCosignPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   if (input.images.length === 0) {
     push({
       name: 'cosign verify',
       status: 'skipped',
       detail: 'pass --image <ref> (repeatable) to enable',
     });
-  } else {
-    for (const image of input.images) {
-      const cos = await deps.cosign({ image });
-      if (cos.ok) {
-        push({ name: `cosign verify ${image}`, status: 'ok', detail: 'signature valid' });
-      } else if (cos.skipped) {
-        push({ name: `cosign verify ${image}`, status: 'skipped', detail: cos.reason });
-      } else {
-        push({ name: `cosign verify ${image}`, status: 'fail', detail: cos.reason });
-      }
+    return;
+  }
+  for (const image of input.images) {
+    const cos = await deps.cosign({ image });
+    if (cos.ok) {
+      push({ name: `cosign verify ${image}`, status: 'ok', detail: 'signature valid' });
+    } else if (cos.skipped) {
+      push({ name: `cosign verify ${image}`, status: 'skipped', detail: cos.reason });
+    } else {
+      push({ name: `cosign verify ${image}`, status: 'fail', detail: cos.reason });
     }
   }
-
-  return { phases };
 }
 
 /* ------------------------------------------------------------------ *
@@ -239,110 +258,25 @@ export const verifyCommand = new Command('verify')
   .action(async (opts: VerifyOptions) => {
     p.intro(pc.bgCyan(pc.black(' create-op-node verify ')));
 
-    const domain = opts.domain
-      ? opts.domain
-      : unwrap(
-          await p.text({
-            message: 'Public domain of the node?',
-            placeholder: 'yournode.example.org',
-            validate: (v) =>
-              DOMAIN_RE.test(v ?? '') ? undefined : 'lowercase letters, digits, hyphens, dots; must contain a dot and a TLD',
-          }),
-        );
-
-    if (!DOMAIN_RE.test(domain)) {
-      p.cancel(`--domain ${JSON.stringify(domain)} doesn't look like a domain.`);
-      process.exit(2);
-    }
-
-    // (review B1) Validate --cert-warn-days to a non-negative integer.
-    const rawDays = opts.certWarnDays ?? '14';
-    const certWarnDays = Number.parseInt(rawDays, 10);
-    if (!Number.isFinite(certWarnDays) || certWarnDays < 0 || !/^\d+$/.test(rawDays)) {
-      p.cancel(`--cert-warn-days must be a non-negative integer (got ${JSON.stringify(rawDays)}).`);
-      process.exit(2);
-    }
-
-    if (opts.cfToken && opts.cfTokenFile) {
-      p.cancel('Pass either --cf-token or --cf-token-file, not both.');
-      process.exit(2);
-    }
-    let cfToken: string | undefined = opts.cfToken;
-    if (!cfToken && opts.cfTokenFile) {
-      try {
-        cfToken = readTokenFile(opts.cfTokenFile);
-      } catch (err) {
-        p.cancel((err as Error).message);
-        process.exit(2);
-      }
-    }
+    const domain = await resolveDomain(opts);
+    const certWarnDays = resolveCertWarnDays(opts);
+    const cfToken = resolveCfToken(opts);
 
     const apiHost = opts.apiHost ?? `api.${domain}`;
     const images = opts.image ?? [];
     const totalPhases = 4 + (images.length === 0 ? 1 : images.length);
 
-    let phaseIndex = 0;
-    let activeSpin: ReturnType<typeof p.spinner> | null = null;
-    const renderPhase = (ph: VerifyPhase): void => {
-      phaseIndex++;
-      const prefix = `[${phaseIndex}/${totalPhases}] ${ph.name}`;
-      activeSpin?.stop(formatPhaseLine(prefix, ph));
-      activeSpin = null;
-    };
-
-    // Each phase starts a spinner just before its dep call resolves; the
-    // resolved phase is then rendered by `renderPhase`. We can't preempt
-    // an in-flight spinner from inside `runVerify`, so we just stop the
-    // previous one when the next phase lands.
-    const deps: VerifyDeps = {
-      ...DEFAULT_DEPS,
-      onPhase: renderPhase,
-    };
-
-    activeSpin = p.spinner();
-    activeSpin.start('Running checks…');
-
-    const report = await runVerify(
-      {
-        apiHost,
-        certWarnDays,
-        cf: {
-          ...(cfToken ? { token: cfToken } : {}),
-          ...(opts.cfAccountId ? { accountId: opts.cfAccountId } : {}),
-          ...(opts.tunnelId ? { tunnelId: opts.tunnelId } : {}),
-        },
-        images,
-      },
-      deps,
-    );
-    // If `runVerify` finished without firing onPhase for some pathological
-    // reason, stop the spinner cleanly.
-    activeSpin?.stop('Done.');
-
-    const visible = (opts.showSkipped ?? false)
-      ? report.phases
-      : report.phases.filter((ph) => ph.status !== 'skipped');
-    const lines = visible.map((ph) => {
-      const idx = report.phases.indexOf(ph) + 1;
-      return `${phaseIcon(ph)} [${idx}/${totalPhases}] ${ph.name}: ${pc.dim(ph.detail)}`;
+    const report = await runVerifyWithSpinner({
+      apiHost,
+      certWarnDays,
+      cfToken,
+      opts,
+      images,
+      totalPhases,
     });
-    const skippedCount = report.phases.length - visible.length;
-    if (skippedCount > 0 && !opts.showSkipped) {
-      lines.push(pc.dim(`· ${skippedCount} phase${skippedCount === 1 ? '' : 's'} skipped (run with --show-skipped to see them)`));
-    }
-    p.note(lines.join('\n'), 'Summary');
 
-    const summary = summarize(report);
-    if (summary.ok) {
-      if (summary.warned === 0) {
-        p.outro(pc.green('All checks passed.'));
-      } else {
-        p.outro(pc.yellow(`Passed with ${summary.warned} warning${summary.warned === 1 ? '' : 's'}.`));
-      }
-    } else {
-      p.outro(pc.red(`${summary.failed} check${summary.failed === 1 ? '' : 's'} failed.`));
-      process.exit(1);
-    }
+    renderVerifySummary(report, { opts, totalPhases });
+    reportVerifyOutcome(report);
   });
 
 function phaseIcon(ph: VerifyPhase): string {
@@ -367,4 +301,134 @@ function formatPhaseLine(prefix: string, ph: VerifyPhase): string {
   const icon = phaseIcon(ph);
   const colorize = phaseColor(ph.status);
   return colorize(`${icon} ${prefix}: ${ph.detail}`);
+}
+
+// ----------------------------------------------------------------------------
+// Verify command phases
+// ----------------------------------------------------------------------------
+// The action delegates to these so no single function exceeds the
+// cognitive-complexity budget. Behavior-preserving: interactive prompts,
+// spinners, and process.exit calls are relocated verbatim.
+
+async function resolveDomain(opts: VerifyOptions): Promise<string> {
+  const domain = opts.domain
+    ? opts.domain
+    : unwrap(
+        await p.text({
+          message: 'Public domain of the node?',
+          placeholder: 'yournode.example.org',
+          validate: (v) =>
+            DOMAIN_RE.test(v ?? '') ? undefined : 'lowercase letters, digits, hyphens, dots; must contain a dot and a TLD',
+        }),
+      );
+  if (!DOMAIN_RE.test(domain)) {
+    p.cancel(`--domain ${JSON.stringify(domain)} doesn't look like a domain.`);
+    process.exit(2);
+  }
+  return domain;
+}
+
+// (review B1) Validate --cert-warn-days to a non-negative integer.
+function resolveCertWarnDays(opts: VerifyOptions): number {
+  const rawDays = opts.certWarnDays ?? '14';
+  const certWarnDays = Number.parseInt(rawDays, 10);
+  if (!Number.isFinite(certWarnDays) || certWarnDays < 0 || !/^\d+$/.test(rawDays)) {
+    p.cancel(`--cert-warn-days must be a non-negative integer (got ${JSON.stringify(rawDays)}).`);
+    process.exit(2);
+  }
+  return certWarnDays;
+}
+
+// Resolve the CF token from --cf-token or --cf-token-file (mutually exclusive).
+function resolveCfToken(opts: VerifyOptions): string | undefined {
+  if (opts.cfToken && opts.cfTokenFile) {
+    p.cancel('Pass either --cf-token or --cf-token-file, not both.');
+    process.exit(2);
+  }
+  if (opts.cfToken) return opts.cfToken;
+  if (!opts.cfTokenFile) return undefined;
+  try {
+    return readTokenFile(opts.cfTokenFile);
+  } catch (err) {
+    p.cancel((err as Error).message);
+    process.exit(2);
+  }
+}
+
+// Run the checks behind a single spinner that advances per phase.
+async function runVerifyWithSpinner(args: {
+  apiHost: string;
+  certWarnDays: number;
+  cfToken: string | undefined;
+  opts: VerifyOptions;
+  images: string[];
+  totalPhases: number;
+}): Promise<VerifyReport> {
+  const { apiHost, certWarnDays, cfToken, opts, images, totalPhases } = args;
+
+  let phaseIndex = 0;
+  let activeSpin: ReturnType<typeof p.spinner> | null = null;
+  const renderPhase = (ph: VerifyPhase): void => {
+    phaseIndex++;
+    const prefix = `[${phaseIndex}/${totalPhases}] ${ph.name}`;
+    activeSpin?.stop(formatPhaseLine(prefix, ph));
+    activeSpin = null;
+  };
+
+  const deps: VerifyDeps = { ...DEFAULT_DEPS, onPhase: renderPhase };
+
+  activeSpin = p.spinner();
+  activeSpin.start('Running checks…');
+
+  const report = await runVerify(
+    {
+      apiHost,
+      certWarnDays,
+      cf: {
+        ...(cfToken ? { token: cfToken } : {}),
+        ...(opts.cfAccountId ? { accountId: opts.cfAccountId } : {}),
+        ...(opts.tunnelId ? { tunnelId: opts.tunnelId } : {}),
+      },
+      images,
+    },
+    deps,
+  );
+  // If `runVerify` finished without firing onPhase for some pathological
+  // reason, stop the spinner cleanly.
+  activeSpin?.stop('Done.');
+  return report;
+}
+
+// Render the per-phase summary note (hiding skipped phases unless asked).
+function renderVerifySummary(
+  report: VerifyReport,
+  args: { opts: VerifyOptions; totalPhases: number },
+): void {
+  const { opts, totalPhases } = args;
+  const visible = (opts.showSkipped ?? false)
+    ? report.phases
+    : report.phases.filter((ph) => ph.status !== 'skipped');
+  const lines = visible.map((ph) => {
+    const idx = report.phases.indexOf(ph) + 1;
+    return `${phaseIcon(ph)} [${idx}/${totalPhases}] ${ph.name}: ${pc.dim(ph.detail)}`;
+  });
+  const skippedCount = report.phases.length - visible.length;
+  if (skippedCount > 0 && !opts.showSkipped) {
+    lines.push(pc.dim(`· ${skippedCount} phase${skippedCount === 1 ? '' : 's'} skipped (run with --show-skipped to see them)`));
+  }
+  p.note(lines.join('\n'), 'Summary');
+}
+
+// Final outro + exit code from the phase report.
+function reportVerifyOutcome(report: VerifyReport): void {
+  const summary = summarize(report);
+  if (!summary.ok) {
+    p.outro(pc.red(`${summary.failed} check${summary.failed === 1 ? '' : 's'} failed.`));
+    process.exit(1);
+  }
+  if (summary.warned === 0) {
+    p.outro(pc.green('All checks passed.'));
+  } else {
+    p.outro(pc.yellow(`Passed with ${summary.warned} warning${summary.warned === 1 ? '' : 's'}.`));
+  }
 }
