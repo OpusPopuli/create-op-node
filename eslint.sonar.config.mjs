@@ -5,12 +5,8 @@
 // `.eslintrc.sonar.js` pattern in prompt-service.
 //
 // Invoke via `pnpm lint:sonar`. The base `pnpm lint` does NOT run these
-// rules, so both passes must succeed for code to be fully clean.
-//
-// NOTE: this pass is not yet wired into CI. It surfaces pre-existing
-// findings (mostly cognitive-complexity in the command flows) that are
-// being burned down in #37; once green, the CI step and the
-// `prepublishOnly` chain get the `lint:sonar` gate added back.
+// rules, so both passes must succeed for code to be fully clean. This pass
+// is enforced in CI (the `Lint (sonar)` step) and in `prepublishOnly`.
 //
 // We pull in the typescript-eslint parser (but not its rules) so the
 // sonarjs rules can analyze .ts files. Without the parser, sonarjs
