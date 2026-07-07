@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.10](https://github.com/OpusPopuli/create-op-node/compare/v0.10.9...v0.10.10) (2026-07-07)
+
+
+### Refactors
+
+* **lib:** extract helpers to clear remaining complexity findings ([3b8b533](https://github.com/OpusPopuli/create-op-node/commit/3b8b5337d8269729cfb173d18c9bd8c12f9596f0))
+* **lib:** extract helpers to clear remaining complexity findings ([b5e6167](https://github.com/OpusPopuli/create-op-node/commit/b5e61671dd4779afe6733f920b7aefb3a3c14a06)), closes [#37](https://github.com/OpusPopuli/create-op-node/issues/37)
+
 ## [0.10.9](https://github.com/OpusPopuli/create-op-node/compare/v0.10.8...v0.10.9) (2026-07-06)
 
 
