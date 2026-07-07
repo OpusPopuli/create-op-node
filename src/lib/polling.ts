@@ -80,27 +80,43 @@ export async function waitForApply(
   budgets: WaitBudgets = DEFAULT_BUDGETS,
   deps: WaitDeps = realDeps,
 ): Promise<WaitOutcome> {
-  // Phase 1: discovery.
   let runId = input.runId;
   if (!runId) {
-    deps.onProgress?.('discovery');
-    const discoveryStart = deps.now();
-    while (deps.now() - discoveryStart < budgets.discoveryMs) {
-      await deps.sleep(budgets.pollMs);
-      const ws: TfcWorkspace | null = await deps.findWorkspace({
-        token: input.token,
-        organization: input.organization,
-        tags: input.workspaceTags,
-      });
-      if (ws?.currentRunId) {
-        runId = ws.currentRunId;
-        break;
-      }
-    }
+    runId = await discoverRunId(input, budgets, deps);
     if (!runId) return { kind: 'no-run-started' };
   }
+  return waitForRunOutput(input, budgets, deps, runId);
+}
 
-  // Phase 2: run wait.
+// Phase 1: discovery — poll the workspace until it has a current run, or the
+// discovery budget expires. Returns the run id, or null on timeout.
+async function discoverRunId(
+  input: WaitInput,
+  budgets: WaitBudgets,
+  deps: WaitDeps,
+): Promise<string | null> {
+  deps.onProgress?.('discovery');
+  const discoveryStart = deps.now();
+  while (deps.now() - discoveryStart < budgets.discoveryMs) {
+    await deps.sleep(budgets.pollMs);
+    const ws: TfcWorkspace | null = await deps.findWorkspace({
+      token: input.token,
+      organization: input.organization,
+      tags: input.workspaceTags,
+    });
+    if (ws?.currentRunId) return ws.currentRunId;
+  }
+  return null;
+}
+
+// Phase 2: run wait — poll the run until it finishes (fetching the output on
+// success), or the run budget expires.
+async function waitForRunOutput(
+  input: WaitInput,
+  budgets: WaitBudgets,
+  deps: WaitDeps,
+  runId: string,
+): Promise<WaitOutcome> {
   deps.onProgress?.('run');
   const runStart = deps.now();
   while (deps.now() - runStart < budgets.runMs) {
@@ -116,9 +132,7 @@ export async function waitForApply(
         input.workspaceId,
         input.outputName,
       );
-      return value !== null
-        ? { kind: 'success', value }
-        : { kind: 'output-missing' };
+      return value !== null ? { kind: 'success', value } : { kind: 'output-missing' };
     }
     await deps.sleep(budgets.pollMs);
   }

@@ -249,12 +249,22 @@ const schemaValidator = new Validator(REGION_SCHEMA as unknown as Schema, '7');
  *    `(dataType, url)`.
  */
 export function validateRegionConfig(file: RegionPluginFile): string[] {
-  const issues: string[] = [];
-  const { config } = file;
-
   // Cross-field invariants run first so their human-friendlier messages
   // ("not a valid semver", "must be 5 digits for a county", "name mismatch")
-  // surface ahead of the corresponding raw Ajv pattern errors.
+  // surface ahead of the corresponding raw Ajv pattern errors. Order of the
+  // groups here IS the order issues are reported in.
+  return [
+    ...validateVersionAndIds(file),
+    ...validateFipsCode(file),
+    ...validateDataSourceUniqueness(file),
+    ...validateAgainstSchema(file),
+  ];
+}
+
+// version semver + name/regionId agreement + kebab-case + county prefix.
+function validateVersionAndIds(file: RegionPluginFile): string[] {
+  const issues: string[] = [];
+  const { config } = file;
   if (!/^\d+\.\d+\.\d+$/.test(file.version)) {
     issues.push(`version "${file.version}" is not a valid semver (expected MAJOR.MINOR.PATCH)`);
   }
@@ -272,42 +282,47 @@ export function validateRegionConfig(file: RegionPluginFile): string[] {
       `county regionId "${config.regionId}" should be prefixed with its parent "${config.parentRegionId}-"`,
     );
   }
-  // The JSON schema only checks the FIPS shape (2–7 digits). Per-level lengths
-  // ("2 for state, 5 for county") are a cross-field rule the regions repo
-  // enforces in custom test code — re-checked here.
-  const isCounty = config.parentRegionId !== undefined;
-  if (config.fipsCode !== undefined) {
-    const expected = isCounty ? 5 : 2;
-    if (!/^\d+$/.test(config.fipsCode) || config.fipsCode.length !== expected) {
-      issues.push(
-        `fipsCode "${config.fipsCode}" must be ${expected} digits for a ${isCounty ? 'county' : 'state'}`,
-      );
-    }
-  }
-
-  // dataSources is required by the schema — if it's missing the schema layer
-  // below will flag that, so we just skip the duplicate scan here rather than
-  // throwing on a malformed-but-not-yet-validated file.
-  if (Array.isArray(config.dataSources)) {
-    const seen = new Set<string>();
-    for (const src of config.dataSources) {
-      const key = `${src.dataType} ${src.url}`;
-      if (seen.has(key)) {
-        issues.push(`duplicate data source: ${src.dataType} ${src.url}`);
-      }
-      seen.add(key);
-    }
-  }
-
-  // Layer the schema on last — catches anything the friendly checks didn't
-  // pre-empt (missing required fields, wrong types, unknown extras, etc.).
-  const result = schemaValidator.validate(file);
-  if (!result.valid) {
-    for (const err of result.errors) {
-      const path = err.instanceLocation || '<root>';
-      issues.push(`schema: ${path} ${err.error}`);
-    }
-  }
-
   return issues;
+}
+
+// The JSON schema only checks the FIPS shape (2–7 digits). Per-level lengths
+// ("2 for state, 5 for county") are a cross-field rule the regions repo
+// enforces in custom test code — re-checked here.
+function validateFipsCode(file: RegionPluginFile): string[] {
+  const { config } = file;
+  if (config.fipsCode === undefined) return [];
+  const isCounty = config.parentRegionId !== undefined;
+  const expected = isCounty ? 5 : 2;
+  if (!/^\d+$/.test(config.fipsCode) || config.fipsCode.length !== expected) {
+    return [
+      `fipsCode "${config.fipsCode}" must be ${expected} digits for a ${isCounty ? 'county' : 'state'}`,
+    ];
+  }
+  return [];
+}
+
+// dataSources is required by the schema — if it's missing the schema layer
+// below will flag that, so we just skip the duplicate scan here rather than
+// throwing on a malformed-but-not-yet-validated file.
+function validateDataSourceUniqueness(file: RegionPluginFile): string[] {
+  const { config } = file;
+  if (!Array.isArray(config.dataSources)) return [];
+  const issues: string[] = [];
+  const seen = new Set<string>();
+  for (const src of config.dataSources) {
+    const key = `${src.dataType} ${src.url}`;
+    if (seen.has(key)) {
+      issues.push(`duplicate data source: ${src.dataType} ${src.url}`);
+    }
+    seen.add(key);
+  }
+  return issues;
+}
+
+// Layer the schema on last — catches anything the friendly checks didn't
+// pre-empt (missing required fields, wrong types, unknown extras, etc.).
+function validateAgainstSchema(file: RegionPluginFile): string[] {
+  const result = schemaValidator.validate(file);
+  if (result.valid) return [];
+  return result.errors.map((err) => `schema: ${err.instanceLocation || '<root>'} ${err.error}`);
 }

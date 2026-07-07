@@ -10,6 +10,7 @@ import {
   validateRegionConfig,
   type RegionInput,
 } from '../src/lib/region.js';
+import { buildRegionInput } from '../src/commands/region.js';
 
 function stateInput(overrides: Partial<RegionInput> = {}): RegionInput {
   return {
@@ -205,5 +206,47 @@ describe('validateRegionConfig', () => {
     (file as Record<string, unknown>).someExtraField = 'not in the schema';
     const issues = validateRegionConfig(file);
     expect(issues.some((i) => i.startsWith('schema:'))).toBe(true);
+  });
+});
+
+describe('buildRegionInput', () => {
+  const identity = {
+    rawName: 'Alameda',
+    parentSlug: undefined as string | undefined,
+    ownSlug: 'alameda',
+    regionId: 'california-alameda',
+    regionName: 'Alameda County',
+    description: 'Civic data for Alameda County',
+  };
+  const codes = { stateCode: 'CA', fipsCode: '06001', timezone: 'America/Los_Angeles' };
+
+  it('maps a state (no parentRegionId / countySlug)', () => {
+    const input = buildRegionInput({
+      level: 'state',
+      identity: { ...identity, parentSlug: undefined, ownSlug: 'california', regionId: 'california' },
+      codes,
+      dataSources: [],
+    });
+    expect(input).toMatchObject({
+      level: 'state',
+      regionId: 'california',
+      version: '0.1.0',
+      stateCode: 'CA',
+      fipsCode: '06001',
+      timezone: 'America/Los_Angeles',
+    });
+    expect(input).not.toHaveProperty('parentRegionId');
+    expect(input).not.toHaveProperty('countySlug');
+  });
+
+  it('adds parentRegionId + countySlug for a county', () => {
+    const input = buildRegionInput({
+      level: 'county',
+      identity: { ...identity, parentSlug: 'california' },
+      codes,
+      dataSources: [],
+    });
+    expect(input.parentRegionId).toBe('california');
+    expect(input.countySlug).toBe('alameda');
   });
 });

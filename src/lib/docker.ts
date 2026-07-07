@@ -327,6 +327,21 @@ export const realWaitDeps: WaitForHealthyDeps = {
  * `state=running` + `health=starting` keeps polling; `health=unhealthy` or
  * `state=exited` with non-zero exit returns immediately as `unhealthy`.
  */
+// Map a single non-empty poll result to a terminal HealthOutcome, or null
+// when the caller should keep polling ('pending' or no containers yet).
+function terminalOutcome(
+  ps: ContainerSnapshot[],
+  requireHealthy?: string[],
+): HealthOutcome | null {
+  if (ps.length === 0) return null;
+  const verdict = assessHealth(ps, requireHealthy);
+  if (verdict.kind === 'healthy') return { kind: 'healthy', snapshots: ps };
+  if (verdict.kind === 'unhealthy') {
+    return { kind: 'unhealthy', snapshots: ps, problem: verdict.problem ?? 'unhealthy' };
+  }
+  return null;
+}
+
 export async function waitForHealthy(
   composeOpts: ComposeOptions,
   options: WaitForHealthyOptions = {},
@@ -344,19 +359,10 @@ export async function waitForHealthy(
     if (ps !== null) {
       last = ps;
       options.onPoll?.(ps);
-
-      if (ps.length > 0) {
-        const verdict = assessHealth(ps, options.requireHealthy);
-        if (verdict.kind === 'healthy') return { kind: 'healthy', snapshots: ps };
-        if (verdict.kind === 'unhealthy') {
-          return {
-            kind: 'unhealthy',
-            snapshots: ps,
-            problem: verdict.problem ?? 'unhealthy',
-          };
-        }
-        // 'pending' falls through to the sleep + next iteration.
-      }
+      // A terminal verdict (healthy / unhealthy) returns immediately;
+      // 'pending' (null here) falls through to the sleep + next iteration.
+      const outcome = terminalOutcome(ps, options.requireHealthy);
+      if (outcome) return outcome;
     }
     // Gentle backoff: 1× the base poll for the first 3 polls (fast feedback
     // while containers are settling), 2× after that. Caps wasted subprocess
@@ -376,7 +382,18 @@ export function assessHealth(
   snapshots: ContainerSnapshot[],
   requireHealthy?: string[],
 ): AssessVerdict {
-  // Hard failure conditions: any unhealthy, any exited-with-non-zero.
+  // Hard failures short-circuit regardless of the required-list mode.
+  const hard = firstHardFailure(snapshots);
+  if (hard) return hard;
+
+  const required = requireHealthy ?? [];
+  return required.length > 0
+    ? assessRequired(snapshots, required)
+    : assessAllRunning(snapshots);
+}
+
+// Hard failure conditions: any unhealthy, any exited-with-non-zero.
+function firstHardFailure(snapshots: ContainerSnapshot[]): AssessVerdict | null {
   for (const s of snapshots) {
     if (s.health === 'unhealthy') {
       return { kind: 'unhealthy', problem: `${s.name} reports unhealthy` };
@@ -385,25 +402,27 @@ export function assessHealth(
       return { kind: 'unhealthy', problem: `${s.name} exited with code ${s.exitCode}` };
     }
   }
+  return null;
+}
 
-  // If the caller specified a required-healthy list, gate on it explicitly.
-  const required = requireHealthy ?? [];
-  if (required.length > 0) {
-    const byName = new Map(snapshots.map((s) => [s.name, s]));
-    for (const name of required) {
-      const s = byName.get(name);
-      if (!s) return { kind: 'pending' };
-      if (s.state === 'exited' && s.exitCode === 0) continue;
-      if (s.state !== 'running') return { kind: 'pending' };
-      if (s.health === 'starting') return { kind: 'pending' };
-      if (s.health === 'unhealthy') {
-        return { kind: 'unhealthy', problem: `${s.name} reports unhealthy` };
-      }
+// The caller specified a required-healthy list — gate on exactly those.
+function assessRequired(snapshots: ContainerSnapshot[], required: string[]): AssessVerdict {
+  const byName = new Map(snapshots.map((s) => [s.name, s]));
+  for (const name of required) {
+    const s = byName.get(name);
+    if (!s) return { kind: 'pending' };
+    if (s.state === 'exited' && s.exitCode === 0) continue;
+    if (s.state !== 'running') return { kind: 'pending' };
+    if (s.health === 'starting') return { kind: 'pending' };
+    if (s.health === 'unhealthy') {
+      return { kind: 'unhealthy', problem: `${s.name} reports unhealthy` };
     }
-    return { kind: 'healthy' };
   }
+  return { kind: 'healthy' };
+}
 
-  // No required list — all snapshots must be in a happy state.
+// No required list — all snapshots must be in a happy state.
+function assessAllRunning(snapshots: ContainerSnapshot[]): AssessVerdict {
   for (const s of snapshots) {
     if (s.state === 'exited' && s.exitCode === 0) continue;
     if (s.state !== 'running') return { kind: 'pending' };
