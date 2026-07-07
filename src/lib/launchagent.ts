@@ -136,87 +136,8 @@ export interface PlistInput {
  * are undefined.
  */
 export function renderLaunchAgentPlist(input: PlistInput): string {
-  if (input.tunnelToken !== undefined && !TUNNEL_TOKEN_RE.test(input.tunnelToken)) {
-    // JWT-style base64-url alphabet. Anything outside it would either break
-    // the XML string content (`<`, `>`, `&`) or inject shell metacharacters
-    // into the `sh -c` body downstream. Throw rather than silently emit
-    // broken XML or — worse — a working plist with shell injection.
-    throw new Error('Tunnel token contains characters outside the expected base64-url set');
-  }
-  if (input.llmModel !== undefined && !MODEL_NAME_RE.test(input.llmModel)) {
-    throw new Error(
-      `llmModel ${JSON.stringify(input.llmModel)} contains characters not allowed in a launchd setenv value`,
-    );
-  }
-  if (input.embeddingModel !== undefined && !MODEL_NAME_RE.test(input.embeddingModel)) {
-    throw new Error(
-      `embeddingModel ${JSON.stringify(input.embeddingModel)} contains characters not allowed in a launchd setenv value`,
-    );
-  }
-  if (!SAFE_PATH_RE.test(input.keyFilePath)) {
-    // The keyFilePath gets interpolated into a `sh -c` command run by
-    // launchd at every login. Reject paths with shell metacharacters even
-    // though our own defaultPaths() never produces one — defense in depth
-    // against operator-supplied --repo-dir-adjacent overrides.
-    throw new Error(
-      `keyFilePath ${JSON.stringify(input.keyFilePath)} contains characters not allowed in a launchd path interpolation`,
-    );
-  }
-  // Validate every Supabase value the same way we validate tunnel/model
-  // inputs: it lands in a `launchctl setenv VAR "<value>"` line inside a
-  // `sh -c` body, so any unescaped shell metacharacter would execute at
-  // login. The generators in secrets.ts only emit base64 / base64url /
-  // hex, but operators can pass --import-* values too, so re-validate.
-  const supabaseFields: Array<[keyof PlistInput, string | undefined]> = [
-    ['postgresPassword', input.postgresPassword],
-    ['jwtSecret', input.jwtSecret],
-    ['supabaseAnonKey', input.supabaseAnonKey],
-    ['supabaseServiceRoleKey', input.supabaseServiceRoleKey],
-    ['dashboardPassword', input.dashboardPassword],
-  ];
-  for (const [name, value] of supabaseFields) {
-    if (value !== undefined && !SAFE_LAUNCHCTL_VALUE_RE.test(value)) {
-      throw new Error(
-        `${String(name)} contains characters not allowed in a launchd setenv value`,
-      );
-    }
-  }
-  if (input.supabaseUrl !== undefined && !SAFE_URL_RE.test(input.supabaseUrl)) {
-    throw new Error(
-      `supabaseUrl ${JSON.stringify(input.supabaseUrl)} contains characters not allowed in a launchd setenv value`,
-    );
-  }
-  const setenvLines = [
-    `launchctl setenv PGSODIUM_ROOT_KEY "$(cat ${input.keyFilePath})"`,
-    ...(input.tunnelToken !== undefined
-      ? [`launchctl setenv TUNNEL_TOKEN "${input.tunnelToken}"`]
-      : []),
-    ...(input.llmModel !== undefined
-      ? [`launchctl setenv LLM_MODEL "${input.llmModel}"`]
-      : []),
-    ...(input.embeddingModel !== undefined
-      ? [`launchctl setenv EMBEDDINGS_MODEL "${input.embeddingModel}"`]
-      : []),
-    ...(input.postgresPassword !== undefined
-      ? [`launchctl setenv POSTGRES_PASSWORD "${input.postgresPassword}"`]
-      : []),
-    ...(input.jwtSecret !== undefined
-      ? [`launchctl setenv JWT_SECRET "${input.jwtSecret}"`]
-      : []),
-    ...(input.supabaseAnonKey !== undefined
-      ? [`launchctl setenv SUPABASE_ANON_KEY "${input.supabaseAnonKey}"`]
-      : []),
-    ...(input.supabaseServiceRoleKey !== undefined
-      ? [`launchctl setenv SUPABASE_SERVICE_ROLE_KEY "${input.supabaseServiceRoleKey}"`]
-      : []),
-    ...(input.dashboardPassword !== undefined
-      ? [`launchctl setenv DASHBOARD_PASSWORD "${input.dashboardPassword}"`]
-      : []),
-    ...(input.supabaseUrl !== undefined
-      ? [`launchctl setenv SUPABASE_URL "${input.supabaseUrl}"`]
-      : []),
-  ];
-  const command = setenvLines.join('; ');
+  validatePlistInput(input);
+  const command = buildSetenvCommand(input);
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
@@ -235,6 +156,82 @@ export function renderLaunchAgentPlist(input: PlistInput): string {
     '</plist>',
     '',
   ].join('\n');
+}
+
+// Reject any input that would break the XML or inject shell metacharacters
+// into the `sh -c` body launchd runs at every login. Throws on the first
+// offending field. Our own generators only emit safe alphabets, but
+// operators can pass --import-* overrides, so re-validate here.
+function validatePlistInput(input: PlistInput): void {
+  if (input.tunnelToken !== undefined && !TUNNEL_TOKEN_RE.test(input.tunnelToken)) {
+    throw new Error('Tunnel token contains characters outside the expected base64-url set');
+  }
+  if (input.llmModel !== undefined && !MODEL_NAME_RE.test(input.llmModel)) {
+    throw new Error(
+      `llmModel ${JSON.stringify(input.llmModel)} contains characters not allowed in a launchd setenv value`,
+    );
+  }
+  if (input.embeddingModel !== undefined && !MODEL_NAME_RE.test(input.embeddingModel)) {
+    throw new Error(
+      `embeddingModel ${JSON.stringify(input.embeddingModel)} contains characters not allowed in a launchd setenv value`,
+    );
+  }
+  if (!SAFE_PATH_RE.test(input.keyFilePath)) {
+    // The keyFilePath gets interpolated into a `sh -c` command run by launchd
+    // at every login — reject shell metacharacters even though defaultPaths()
+    // never produces one (defense in depth against operator overrides).
+    throw new Error(
+      `keyFilePath ${JSON.stringify(input.keyFilePath)} contains characters not allowed in a launchd path interpolation`,
+    );
+  }
+  const supabaseFields: Array<[keyof PlistInput, string | undefined]> = [
+    ['postgresPassword', input.postgresPassword],
+    ['jwtSecret', input.jwtSecret],
+    ['supabaseAnonKey', input.supabaseAnonKey],
+    ['supabaseServiceRoleKey', input.supabaseServiceRoleKey],
+    ['dashboardPassword', input.dashboardPassword],
+  ];
+  for (const [name, value] of supabaseFields) {
+    if (value !== undefined && !SAFE_LAUNCHCTL_VALUE_RE.test(value)) {
+      throw new Error(`${String(name)} contains characters not allowed in a launchd setenv value`);
+    }
+  }
+  if (input.supabaseUrl !== undefined && !SAFE_URL_RE.test(input.supabaseUrl)) {
+    throw new Error(
+      `supabaseUrl ${JSON.stringify(input.supabaseUrl)} contains characters not allowed in a launchd setenv value`,
+    );
+  }
+}
+
+// Assemble the `; `-joined `launchctl setenv` command. PGSODIUM_ROOT_KEY is
+// always set; every other var is emitted only when its value is present.
+function buildSetenvCommand(input: PlistInput): string {
+  return [
+    `launchctl setenv PGSODIUM_ROOT_KEY "$(cat ${input.keyFilePath})"`,
+    ...(input.tunnelToken !== undefined
+      ? [`launchctl setenv TUNNEL_TOKEN "${input.tunnelToken}"`]
+      : []),
+    ...(input.llmModel !== undefined ? [`launchctl setenv LLM_MODEL "${input.llmModel}"`] : []),
+    ...(input.embeddingModel !== undefined
+      ? [`launchctl setenv EMBEDDINGS_MODEL "${input.embeddingModel}"`]
+      : []),
+    ...(input.postgresPassword !== undefined
+      ? [`launchctl setenv POSTGRES_PASSWORD "${input.postgresPassword}"`]
+      : []),
+    ...(input.jwtSecret !== undefined ? [`launchctl setenv JWT_SECRET "${input.jwtSecret}"`] : []),
+    ...(input.supabaseAnonKey !== undefined
+      ? [`launchctl setenv SUPABASE_ANON_KEY "${input.supabaseAnonKey}"`]
+      : []),
+    ...(input.supabaseServiceRoleKey !== undefined
+      ? [`launchctl setenv SUPABASE_SERVICE_ROLE_KEY "${input.supabaseServiceRoleKey}"`]
+      : []),
+    ...(input.dashboardPassword !== undefined
+      ? [`launchctl setenv DASHBOARD_PASSWORD "${input.dashboardPassword}"`]
+      : []),
+    ...(input.supabaseUrl !== undefined
+      ? [`launchctl setenv SUPABASE_URL "${input.supabaseUrl}"`]
+      : []),
+  ].join('; ');
 }
 
 /** Write the plist file to disk at mode 0600. */
@@ -305,6 +302,25 @@ export interface SetupReport {
  * Returns a report that names which step failed (if any) for clean operator
  * messaging.
  */
+// Map the flat SetupInput onto a PlistInput, carrying only the fields that
+// are present (each optional secret is spread in only when defined).
+function plistInputFromSetup(input: SetupInput, keyFilePath: string): PlistInput {
+  return {
+    keyFilePath,
+    ...(input.tunnelToken !== undefined ? { tunnelToken: input.tunnelToken } : {}),
+    ...(input.llmModel !== undefined ? { llmModel: input.llmModel } : {}),
+    ...(input.embeddingModel !== undefined ? { embeddingModel: input.embeddingModel } : {}),
+    ...(input.postgresPassword !== undefined ? { postgresPassword: input.postgresPassword } : {}),
+    ...(input.jwtSecret !== undefined ? { jwtSecret: input.jwtSecret } : {}),
+    ...(input.supabaseAnonKey !== undefined ? { supabaseAnonKey: input.supabaseAnonKey } : {}),
+    ...(input.supabaseServiceRoleKey !== undefined
+      ? { supabaseServiceRoleKey: input.supabaseServiceRoleKey }
+      : {}),
+    ...(input.dashboardPassword !== undefined ? { dashboardPassword: input.dashboardPassword } : {}),
+    ...(input.supabaseUrl !== undefined ? { supabaseUrl: input.supabaseUrl } : {}),
+  };
+}
+
 export async function setupLaunchAgent(input: SetupInput): Promise<SetupReport> {
   const paths = input.paths ?? defaultPaths();
 
@@ -315,20 +331,7 @@ export async function setupLaunchAgent(input: SetupInput): Promise<SetupReport> 
 
   let plistContent: string;
   try {
-    plistContent = renderLaunchAgentPlist({
-      keyFilePath: paths.keyFile,
-      ...(input.tunnelToken !== undefined ? { tunnelToken: input.tunnelToken } : {}),
-      ...(input.llmModel !== undefined ? { llmModel: input.llmModel } : {}),
-      ...(input.embeddingModel !== undefined ? { embeddingModel: input.embeddingModel } : {}),
-      ...(input.postgresPassword !== undefined ? { postgresPassword: input.postgresPassword } : {}),
-      ...(input.jwtSecret !== undefined ? { jwtSecret: input.jwtSecret } : {}),
-      ...(input.supabaseAnonKey !== undefined ? { supabaseAnonKey: input.supabaseAnonKey } : {}),
-      ...(input.supabaseServiceRoleKey !== undefined
-        ? { supabaseServiceRoleKey: input.supabaseServiceRoleKey }
-        : {}),
-      ...(input.dashboardPassword !== undefined ? { dashboardPassword: input.dashboardPassword } : {}),
-      ...(input.supabaseUrl !== undefined ? { supabaseUrl: input.supabaseUrl } : {}),
-    });
+    plistContent = renderLaunchAgentPlist(plistInputFromSetup(input, paths.keyFile));
   } catch (err) {
     return { ok: false, paths, step: 'plist', reason: (err as Error).message };
   }
