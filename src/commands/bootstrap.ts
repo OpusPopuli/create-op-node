@@ -1088,17 +1088,17 @@ export const LLM_MODEL_CHOICES = [
   {
     value: 'qwen2.5:72b',
     label: 'qwen2.5:72b',
-    hint: '72B, ~50 GB Ollama RAM. Recommended for 128 GB Studios. Best Spanish + multilingual quality. Pull ~40 GB, 30–60 min.',
+    hint: '72B, ~50 GB Ollama RAM. Pre-selected on 96 GB+ Studios. Best Spanish + multilingual quality. Pull ~40 GB, 30–60 min.',
   },
   {
     value: 'qwen2.5:32b',
     label: 'qwen2.5:32b',
-    hint: '32B, ~22 GB Ollama RAM. Middle-tier for 64 GB Studios. Solid Spanish, faster than 72B. Pull ~20 GB, 15–30 min.',
+    hint: '32B, ~22 GB Ollama RAM. Pre-selected on 48–95 GB Studios. Solid Spanish, faster than 72B. Pull ~20 GB, 15–30 min.',
   },
   {
     value: 'qwen3.5:9b',
     label: 'qwen3.5:9b',
-    hint: '9B, ~8 GB Ollama RAM. Validation / smaller Studios (36–48 GB). Pull ~5 GB, 3–5 min.',
+    hint: '9B, ~8 GB Ollama RAM. Pre-selected on smaller Studios (< 48 GB); also the -y / scripted default. Pull ~5 GB, 3–5 min.',
   },
 ] as const;
 
