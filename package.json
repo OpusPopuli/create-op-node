@@ -24,7 +24,7 @@
     "lint:sonar": "eslint . --config eslint.sonar.config.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "pnpm typecheck && pnpm lint && pnpm test && pnpm build"
+    "prepublishOnly": "pnpm typecheck && pnpm lint && pnpm lint:sonar && pnpm test && pnpm build"
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",

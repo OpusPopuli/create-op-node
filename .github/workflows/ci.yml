@@ -38,6 +38,9 @@ jobs:
       - name: Lint (eslint)
         run: pnpm lint
 
+      - name: Lint (sonar)
+        run: pnpm lint:sonar
+
       - name: Typecheck
         run: pnpm typecheck
 
