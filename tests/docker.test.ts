@@ -8,14 +8,17 @@ vi.mock('execa', () => ({
 
 import {
   assessHealth,
+  composeConfigImages,
   composeDown,
   composePs,
   composePull,
   composeRemoveService,
   composeUp,
   dockerLogout,
+  filterVerifiableImages,
   GHCR_REGISTRY,
   loginToGhcr,
+  OPUSPOPULI_IMAGE_PREFIX,
   parseComposePs,
   waitForHealthy,
   type ContainerSnapshot,
@@ -471,5 +474,59 @@ describe('waitForHealthy', () => {
     );
     expect(snaps).toHaveLength(1);
     expect(snaps[0]?.[0]?.name).toBe('api');
+  });
+});
+
+describe('composeConfigImages', () => {
+  it('builds `compose config --images` and parses one image per line', async () => {
+    execaMock.mockResolvedValueOnce({
+      exitCode: 0,
+      stdout: 'ghcr.io/opuspopuli/api:latest\n  ghcr.io/opuspopuli/users:latest  \npostgres:16\n\n',
+      stderr: '',
+    });
+    const images = await composeConfigImages({ files: ['a.yml', 'b.yml'], cwd: '/repo' });
+    expect(images).toEqual([
+      'ghcr.io/opuspopuli/api:latest',
+      'ghcr.io/opuspopuli/users:latest',
+      'postgres:16',
+    ]);
+    const [cmd, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(cmd).toBe('docker');
+    expect(args).toEqual(['compose', '-f', 'a.yml', '-f', 'b.yml', 'config', '--images']);
+  });
+
+  it('returns null when config fails (non-zero exit — e.g. a required var is unset)', async () => {
+    execaMock.mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: 'required variable POSTGRES_PASSWORD is missing' });
+    expect(await composeConfigImages({ files: ['a.yml'], cwd: '/repo' })).toBeNull();
+  });
+
+  it('returns null when docker is not installed (ENOENT)', async () => {
+    execaMock.mockRejectedValueOnce(Object.assign(new Error('spawn docker ENOENT'), { code: 'ENOENT' }));
+    expect(await composeConfigImages({ files: ['a.yml'], cwd: '/repo' })).toBeNull();
+  });
+});
+
+describe('filterVerifiableImages', () => {
+  it('keeps only opuspopuli-published images (drops third-party base images)', () => {
+    const images = [
+      'ghcr.io/opuspopuli/api:latest',
+      'postgres:16',
+      'ghcr.io/opuspopuli/region-worker:sha-abc',
+      'ghcr.io/supabase/gotrue:v2',
+      'ollama/ollama:latest',
+    ];
+    expect(filterVerifiableImages(images)).toEqual([
+      'ghcr.io/opuspopuli/api:latest',
+      'ghcr.io/opuspopuli/region-worker:sha-abc',
+    ]);
+  });
+
+  it('uses ghcr.io/opuspopuli/ as the default prefix and honors an override', () => {
+    expect(OPUSPOPULI_IMAGE_PREFIX).toBe('ghcr.io/opuspopuli/');
+    expect(filterVerifiableImages(['a/x:1', 'b/y:2'], 'a/')).toEqual(['a/x:1']);
+  });
+
+  it('returns [] when nothing matches', () => {
+    expect(filterVerifiableImages(['postgres:16', 'redis:7'])).toEqual([]);
   });
 });

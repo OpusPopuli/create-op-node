@@ -10,7 +10,7 @@ npx create-op-node
 That's it. The wizard walks you through:
 
 1. **Cloudflare** — verifies your API token's 5 scopes (Zone Read, DNS Edit, Tunnel Edit, R2 Storage Edit, Pages Edit). Fails fast with a specific scope name if anything's missing.
-2. **GitHub** — creates your region's node repo from the [`OpusPopuli/opuspopuli-node`](https://github.com/OpusPopuli/opuspopuli-node) template via the GitHub API. Seeds the 5 required GitHub Secrets (Cloudflare token, account ID, zone ID, Terraform Cloud token, TFC org) for you.
+2. **GitHub** — creates your region's node repo from the [`OpusPopuli/opuspopuli-node`](https://github.com/OpusPopuli/opuspopuli-node) template via the GitHub API. Seeds the 5 required GitHub Secrets (Cloudflare token, account ID, zone ID, Terraform Cloud token, TFC org) for you — sealed-box encrypted with the repo's public key and PUT under your own token, never shelled out to `gh`. Your GitHub token therefore needs **Contents: write + Actions Secrets: write + Pull requests: write** (fine-grained), or `repo` scope (classic).
 3. **Terraform Cloud** — verifies your TFC token, prepares the workspace.
 4. **First PR** — writes `environments/prod.tfvars` from your answers, commits, opens the first PR. The node repo's `cloudflare-infra.yml` workflow runs `terraform plan` against the PR; on merge to `main` it applies — Tunnel, DNS, R2 buckets, and Pages project come up automatically.
 5. **pgsodium master key** — generates a fresh 64-hex root key, stores it in your **macOS login Keychain** as `org.opuspopuli.<region>/pgsodium-root-key`. No third-party password manager required.
@@ -26,7 +26,7 @@ Then on the Mac Studio itself:
 npx create-op-node bootstrap
 ```
 
-Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, reads the pgsodium key + Tunnel token from the Studio's Keychain (or prompts you to paste them once, then persists for re-runs), writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, and finally `docker compose --profile public pull && up -d` brings the whole stack online. Health-check loop waits until all containers are `(healthy)`.
+Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, reads the pgsodium key + Tunnel token from the Studio's Keychain (or prompts you to paste them once, then persists for re-runs), writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, **verifies the cosign signature of every `ghcr.io/opuspopuli/*` image before pulling** (fail-closed — `--skip-signature-check` to bypass), and finally `docker compose --profile public pull && up -d` brings the whole stack online. Health-check loop waits until all containers are `(healthy)`.
 
 ### Choosing the LLM model
 
@@ -510,7 +510,7 @@ The CLI itself never holds any credentials beyond the scope of a single command 
 
 **`init` — fully wired.** Full Phase 1 of the runbook: prompts → Cloudflare 5-scope probe → Terraform Cloud verify → GitHub template clone → 5 repo secrets seeded → branch + prod.tfvars committed → PR opened → pgsodium key generated → (after operator merges PR) Terraform apply polled → Tunnel token retrieved + saved to the macOS Keychain.
 
-**`bootstrap` — fully wired.** Phase 2 on the Mac Studio: macOS sanity (auto-restart, disk sleep), Homebrew + tool installs (gh, pnpm, jq, cloudflared, rclone, ollama, docker, tailscale), GitHub + Tailscale signin prompts, pgsodium key + Tunnel token read from the Studio's Keychain (or pasted in once if first run on that machine, then persisted), LaunchAgent written + loaded, ghcr.io login, Ollama models pulled + warmed, region repo located or cloned, `docker compose pull && up -d`, health-check loop until everything reports `(healthy)`.
+**`bootstrap` — fully wired.** Phase 2 on the Mac Studio: macOS sanity (auto-restart, disk sleep), Homebrew + tool installs (gh, pnpm, jq, cloudflared, rclone, ollama, cosign, docker, tailscale), GitHub + Tailscale signin prompts, pgsodium key + Tunnel token read from the Studio's Keychain (or pasted in once if first run on that machine, then persisted), LaunchAgent written + loaded, ghcr.io login, Ollama models pulled + warmed, region repo located or cloned, cosign signature verification of the `ghcr.io/opuspopuli/*` images (fail-closed; `--skip-signature-check` bypasses, `--certificate-identity-regexp` overrides the pinned identity), `docker compose pull && up -d`, health-check loop until everything reports `(healthy)`.
 
 **`verify` — scaffold stub.** Type-safe argument parsing only; prints a roadmap-style message and exits.
 

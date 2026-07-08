@@ -121,6 +121,36 @@ export async function composePull(opts: ComposeOptions): Promise<ComposeResult> 
   return result(res, 'compose pull');
 }
 
+/** Registry prefix for images published + cosign-signed by the opuspopuli
+ *  release workflow. Only these are verifiable against the release identity;
+ *  third-party images (postgres, kong, gotrue, ollama, …) are unsigned by us. */
+export const OPUSPOPULI_IMAGE_PREFIX = 'ghcr.io/opuspopuli/';
+
+/**
+ * `docker compose … config --images` — the resolved image refs the stack will
+ * pull, one per line. Returns `null` when the command can't run (docker
+ * missing) or config fails (e.g. a required `${VAR:?}` interpolation is unset),
+ * so the caller can treat "couldn't enumerate" distinctly from "no images".
+ */
+export async function composeConfigImages(opts: ComposeOptions): Promise<string[] | null> {
+  const res = await safeExeca('docker', composeArgs(opts, ['config', '--images']), execOpts(opts));
+  if (res === null || res.exitCode !== 0) return null;
+  return res.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/** Keep only the images the opuspopuli release workflow signs — the subset
+ *  cosign can verify against the release identity. Third-party base images are
+ *  dropped (they'd fail verification against our identity). Pure helper. */
+export function filterVerifiableImages(
+  images: string[],
+  prefix: string = OPUSPOPULI_IMAGE_PREFIX,
+): string[] {
+  return images.filter((img) => img.startsWith(prefix));
+}
+
 /** `docker compose -f … up -d --remove-orphans`. */
 export async function composeUp(opts: ComposeOptions): Promise<ComposeResult> {
   const res = await safeExeca('docker', composeArgs(opts, ['up', '-d', '--remove-orphans']), execOpts(opts));
