@@ -189,3 +189,42 @@ describe('waitForApply — transient failure resilience (issue #31)', () => {
     expect(onProgress).toHaveBeenCalledWith('retry');
   });
 });
+
+describe('waitForApply — discovery checks before sleeping (issue #35)', () => {
+  it('checks the workspace before the first sleep and finds an existing run at t=0', async () => {
+    const order: string[] = [];
+    const deps = makeDeps({
+      sleep: vi.fn(async () => {
+        order.push('sleep');
+      }),
+      findWorkspace: vi.fn(async () => {
+        order.push('find');
+        return { id: 'ws-1', name: 'x', currentRunId: 'run-0' };
+      }),
+      getRunStatus: vi
+        .fn()
+        .mockResolvedValueOnce({ id: 'run-0', status: 'applied', finished: true, succeeded: true }),
+      fetchOutput: vi.fn().mockResolvedValue('v'),
+    });
+    const r = await waitForApply({ ...INPUT, runId: null }, BUDGETS, deps);
+    expect(r.kind).toBe('success');
+    expect(order[0]).toBe('find'); // checked before any discovery sleep
+    expect(deps.sleep).not.toHaveBeenCalled(); // found at t=0, never slept
+  });
+
+  it('calls findWorkspace at least once even when pollMs >= discoveryMs', async () => {
+    const budgets: WaitBudgets = { discoveryMs: 10, runMs: 100, pollMs: 1000 };
+    const deps = makeDeps({
+      findWorkspace: vi
+        .fn()
+        .mockResolvedValue({ id: 'ws-1', name: 'x', currentRunId: 'run-x' }),
+      getRunStatus: vi
+        .fn()
+        .mockResolvedValueOnce({ id: 'run-x', status: 'applied', finished: true, succeeded: true }),
+      fetchOutput: vi.fn().mockResolvedValue('v'),
+    });
+    const r = await waitForApply({ ...INPUT, runId: null }, budgets, deps);
+    expect(deps.findWorkspace).toHaveBeenCalled();
+    expect(r.kind).toBe('success'); // discovered at t=0 despite pollMs > discoveryMs
+  });
+});
