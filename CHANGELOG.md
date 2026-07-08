@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.13](https://github.com/OpusPopuli/create-op-node/compare/v0.10.12...v0.10.13) (2026-07-08)
+
+
+### Bug Fixes
+
+* **cloudflare:** add request timeout + degrade network failures gracefully ([b4aa096](https://github.com/OpusPopuli/create-op-node/commit/b4aa09632481f61a77572205eed2fecdd20fa210))
+* **cloudflare:** add request timeout + degrade network failures gracefully ([3075c6a](https://github.com/OpusPopuli/create-op-node/commit/3075c6a67a6ac485819af31d6eb00ee250a7e17a))
+
 ## [0.10.12](https://github.com/OpusPopuli/create-op-node/compare/v0.10.11...v0.10.12) (2026-07-08)
 
 
