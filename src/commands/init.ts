@@ -11,6 +11,7 @@ import {
   commitFile,
   createBranch,
   createRepoFromTemplate,
+  getRepoDefaultBranch,
   openPullRequest,
   setRepoSecrets,
 } from '../lib/github.js';
@@ -331,11 +332,20 @@ async function createRegionRepo(args: {
       process.exit(0);
     }
     // Synthesize the same shape `createRepoFromTemplate` returns so the rest
-    // of the flow doesn't care which path got us here.
-    // Deferred (#41): query the actual default branch via gh API instead of
-    // assuming `main` — a pre-existing repo could have been initialized with
-    // a different default (older operator habit, organization defaults).
-    return { fullName: newRepoFull, defaultBranch: 'main' };
+    // of the flow doesn't care which path got us here. Query the repo's ACTUAL
+    // default branch (it may not be `main` — older operator habit, org default)
+    // so the branch + PR steps target a branch that exists. (#41)
+    const fetched = await getRepoDefaultBranch({ token: ghToken, repo: newRepoFull });
+    if (fetched === null) {
+      p.note(
+        pc.yellow(
+          `⚠ Couldn't read ${newRepoFull}'s default branch — assuming "main". ` +
+            'If the branch/PR steps fail, check the repo\'s default branch on GitHub.',
+        ),
+        'Notice',
+      );
+    }
+    return { fullName: newRepoFull, defaultBranch: fetched ?? 'main' };
   }
 }
 

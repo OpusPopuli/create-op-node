@@ -11,11 +11,13 @@ const createRefMock = vi.hoisted(() => vi.fn());
 const createPullMock = vi.hoisted(() => vi.fn());
 const getRepoPublicKeyMock = vi.hoisted(() => vi.fn());
 const createOrUpdateSecretMock = vi.hoisted(() => vi.fn());
+const getRepoMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@octokit/rest', () => ({
   Octokit: vi.fn(() => ({
     request: requestMock,
     repos: {
+      get: getRepoMock,
       getContent: getContentMock,
       createOrUpdateFileContents: createOrUpdateFileMock,
     },
@@ -39,6 +41,7 @@ import {
   commitFile,
   createBranch,
   createRepoFromTemplate,
+  getRepoDefaultBranch,
   openPullRequest,
   setRepoSecrets,
   _resetClient,
@@ -55,6 +58,7 @@ beforeEach(() => {
   createPullMock.mockReset();
   getRepoPublicKeyMock.mockReset();
   createOrUpdateSecretMock.mockReset();
+  getRepoMock.mockReset();
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -316,5 +320,29 @@ describe('openPullRequest', () => {
     });
 
     expect(r).toEqual({ number: 42, htmlUrl: 'https://github.com/a/b/pull/42' });
+  });
+});
+
+describe('getRepoDefaultBranch (#41)', () => {
+  it('returns the repo default branch from repos.get', async () => {
+    getRepoMock.mockResolvedValueOnce({ data: { default_branch: 'trunk' } });
+    const b = await getRepoDefaultBranch({ token: 'pat', repo: 'OpusPopuli/opuspopuli-node-us-ca' });
+    expect(b).toBe('trunk');
+    expect(getRepoMock).toHaveBeenCalledWith({ owner: 'OpusPopuli', repo: 'opuspopuli-node-us-ca' });
+  });
+
+  it('returns null when the API call fails (caller falls back)', async () => {
+    getRepoMock.mockRejectedValueOnce(new Error('404 Not Found'));
+    expect(await getRepoDefaultBranch({ token: 'pat', repo: 'a/b' })).toBeNull();
+  });
+
+  it('returns null when default_branch is absent from the response', async () => {
+    getRepoMock.mockResolvedValueOnce({ data: {} });
+    expect(await getRepoDefaultBranch({ token: 'pat', repo: 'a/b' })).toBeNull();
+  });
+
+  it('returns null for a malformed repo slug without hitting the API', async () => {
+    expect(await getRepoDefaultBranch({ token: 'pat', repo: 'no-slash' })).toBeNull();
+    expect(getRepoMock).not.toHaveBeenCalled();
   });
 });

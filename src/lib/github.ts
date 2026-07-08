@@ -104,8 +104,29 @@ export async function createRepoFromTemplate(
   };
 }
 
+/**
+ * Look up a repository's default branch. Used when `init` adopts a
+ * pre-existing repo (the create-from-template path already gets it from the
+ * generate response) so branch/PR operations target the branch that actually
+ * exists rather than assuming `main`. Returns `null` on a malformed slug or
+ * any API failure, so the caller can fall back deliberately. (#41)
+ */
+export async function getRepoDefaultBranch(input: {
+  token: string;
+  repo: string;
+}): Promise<string | null> {
+  const parsed = parseRepoSlug(input.repo);
+  if (!parsed) return null;
+  try {
+    const res = await client(input.token).repos.get({ owner: parsed.owner, repo: parsed.repo });
+    return res.data.default_branch ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ----------------------------------------------------------------------------
-// Seed secrets via gh CLI
+// Seed repository Actions secrets via the GitHub API (Octokit + libsodium)
 // ----------------------------------------------------------------------------
 
 export interface SetRepoSecretsInput {
