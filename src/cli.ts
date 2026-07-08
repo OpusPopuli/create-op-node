@@ -6,6 +6,7 @@ import { bootstrapCommand } from './commands/bootstrap.js';
 import { resetCommand } from './commands/reset.js';
 import { verifyCommand } from './commands/verify.js';
 import { regionCommand } from './commands/region.js';
+import { withDefaultSubcommand } from './lib/cli-args.js';
 
 // release-please updates the string in `const VERSION = '...'` on each
 // release. See release-please-config.json's extra-files entry that points
@@ -32,11 +33,15 @@ program.addCommand(resetCommand);
 program.addCommand(verifyCommand);
 program.addCommand(regionCommand);
 
-// When invoked with no subcommand, default to `init` — the create-* convention
-// is that `npx create-op-node` "just works" without specifying a subcommand.
-if (process.argv.length === 2) {
-  process.argv.push('init');
-}
+// Default to `init` — the create-* convention is that `npx create-op-node`
+// (and `npx create-op-node --region us-ca`) "just work" without naming a
+// subcommand. Only skip when the first arg is already a known subcommand or a
+// global flag. Known names are derived from the registered commands so the
+// list can't drift.
+process.argv = withDefaultSubcommand(
+  process.argv,
+  program.commands.map((c) => c.name()),
+);
 
 await program.parseAsync(process.argv).catch((err: unknown) => {
   const msg = err instanceof Error ? err.message : String(err);

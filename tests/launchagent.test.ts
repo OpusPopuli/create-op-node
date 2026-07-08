@@ -82,12 +82,21 @@ describe('renderLaunchAgentPlist', () => {
     ).not.toThrow();
   });
 
-  it('inlines the key file path (read at agent load via cat)', () => {
+  it('inlines the key file path (read at agent load via cat), quoted', () => {
     const out = renderLaunchAgentPlist({
       keyFilePath: '/some/path/key',
       tunnelToken: VALID_TOKEN,
     });
-    expect(out).toContain('cat /some/path/key');
+    expect(out).toContain('cat "/some/path/key"');
+  });
+
+  it('quotes a space-containing key file path so it does not word-split (#36)', () => {
+    const out = renderLaunchAgentPlist({
+      keyFilePath: '/Users/op/My Key/pgsodium_root_key',
+      tunnelToken: VALID_TOKEN,
+    });
+    // Must appear as a single quoted argument to cat — not `cat /Users/op/My`.
+    expect(out).toContain('"$(cat "/Users/op/My Key/pgsodium_root_key")"');
   });
 
   it('omits TUNNEL_TOKEN setenv when tunnelToken is undefined (local-only mode)', () => {
@@ -459,8 +468,9 @@ describe('teardownLaunchAgent', () => {
     await rm(tmp, { recursive: true, force: true });
   });
 
-  it('marks unload step with reason when launchctl is missing, but does not fail teardown', async () => {
-    // safeExeca returns null on ENOENT.
+  it('fails the teardown (unload ok:false) when launchctl is missing (#36)', async () => {
+    // safeExeca returns null on ENOENT — nothing was unloaded, so this is NOT
+    // a clean teardown.
     const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     execaMock.mockRejectedValueOnce(err);
 
@@ -469,9 +479,9 @@ describe('teardownLaunchAgent', () => {
 
     const r = await teardownLaunchAgent(paths);
     const unload = r.steps.find((s) => s.step === 'unload');
-    expect(unload?.ok).toBe(true);
+    expect(unload?.ok).toBe(false);
     expect(unload?.reason).toContain('not on PATH');
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
 
     await rm(tmp, { recursive: true, force: true });
   });

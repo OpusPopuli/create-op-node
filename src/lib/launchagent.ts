@@ -207,7 +207,11 @@ function validatePlistInput(input: PlistInput): void {
 // always set; every other var is emitted only when its value is present.
 function buildSetenvCommand(input: PlistInput): string {
   return [
-    `launchctl setenv PGSODIUM_ROOT_KEY "$(cat ${input.keyFilePath})"`,
+    // Quote the path inside `cat` so a space-containing keyFilePath (allowed by
+    // SAFE_PATH_RE) doesn't word-split and leave PGSODIUM_ROOT_KEY empty. The
+    // regex rejects `"`/`$`/backticks, so the inner quotes can't be broken out
+    // of — this is word-split safety, not new injection surface. (#36)
+    `launchctl setenv PGSODIUM_ROOT_KEY "$(cat "${input.keyFilePath}")"`,
     ...(input.tunnelToken !== undefined
       ? [`launchctl setenv TUNNEL_TOKEN "${input.tunnelToken}"`]
       : []),
@@ -378,11 +382,13 @@ export async function teardownLaunchAgent(
   const steps: TeardownResult['steps'] = [];
 
   const unload = await safeExeca('launchctl', ['unload', paths.plistFile]);
-  // `launchctl unload` exits non-zero when the agent isn't loaded — that's
-  // a successful teardown from our point of view, so we don't propagate it.
+  // `launchctl unload` exits non-zero when the agent isn't loaded — that's a
+  // successful teardown from our point of view, so a non-zero exit is fine.
+  // But a null result means `launchctl` isn't on PATH: nothing was unloaded,
+  // so report ok:false rather than a clean teardown that didn't happen. (#36)
   steps.push({
     step: 'unload',
-    ok: true,
+    ok: unload !== null,
     ...(unload === null ? { reason: '`launchctl` not on PATH' } : {}),
   });
 
