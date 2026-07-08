@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2](https://github.com/OpusPopuli/create-op-node/compare/v0.11.1...v0.11.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* **init:** query the real default branch when adopting an existing repo ([b0fe662](https://github.com/OpusPopuli/create-op-node/commit/b0fe6622b3ba27edec294c98717f3730c005563a))
+* **init:** query the real default branch when adopting an existing repo ([1665984](https://github.com/OpusPopuli/create-op-node/commit/166598434c9e7c5a17ebe1d5ed494ee00e7a2666)), closes [#41](https://github.com/OpusPopuli/create-op-node/issues/41)
+
 ## [0.11.1](https://github.com/OpusPopuli/create-op-node/compare/v0.11.0...v0.11.1) (2026-07-08)
 
 
