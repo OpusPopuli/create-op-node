@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildComposeEnv, estimatedPullTime, LLM_MODEL_CHOICES, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
+import { buildComposeEnv, estimatedPullTime, LLM_MODEL_CHOICES, planSignatureGate, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_LLM_MODEL } from '../src/lib/ollama.js';
 
 const SECRETS = {
@@ -211,5 +211,36 @@ describe('recommendLlmModel', () => {
       expect(rec).not.toBeNull();
       expect(values).toContain(rec!);
     }
+  });
+});
+
+describe('planSignatureGate (fail-closed image gate — #34)', () => {
+  const imgs = [
+    'ghcr.io/opuspopuli/api:latest',
+    'postgres:16',
+    'ghcr.io/opuspopuli/region-worker:sha-abc',
+  ];
+
+  it('bypasses when --skip-signature-check is set (even with images present)', () => {
+    expect(planSignatureGate(imgs, { skipSignatureCheck: true })).toEqual({ kind: 'skip' });
+  });
+
+  it('reports enumerate-failed when the compose image list is null', () => {
+    expect(planSignatureGate(null, {})).toEqual({ kind: 'enumerate-failed' });
+  });
+
+  it('reports no-images when nothing matches the opuspopuli prefix', () => {
+    expect(planSignatureGate(['postgres:16', 'redis:7'], {})).toEqual({ kind: 'no-images' });
+  });
+
+  it('plans to verify only the opuspopuli-published images', () => {
+    expect(planSignatureGate(imgs, {})).toEqual({
+      kind: 'verify',
+      images: ['ghcr.io/opuspopuli/api:latest', 'ghcr.io/opuspopuli/region-worker:sha-abc'],
+    });
+  });
+
+  it('skip takes precedence over a null image list', () => {
+    expect(planSignatureGate(null, { skipSignatureCheck: true })).toEqual({ kind: 'skip' });
   });
 });

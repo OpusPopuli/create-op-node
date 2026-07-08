@@ -44,12 +44,16 @@ import {
 import { setupLaunchAgent } from '../lib/launchagent.js';
 import { installOpComposeWrapper } from '../lib/op-compose-install.js';
 import {
+  composeConfigImages,
   composePull,
   composeRemoveService,
   composeUp,
+  filterVerifiableImages,
   loginToGhcr,
   waitForHealthy,
+  type ComposeOptions,
 } from '../lib/docker.js';
+import { cosignVerifyImage } from '../lib/cosign.js';
 import {
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_LLM_MODEL,
@@ -110,6 +114,12 @@ interface BootstrapOptions {
    *  --local-only mode, otherwise `https://supabase.<domain>` — operator
    *  can override with --supabase-url. */
   supabaseUrl?: string;
+  /** Bypass the fail-closed cosign signature gate before `compose pull`.
+   *  Not recommended — trusts the registry contents unverified. */
+  skipSignatureCheck?: boolean;
+  /** Override the cosign certificate-identity regexp used to verify images
+   *  (e.g. after a workflow rename). Escape valve for the pinned default. */
+  certificateIdentityRegexp?: string;
   /** Selects which deployment stack to provision. Defaults to `region`. */
   nodeType?: NodeType;
   /** For `--node-type region` (remote prompt-service): the URL of the
@@ -173,6 +183,18 @@ export const bootstrapCommand = new Command('bootstrap')
     ),
   )
   .addOption(new Option('--skip-stack', "Stop before `docker compose pull && up`").default(false))
+  .addOption(
+    new Option(
+      '--skip-signature-check',
+      'Bypass the fail-closed cosign verification of opuspopuli images before pull (NOT recommended — trusts the registry unverified).',
+    ).default(false),
+  )
+  .addOption(
+    new Option(
+      '--certificate-identity-regexp <regexp>',
+      'Override the cosign certificate-identity regexp used to verify images (escape valve for the pinned default).',
+    ),
+  )
   .addOption(
     new Option(
       '--local-only',
@@ -875,6 +897,109 @@ export function buildComposeEnv(args: {
   };
 }
 
+// ---- Phase 8b: fail-closed image-signature gate ----
+// Before pulling, confirm each opuspopuli-published image carries a valid
+// cosign signature from the release workflow (keyless, Rekor-logged). This is
+// FAIL-CLOSED: a missing cosign binary, an un-enumerable compose config, or any
+// failed verification aborts the bootstrap — unless the operator opts out with
+// --skip-signature-check. Third-party base images (postgres, kong, ollama, …)
+// aren't signed by us, so they're excluded. Images are verified by their
+// compose ref (tag); cosign resolves the tag to a digest.
+//
+// This gate verifies the *images* we publish, not the compose file itself — a
+// compromised compose that points services off `ghcr.io/opuspopuli/*` resolves
+// to zero verifiable images (handled loudly by the `no-images` case).
+
+export type SignatureGatePlan =
+  | { kind: 'skip' }
+  | { kind: 'enumerate-failed' }
+  | { kind: 'no-images' }
+  | { kind: 'verify'; images: string[] };
+
+// Pure decision for the signature gate — separated so the branch logic
+// (bypass / can't-enumerate / nothing-to-verify / verify-these) is unit-tested
+// independently of the interactive cosign loop. `allImages` is the resolved
+// compose image list, or null when enumeration failed.
+export function planSignatureGate(
+  allImages: string[] | null,
+  opts: Pick<BootstrapOptions, 'skipSignatureCheck'>,
+): SignatureGatePlan {
+  if (opts.skipSignatureCheck) return { kind: 'skip' };
+  if (allImages === null) return { kind: 'enumerate-failed' };
+  const images = filterVerifiableImages(allImages);
+  if (images.length === 0) return { kind: 'no-images' };
+  return { kind: 'verify', images };
+}
+
+async function verifyImageSignaturesPhase(
+  composeOpts: ComposeOptions,
+  opts: BootstrapOptions,
+): Promise<void> {
+  // Only enumerate when we're actually going to verify (skip avoids the call).
+  const allImages = opts.skipSignatureCheck ? null : await composeConfigImages(composeOpts);
+  const plan = planSignatureGate(allImages, opts);
+
+  if (plan.kind === 'skip') {
+    p.note(
+      pc.yellow(
+        '⚠ Skipping cosign signature verification (--skip-signature-check). ' +
+          'Images will be pulled unverified — you are trusting the registry contents.',
+      ),
+      'Supply chain',
+    );
+    return;
+  }
+  if (plan.kind === 'enumerate-failed') {
+    p.cancel(
+      '`docker compose config --images` failed, so signatures can\'t be verified. ' +
+        'Fix the compose config (or re-run with --skip-signature-check to bypass).',
+    );
+    process.exit(1);
+  }
+  if (plan.kind === 'no-images') {
+    // Loud on purpose: prod compose should carry opuspopuli images, so an empty
+    // set is either a custom compose or a tampered one pointing elsewhere.
+    p.note(
+      pc.yellow(
+        '⚠ No `ghcr.io/opuspopuli/*` images in the resolved compose set, so there is ' +
+          'nothing to verify. If you did not expect this, inspect your compose files — ' +
+          'this gate verifies the images we publish, not the compose file itself.',
+      ),
+      'Supply chain',
+    );
+    return;
+  }
+
+  // plan.kind === 'verify'. cosign reads docker's ghcr credentials (populated by
+  // the earlier ghcr.io login phase) to fetch each signature.
+  const spin = p.spinner();
+  spin.start('Verifying image signatures with cosign…');
+  for (const image of plan.images) {
+    spin.message(`cosign verify ${image}`);
+    const verdict = await cosignVerifyImage({
+      image,
+      ...(opts.certificateIdentityRegexp
+        ? { certificateIdentityRegexp: opts.certificateIdentityRegexp }
+        : {}),
+    });
+    if (!verdict.ok) {
+      spin.stop(pc.red(`✗ Signature verification failed for ${image}.`));
+      const detail = verdict.skipped
+        ? `${verdict.reason}\n` +
+          'cosign is required for the fail-closed signature gate — install it ' +
+          '(`brew install cosign`, or re-run without --skip-brew) or bypass with --skip-signature-check.'
+        : verdict.reason;
+      p.cancel(detail);
+      process.exit(1);
+    }
+  }
+  spin.stop(
+    pc.green(
+      `✓ ${plan.images.length} image signature${plan.images.length === 1 ? '' : 's'} verified.`,
+    ),
+  );
+}
+
 // ---- Phase 9 + 10: docker compose pull + up, then health-check loop ----
 async function runStackPhase(args: {
   opts: BootstrapOptions;
@@ -927,6 +1052,8 @@ async function runStackPhase(args: {
         : pc.yellow(`⚠ cloudflared eviction reported: ${rm.reason ?? 'unknown'} — continuing.`),
     );
   }
+
+  await verifyImageSignaturesPhase(composeOpts, opts);
 
   const pullSpin = p.spinner();
   pullSpin.start('Pulling images from ghcr.io… (~5–15 min first run, < 1 min cached)');

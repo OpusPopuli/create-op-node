@@ -38,6 +38,8 @@ export const STUDIO_PACKAGES = [
   { name: 'cloudflared', kind: 'formula' },
   { name: 'rclone', kind: 'formula' },
   { name: 'ollama', kind: 'formula' },
+  // Required for the fail-closed image-signature gate in `bootstrap` (#34).
+  { name: 'cosign', kind: 'formula' },
   { name: 'docker', kind: 'cask' },
   { name: 'tailscale', kind: 'cask' },
 ] as const satisfies readonly PackageSpec[];

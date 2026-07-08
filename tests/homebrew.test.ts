@@ -56,6 +56,7 @@ describe('STUDIO_PACKAGES + HOMEBREW_INSTALL_COMMAND', () => {
       'cloudflared',
       'rclone',
       'ollama',
+      'cosign',
       'docker',
       'tailscale',
     ]);
@@ -64,6 +65,10 @@ describe('STUDIO_PACKAGES + HOMEBREW_INSTALL_COMMAND', () => {
   it('marks docker + tailscale as casks (need GUI authorization)', () => {
     expect(STUDIO_PACKAGES.find((p) => p.name === 'docker')?.kind).toBe('cask');
     expect(STUDIO_PACKAGES.find((p) => p.name === 'tailscale')?.kind).toBe('cask');
+  });
+
+  it('includes cosign as a formula (fail-closed image-signature gate — #34)', () => {
+    expect(STUDIO_PACKAGES.find((p) => p.name === 'cosign')?.kind).toBe('formula');
   });
 
   it('HOMEBREW_INSTALL_COMMAND is the canonical one-liner', () => {
