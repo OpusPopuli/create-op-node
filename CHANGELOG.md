@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.11](https://github.com/OpusPopuli/create-op-node/compare/v0.10.10...v0.10.11) (2026-07-08)
+
+
+### Bug Fixes
+
+* **bootstrap:** align llm-model docs + picker hints with actual defaults ([5d5913c](https://github.com/OpusPopuli/create-op-node/commit/5d5913cdbd76c05779b9ef916745c44a73871186))
+* **bootstrap:** align llm-model docs + picker hints with actual defaults ([c1a2499](https://github.com/OpusPopuli/create-op-node/commit/c1a24998464064eb0a1bf96483c9446fd1b4077c)), closes [#33](https://github.com/OpusPopuli/create-op-node/issues/33)
+
 ## [0.10.10](https://github.com/OpusPopuli/create-op-node/compare/v0.10.9...v0.10.10) (2026-07-07)
 
 
