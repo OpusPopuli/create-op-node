@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.17](https://github.com/OpusPopuli/create-op-node/compare/v0.10.16...v0.10.17) (2026-07-08)
+
+
+### Bug Fixes
+
+* **cosign:** ref-pin the signature identity to release.yml ([97eff19](https://github.com/OpusPopuli/create-op-node/commit/97eff19fbce17f735c850138b764a020f96919c9))
+* **cosign:** ref-pin the signature identity to release.yml ([385f93e](https://github.com/OpusPopuli/create-op-node/commit/385f93e236ca392d8150861ce72d09a622ab9f91))
+
 ## [0.10.16](https://github.com/OpusPopuli/create-op-node/compare/v0.10.15...v0.10.16) (2026-07-08)
 
 
