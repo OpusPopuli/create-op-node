@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.16](https://github.com/OpusPopuli/create-op-node/compare/v0.10.15...v0.10.16) (2026-07-08)
+
+
+### Bug Fixes
+
+* **init:** seed repo secrets via Octokit + libsodium under the PAT ([2a1d8ef](https://github.com/OpusPopuli/create-op-node/commit/2a1d8efe9e348f30b4d3874c6e99945faaef17b1))
+* **init:** seed repo secrets via Octokit + libsodium under the PAT ([ec084b9](https://github.com/OpusPopuli/create-op-node/commit/ec084b945d4c9010b16170eee5d8043402602c07)), closes [#32](https://github.com/OpusPopuli/create-op-node/issues/32)
+
 ## [0.10.15](https://github.com/OpusPopuli/create-op-node/compare/v0.10.14...v0.10.15) (2026-07-08)
 
 
