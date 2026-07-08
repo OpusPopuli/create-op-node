@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.15](https://github.com/OpusPopuli/create-op-node/compare/v0.10.14...v0.10.15) (2026-07-08)
+
+
+### Bug Fixes
+
+* **polling:** check workspace before sleeping in the discovery loop ([291ad49](https://github.com/OpusPopuli/create-op-node/commit/291ad49d5175078e3a0889e0d19f802df650c186))
+* **polling:** check workspace before sleeping in the discovery loop ([4d0da64](https://github.com/OpusPopuli/create-op-node/commit/4d0da6456bb96fbf78875c4e19e91a2c3aa2e6c1)), closes [#35](https://github.com/OpusPopuli/create-op-node/issues/35)
+
 ## [0.10.14](https://github.com/OpusPopuli/create-op-node/compare/v0.10.13...v0.10.14) (2026-07-08)
 
 
