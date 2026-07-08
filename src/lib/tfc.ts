@@ -13,6 +13,8 @@
  * each call to the minimal shape we actually consume.
  */
 
+import { API_REQUEST_TIMEOUT_MS } from './constants.js';
+
 const TFC_API = 'https://app.terraform.io/api/v2';
 
 /** TFC organization slug rules: alphanumerics, underscores, hyphens; the API
@@ -40,18 +42,42 @@ function authHeaders(token: string): Headers {
   };
 }
 
+/**
+ * GET a TFC API path as JSON, with a hard per-request timeout.
+ *
+ * A stalled or half-open connection (native `fetch` has no default timeout)
+ * would otherwise hang `init` — including the ~10-minute apply-wait in
+ * `polling.ts` — forever. We wrap the call in an `AbortController` and, on
+ * any throw (timeout / DNS blip / TLS reset / proxy error), return
+ * `{ status: 0, body: null }`. Every caller already treats a non-200 status
+ * as a soft failure, so a `0` degrades to `null` / a network-error message
+ * instead of rejecting out of the poll loop and crashing the wizard.
+ */
 async function getJson(
   token: string,
   path: string,
 ): Promise<{ status: number; body: unknown }> {
-  const res = await fetch(`${TFC_API}${path}`, { headers: authHeaders(token) });
-  let body: unknown = null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), API_REQUEST_TIMEOUT_MS);
   try {
-    body = await res.json();
+    const res = await fetch(`${TFC_API}${path}`, {
+      headers: authHeaders(token),
+      signal: ctrl.signal,
+    });
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      /* non-JSON body — leave as null */
+    }
+    return { status: res.status, body };
   } catch {
-    /* non-JSON body — leave as null */
+    // Timeout (AbortError) or any network-layer throw. status 0 = "never got
+    // a response" — see the docstring above.
+    return { status: 0, body: null };
+  } finally {
+    clearTimeout(timer);
   }
-  return { status: res.status, body };
 }
 
 export interface TfcProbeResult {
@@ -82,6 +108,12 @@ export async function probeTfcToken(input: TfcAuth): Promise<TfcProbeResult> {
   }
 
   const account = await getJson(input.token, '/account/details');
+  if (account.status === 0) {
+    issues.push(
+      "Couldn't reach Terraform Cloud (network error or timeout). Check your connection and retry.",
+    );
+    return { ok: false, issues };
+  }
   if (account.status !== 200) {
     issues.push(
       `TFC token invalid (HTTP ${account.status}). Regenerate at https://app.terraform.io/app/settings/tokens.`,
@@ -94,7 +126,11 @@ export async function probeTfcToken(input: TfcAuth): Promise<TfcProbeResult> {
     input.token,
     `/organizations/${encodeURIComponent(input.organization)}`,
   );
-  if (org.status === 404) {
+  if (org.status === 0) {
+    issues.push(
+      "Couldn't reach Terraform Cloud while checking the organization (network error or timeout).",
+    );
+  } else if (org.status === 404) {
     issues.push(
       `TFC organization "${input.organization}" not found, or this token lacks access. Check the org slug at https://app.terraform.io.`,
     );
