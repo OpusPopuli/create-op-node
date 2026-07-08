@@ -30,8 +30,25 @@ export type CosignVerifyResult =
   | { ok: false; skipped: true; reason: string }
   | { ok: false; skipped: false; reason: string };
 
+// Ref-pinned to the exact publishing workflow. The opuspopuli `release.yml`
+// signs each image (keyless cosign) on push to main, and can also be run
+// ad-hoc via `workflow_dispatch` from a fix branch for an arm64 build — both
+// carry a `.../release.yml@refs/heads/<branch>` certificate identity. We pin
+// the workflow FILE (not `.../workflows/.*`, which would accept any workflow
+// in the repo that ever obtained a Fulcio cert) and allow any `refs/heads/`
+// branch so legitimate ad-hoc builds still verify. (#34)
+//
+// Provenance of each segment (the cert SAN is GitHub's OIDC `job_workflow_ref`,
+// format `<owner>/<repo>/.github/workflows/<file>@<ref>`):
+//   - `OpusPopuli/opuspopuli` — the repo's canonical path (GitHub API), the
+//     exact casing OIDC emits.
+//   - `release.yml@refs/heads/` — the actual signing workflow + trigger
+//     (push to main / workflow_dispatch), confirmed in opuspopuli/release.yml.
+// End-to-end confirmation against a live image's Fulcio cert (needs `cosign` +
+// a published image) lands with the fail-closed bootstrap gate, where a
+// `--certificate-identity-regexp` override is exposed as the escape valve.
 export const DEFAULT_IDENTITY_REGEXP =
-  '^https://github\\.com/OpusPopuli/opuspopuli/\\.github/workflows/.*$';
+  '^https://github\\.com/OpusPopuli/opuspopuli/\\.github/workflows/release\\.yml@refs/heads/.*$';
 
 /**
  * Verify a single OCI image's cosign signature against the GitHub Actions

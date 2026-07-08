@@ -79,3 +79,35 @@ describe('cosignVerifyImage', () => {
     expect(r.output).toContain('Verified OK');
   });
 });
+
+describe('DEFAULT_IDENTITY_REGEXP — ref-pinned to release.yml (#34)', () => {
+  const re = new RegExp(DEFAULT_IDENTITY_REGEXP);
+  const id = (path: string) => `https://github.com/${path}`;
+
+  it('matches the release.yml signing identity on main', () => {
+    expect(
+      re.test(id('OpusPopuli/opuspopuli/.github/workflows/release.yml@refs/heads/main')),
+    ).toBe(true);
+  });
+
+  it('matches an ad-hoc workflow_dispatch build from a fix branch', () => {
+    expect(
+      re.test(id('OpusPopuli/opuspopuli/.github/workflows/release.yml@refs/heads/fix/arm64-build')),
+    ).toBe(true);
+  });
+
+  it('rejects a different workflow in the same repo (no longer any-workflow)', () => {
+    expect(re.test(id('OpusPopuli/opuspopuli/.github/workflows/ci.yml@refs/heads/main'))).toBe(false);
+  });
+
+  it('rejects a spoofed owner or repo', () => {
+    expect(re.test(id('Evil/opuspopuli/.github/workflows/release.yml@refs/heads/main'))).toBe(false);
+    expect(re.test(id('OpusPopuli/evil/.github/workflows/release.yml@refs/heads/main'))).toBe(false);
+  });
+
+  it('rejects a tag ref (release.yml signs on push to main, not on tags)', () => {
+    expect(
+      re.test(id('OpusPopuli/opuspopuli/.github/workflows/release.yml@refs/tags/v1.0.0')),
+    ).toBe(false);
+  });
+});
