@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1](https://github.com/OpusPopuli/create-op-node/compare/v0.11.0...v0.11.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* cleanup nits — cat quoting, teardown ok flag, default-subcommand routing ([a2ad94f](https://github.com/OpusPopuli/create-op-node/commit/a2ad94f7221b47a372c590b819d1aab39f7f08f7))
+* cleanup nits — cat quoting, teardown ok flag, default-subcommand routing ([a354c05](https://github.com/OpusPopuli/create-op-node/commit/a354c05cfb1bc584bb6657d9948bff95818cd532)), closes [#36](https://github.com/OpusPopuli/create-op-node/issues/36)
+
 ## [0.11.0](https://github.com/OpusPopuli/create-op-node/compare/v0.10.17...v0.11.0) (2026-07-08)
 
 
