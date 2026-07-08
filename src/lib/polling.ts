@@ -107,8 +107,10 @@ async function discoverRunId(
 ): Promise<string | null> {
   deps.onProgress?.('discovery');
   const discoveryStart = deps.now();
+  // Check first, THEN sleep: a run that already exists is found at t=0 rather
+  // than a poll-interval late, and findWorkspace always runs at least once
+  // regardless of the pollMs/discoveryMs ratio. (#35)
   while (deps.now() - discoveryStart < budgets.discoveryMs) {
-    await deps.sleep(budgets.pollMs);
     // A transient failure is not fatal to a multi-minute discovery window —
     // swallow it and retry on the next poll rather than rejecting the wait.
     // (The tfc helpers already degrade throws to null, so this is
@@ -123,6 +125,7 @@ async function discoverRunId(
       () => deps.onProgress?.('retry'),
     );
     if (ws?.currentRunId) return ws.currentRunId;
+    await deps.sleep(budgets.pollMs);
   }
   return null;
 }
