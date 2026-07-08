@@ -31,14 +31,19 @@ Configures macOS power settings, installs Homebrew + the CLI tool list, sets up 
 ### Choosing the LLM model
 
 When you run `bootstrap` interactively (no `-y`, no `--llm-model` flag),
-you'll get a curated picker:
+you'll get a curated picker that **pre-selects** a model based on the
+Studio's detected unified memory:
 
-- `qwen2.5:72b` — 72B, ~50 GB Ollama RAM. **Default**, recommended for
-  128 GB Studios. Best Spanish + multilingual quality.
-- `qwen2.5:32b` — 32B, ~22 GB Ollama RAM. Middle tier for 64 GB Studios.
-- `qwen3.5:9b` — 9B, ~8 GB Ollama RAM. Validation runs or smaller
-  Studios (36–48 GB).
+- `qwen2.5:72b` — 72B, ~50 GB Ollama RAM. Pre-selected on 96 GB+ Studios.
+  Best Spanish + multilingual quality.
+- `qwen2.5:32b` — 32B, ~22 GB Ollama RAM. Pre-selected on 48–95 GB Studios
+  (e.g. 64 GB).
+- `qwen3.5:9b` — 9B, ~8 GB Ollama RAM. Pre-selected on smaller Studios
+  (< 48 GB), and the default for non-interactive `-y` runs (see below).
 - `Other…` — any Ollama model name you specify.
+
+(If memory detection fails, the picker falls back to pre-selecting
+`qwen2.5:72b`.)
 
 The picker is Qwen-only because the Opus Populi platform serves
 Spanish-speaking civic users and Qwen has the strongest Spanish (and
