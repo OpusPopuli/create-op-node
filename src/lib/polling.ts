@@ -13,13 +13,7 @@
  * timers or HTTP. `sleep` is a parameter; tests pass a no-op.
  */
 
-import {
-  fetchOutput,
-  findWorkspace,
-  getRunStatus,
-  type TfcRunStatus,
-  type TfcWorkspace,
-} from './tfc.js';
+import { fetchOutput, findWorkspace, getRunStatus } from './tfc.js';
 
 export interface WaitInput {
   token: string;
@@ -60,7 +54,7 @@ export interface WaitDeps {
   sleep: (ms: number) => Promise<void>;
   now: () => number;
   /** Optional progress callback for UI integration (spinner messages, etc.). */
-  onProgress?: (phase: 'discovery' | 'run' | 'fetching') => void;
+  onProgress?: (phase: 'discovery' | 'run' | 'fetching' | 'retry') => void;
 }
 
 export const realDeps: WaitDeps = {
@@ -88,6 +82,22 @@ export async function waitForApply(
   return waitForRunOutput(input, budgets, deps, runId);
 }
 
+// Run a single poll attempt, degrading any throw to `null` (treated as "no
+// result this interval, try again"). Keeps a transient network failure from
+// rejecting out of the multi-minute wait loops. `onRetry` fires on a swallowed
+// throw so the caller can surface the hiccup instead of retrying in silence.
+async function safePoll<T>(
+  fn: () => Promise<T | null>,
+  onRetry?: () => void,
+): Promise<T | null> {
+  try {
+    return await fn();
+  } catch {
+    onRetry?.();
+    return null;
+  }
+}
+
 // Phase 1: discovery — poll the workspace until it has a current run, or the
 // discovery budget expires. Returns the run id, or null on timeout.
 async function discoverRunId(
@@ -99,11 +109,19 @@ async function discoverRunId(
   const discoveryStart = deps.now();
   while (deps.now() - discoveryStart < budgets.discoveryMs) {
     await deps.sleep(budgets.pollMs);
-    const ws: TfcWorkspace | null = await deps.findWorkspace({
-      token: input.token,
-      organization: input.organization,
-      tags: input.workspaceTags,
-    });
+    // A transient failure is not fatal to a multi-minute discovery window —
+    // swallow it and retry on the next poll rather than rejecting the wait.
+    // (The tfc helpers already degrade throws to null, so this is
+    // belt-and-suspenders against any future throwing dep.)
+    const ws = await safePoll(
+      () =>
+        deps.findWorkspace({
+          token: input.token,
+          organization: input.organization,
+          tags: input.workspaceTags,
+        }),
+      () => deps.onProgress?.('retry'),
+    );
     if (ws?.currentRunId) return ws.currentRunId;
   }
   return null;
@@ -120,17 +138,23 @@ async function waitForRunOutput(
   deps.onProgress?.('run');
   const runStart = deps.now();
   while (deps.now() - runStart < budgets.runMs) {
-    const r: TfcRunStatus | null = await deps.getRunStatus(
-      { token: input.token, organization: input.organization },
-      runId,
+    // Transient status-poll failure → retry next interval, don't abort the
+    // ~10-minute run wait on a single bad packet.
+    const r = await safePoll(
+      () => deps.getRunStatus({ token: input.token, organization: input.organization }, runId),
+      () => deps.onProgress?.('retry'),
     );
     if (r?.finished) {
       if (!r.succeeded) return { kind: 'run-failed', status: r.status };
       deps.onProgress?.('fetching');
-      const value = await deps.fetchOutput(
-        { token: input.token, organization: input.organization },
-        input.workspaceId,
-        input.outputName,
+      const value = await safePoll(
+        () =>
+          deps.fetchOutput(
+            { token: input.token, organization: input.organization },
+            input.workspaceId,
+            input.outputName,
+          ),
+        () => deps.onProgress?.('retry'),
       );
       return value !== null ? { kind: 'success', value } : { kind: 'output-missing' };
     }

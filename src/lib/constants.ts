@@ -59,6 +59,14 @@ export const SAFE_URL_RE = /^[A-Za-z0-9:/_.-]+$/;
  *  GET /health, GraphQL POST). One number so tls.ts and http.ts don't drift. */
 export const VERIFY_NETWORK_TIMEOUT_MS = 10_000;
 
+/** Per-request timeout for the Terraform Cloud + Cloudflare API helpers
+ *  (`tfc.ts`, `cloudflare.ts`). Deliberately separate from the `verify`
+ *  probe timeout: these are control-plane API calls, and the overall
+ *  apply-wait budget is governed by `polling.ts`, so each individual
+ *  request just needs a sane cap to fail fast on a stalled connection
+ *  instead of hanging `init` indefinitely. */
+export const API_REQUEST_TIMEOUT_MS = 15_000;
+
 /** First N chars of a probe response body that get echoed back to the
  *  operator for diagnostics. Capped low because the wizard renders this
  *  inline; for the real body, use `curl -v` and friends. */

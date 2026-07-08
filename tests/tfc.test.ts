@@ -7,6 +7,7 @@ import {
   isValidTfcOrgSlug,
   probeTfcToken,
 } from '../src/lib/tfc.js';
+import { API_REQUEST_TIMEOUT_MS } from '../src/lib/constants.js';
 
 const TOKEN = 'fake-tfc-token';
 const ORG = 'op-region-ca';
@@ -213,5 +214,76 @@ describe('fetchOutput', () => {
     installFetch(() => ({ status: 200, body: { data: [] } }));
     const v = await fetchOutput({ token: TOKEN, organization: ORG }, 'ws-1', 'tunnel_token');
     expect(v).toBeNull();
+  });
+});
+
+describe('network resilience (issue #31)', () => {
+  it('probeTfcToken reports a network error (not "token invalid") when fetch throws', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new TypeError('fetch failed'))),
+    );
+    const r = await probeTfcToken({ token: TOKEN, organization: ORG });
+    expect(r.ok).toBe(false);
+    expect(r.issues.join(' ')).toMatch(/couldn't reach terraform cloud/i);
+    expect(r.issues.join(' ')).not.toMatch(/token invalid/i);
+  });
+
+  it('probeTfcToken reports an org-level network error when the org probe fails', async () => {
+    // Account probe succeeds; the org probe hits a network failure.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        url.includes('/account/details')
+          ? Promise.resolve(
+              new Response(JSON.stringify({ data: { attributes: { username: 'op' } } }), {
+                status: 200,
+              }),
+            )
+          : Promise.reject(new Error('ECONNRESET')),
+      ),
+    );
+    const r = await probeTfcToken({ token: TOKEN, organization: ORG });
+    expect(r.ok).toBe(false);
+    expect(r.issues.join(' ')).toMatch(/couldn't reach terraform cloud while checking the organization/i);
+  });
+
+  it('findWorkspace / getRunStatus / fetchOutput degrade to null when fetch throws', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('ECONNRESET'))),
+    );
+    await expect(
+      findWorkspace({ token: TOKEN, organization: ORG, tags: ['opuspopuli', 'cloudflare'] }),
+    ).resolves.toBeNull();
+    await expect(
+      getRunStatus({ token: TOKEN, organization: ORG }, 'run-123'),
+    ).resolves.toBeNull();
+    await expect(
+      fetchOutput({ token: TOKEN, organization: ORG }, 'ws-1', 'tunnel_token'),
+    ).resolves.toBeNull();
+  });
+
+  it('aborts and reports a network error when a request exceeds the timeout', async () => {
+    vi.useFakeTimers();
+    // A fetch that never settles on its own but rejects (like the real one)
+    // when its AbortSignal fires.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted.', 'AbortError')),
+            );
+          }),
+      ),
+    );
+    const pending = probeTfcToken({ token: TOKEN, organization: ORG });
+    await vi.advanceTimersByTimeAsync(API_REQUEST_TIMEOUT_MS + 1);
+    const r = await pending;
+    vi.useRealTimers();
+    expect(r.ok).toBe(false);
+    expect(r.issues.join(' ')).toMatch(/network error or timeout/i);
   });
 });

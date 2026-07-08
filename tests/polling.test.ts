@@ -144,3 +144,48 @@ describe('waitForApply', () => {
     expect(r).toEqual({ kind: 'success', value: 'v' });
   });
 });
+
+describe('waitForApply — transient failure resilience (issue #31)', () => {
+  it('retries the run poll when getRunStatus throws once, then completes', async () => {
+    const deps = makeDeps({
+      getRunStatus: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('ECONNRESET'))
+        .mockResolvedValueOnce({ id: 'run-1', status: 'applied', finished: true, succeeded: true }),
+      fetchOutput: vi.fn().mockResolvedValue('the-token'),
+    });
+    const r = await waitForApply(INPUT, BUDGETS, deps);
+    expect(r).toEqual({ kind: 'success', value: 'the-token' });
+    expect(deps.getRunStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries discovery when findWorkspace throws once, then finds the run', async () => {
+    const deps = makeDeps({
+      findWorkspace: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('DNS blip'))
+        .mockResolvedValueOnce({ id: 'ws-1', name: 'ca', currentRunId: 'run-9' }),
+      getRunStatus: vi
+        .fn()
+        .mockResolvedValueOnce({ id: 'run-9', status: 'applied', finished: true, succeeded: true }),
+      fetchOutput: vi.fn().mockResolvedValue('tok'),
+    });
+    const r = await waitForApply({ ...INPUT, runId: null }, BUDGETS, deps);
+    expect(r.kind).toBe('success');
+    expect(deps.findWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it('signals onProgress("retry") when a poll throws (not silent)', async () => {
+    const onProgress = vi.fn();
+    const deps = makeDeps({
+      onProgress,
+      getRunStatus: vi
+        .fn()
+        .mockRejectedValueOnce(new Error('blip'))
+        .mockResolvedValueOnce({ id: 'run-1', status: 'applied', finished: true, succeeded: true }),
+      fetchOutput: vi.fn().mockResolvedValue('tok'),
+    });
+    await waitForApply(INPUT, BUDGETS, deps);
+    expect(onProgress).toHaveBeenCalledWith('retry');
+  });
+});

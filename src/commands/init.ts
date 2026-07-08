@@ -16,7 +16,7 @@ import {
 } from '../lib/github.js';
 import { generatePgsodiumRootKey, renderProdTfvars } from '../lib/secrets.js';
 import { findWorkspace } from '../lib/tfc.js';
-import { waitForApply } from '../lib/polling.js';
+import { waitForApply, realDeps as realWaitDeps } from '../lib/polling.js';
 
 export interface InitOptions {
   domain?: string;
@@ -835,14 +835,25 @@ async function waitForApplyAndFetchTunnelToken(input: WaitInput): Promise<string
   const spin = p.spinner();
   spin.start('Waiting for terraform apply to finish (polling every 10s)…');
 
-  const outcome = await waitForApply({
-    token: input.token,
-    organization: input.organization,
-    workspaceId: input.workspaceId,
-    runId: input.runId,
-    workspaceTags: ['opuspopuli', 'cloudflare'],
-    outputName: 'tunnel_token',
-  });
+  const outcome = await waitForApply(
+    {
+      token: input.token,
+      organization: input.organization,
+      workspaceId: input.workspaceId,
+      runId: input.runId,
+      workspaceTags: ['opuspopuli', 'cloudflare'],
+      outputName: 'tunnel_token',
+    },
+    undefined,
+    {
+      ...realWaitDeps,
+      // Surface a transient network hiccup instead of silently re-polling, so
+      // a slow wait doesn't look like a hang.
+      onProgress: (phase) => {
+        if (phase === 'retry') spin.message('Transient network error — retrying next poll…');
+      },
+    },
+  );
 
   switch (outcome.kind) {
     case 'success':
