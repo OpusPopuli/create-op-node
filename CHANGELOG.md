@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.14](https://github.com/OpusPopuli/create-op-node/compare/v0.10.13...v0.10.14) (2026-07-08)
+
+
+### Bug Fixes
+
+* **ollama:** add request timeouts to health + warm probes ([52e8fb1](https://github.com/OpusPopuli/create-op-node/commit/52e8fb1b7a6fa6212d3c7d0d4d89e7e5ac86ff87))
+* **ollama:** add request timeouts to health + warm probes ([8d1ff58](https://github.com/OpusPopuli/create-op-node/commit/8d1ff58e5fa2ab7f91ce2310416b340f9b597aac)), closes [#31](https://github.com/OpusPopuli/create-op-node/issues/31)
+
 ## [0.10.13](https://github.com/OpusPopuli/create-op-node/compare/v0.10.12...v0.10.13) (2026-07-08)
 
 
