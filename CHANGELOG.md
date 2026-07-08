@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/OpusPopuli/create-op-node/compare/v0.10.17...v0.11.0) (2026-07-08)
+
+
+### Features
+
+* **bootstrap:** fail-closed cosign signature gate before pull ([f61c0d7](https://github.com/OpusPopuli/create-op-node/commit/f61c0d7abeb97a580ca1c0f56a8309e7a5455501))
+* **bootstrap:** fail-closed cosign signature gate before pull ([8bab24b](https://github.com/OpusPopuli/create-op-node/commit/8bab24b9e79b75adfda60237a852a826ceb02469)), closes [#34](https://github.com/OpusPopuli/create-op-node/issues/34)
+
 ## [0.10.17](https://github.com/OpusPopuli/create-op-node/compare/v0.10.16...v0.10.17) (2026-07-08)
 
 
