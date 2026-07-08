@@ -11,6 +11,8 @@
  * scope coverage.
  */
 
+import { API_REQUEST_TIMEOUT_MS } from './constants.js';
+
 const CF_API = 'https://api.cloudflare.com/client/v4';
 
 interface ProbeInput {
@@ -24,21 +26,42 @@ export interface ProbeResult {
   issues: string[];
 }
 
+/**
+ * GET a Cloudflare API path as JSON, with a hard per-request timeout.
+ *
+ * Native `fetch` has no default timeout, so a stalled connection would hang
+ * `init` indefinitely (`probeCloudflareToken` makes 6 sequential calls). We
+ * wrap the call in an `AbortController` and, on any throw (timeout / DNS blip
+ * / TLS reset / proxy error), return `{ status: 0, body: null }`. Callers
+ * treat a non-200 status as a soft failure, so a `0` degrades to a
+ * network-error message instead of rejecting out of the wizard.
+ */
 async function get(
   token: string,
   path: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<{ status: number; body: unknown }> {
-  const res = await fetchImpl(`${CF_API}${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  let body: unknown = null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), API_REQUEST_TIMEOUT_MS);
   try {
-    body = await res.json();
+    const res = await fetchImpl(`${CF_API}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: ctrl.signal,
+    });
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      /* non-JSON body — leave as null */
+    }
+    return { status: res.status, body };
   } catch {
-    /* non-JSON body — leave as null */
+    // Timeout (AbortError) or any network-layer throw. status 0 = "never got
+    // a response" — see the docstring above.
+    return { status: 0, body: null };
+  } finally {
+    clearTimeout(timer);
   }
-  return { status: res.status, body };
 }
 
 function shortError(body: unknown): string {
@@ -73,6 +96,12 @@ export async function probeCloudflareToken(input: ProbeInput): Promise<ProbeResu
 
   // ---- Validity probe (Account-owned token endpoint) ----
   const verify = await get(input.token, `/accounts/${input.accountId}/tokens/verify`);
+  if (verify.status === 0) {
+    issues.push(
+      "Couldn't reach Cloudflare (network error or timeout). Check your connection and retry.",
+    );
+    return { ok: false, issues };
+  }
   if (verify.status !== 200) {
     issues.push(
       `Token verify failed (HTTP ${verify.status}): ${shortError(verify.body)}`,
@@ -93,7 +122,9 @@ export async function probeCloudflareToken(input: ProbeInput): Promise<ProbeResu
     const res = await get(input.token, check.path);
     if (res.status === 200) continue;
     if (res.status === 404 && check.treat404AsPass) continue;
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 0) {
+      issues.push(`Couldn't reach Cloudflare while checking ${check.name} (network error or timeout).`);
+    } else if (res.status === 401 || res.status === 403) {
       issues.push(`Missing scope: ${check.name}`);
     } else if (
       res.status === 400 &&
@@ -165,6 +196,9 @@ export async function tunnelStatus(input: TunnelStatusInput): Promise<TunnelStat
       `/accounts/${input.accountId}/cfd_tunnel/${input.tunnelId}`,
       fetchImpl,
     );
+    if (res.status === 0) {
+      return { ok: false, reason: "couldn't reach Cloudflare (network error or timeout)" };
+    }
     if (res.status !== 200) {
       return {
         ok: false,
