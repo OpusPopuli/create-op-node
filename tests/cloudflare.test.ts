@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { probeCloudflareToken, tunnelStatus } from '../src/lib/cloudflare.js';
+import { API_REQUEST_TIMEOUT_MS } from '../src/lib/constants.js';
 
 const TOKEN = 'cfat_FAKE0000000000000000000000000000000';
 const ACCOUNT = '0123456789abcdef0123456789abcdef';
@@ -180,7 +181,7 @@ describe('tunnelStatus', () => {
     }
   });
 
-  it('returns ok=false when fetch throws', async () => {
+  it('returns ok=false with a network-error reason when fetch throws (get degrades to status 0)', async () => {
     const fetchImpl = vi.fn(() => Promise.reject(new Error('ECONNRESET'))) as unknown as typeof fetch;
     const r = await tunnelStatus({
       token: TOKEN,
@@ -189,7 +190,41 @@ describe('tunnelStatus', () => {
       fetchImpl,
     });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain('ECONNRESET');
+    if (!r.ok) expect(r.reason).toMatch(/couldn't reach cloudflare/i);
+  });
+});
+
+describe('network resilience (issue #31)', () => {
+  it('probeCloudflareToken reports a network error (not "token verify failed") when fetch throws', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new TypeError('fetch failed'))),
+    );
+    const r = await probeCloudflareToken({ token: TOKEN, accountId: ACCOUNT, zoneId: ZONE });
+    expect(r.ok).toBe(false);
+    expect(r.issues.join(' ')).toMatch(/couldn't reach cloudflare/i);
+    expect(r.issues.join(' ')).not.toMatch(/token verify failed/i);
+  });
+
+  it('probeCloudflareToken aborts and reports a network error when a request exceeds the timeout', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string, init?: { signal?: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('The operation was aborted.', 'AbortError')),
+            );
+          }),
+      ),
+    );
+    const pending = probeCloudflareToken({ token: TOKEN, accountId: ACCOUNT, zoneId: ZONE });
+    await vi.advanceTimersByTimeAsync(API_REQUEST_TIMEOUT_MS + 1);
+    const r = await pending;
+    vi.useRealTimers();
+    expect(r.ok).toBe(false);
+    expect(r.issues.join(' ')).toMatch(/network error or timeout/i);
   });
 });
 
