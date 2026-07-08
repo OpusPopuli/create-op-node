@@ -1,24 +1,19 @@
 /**
  * GitHub helpers used by `create-op-node init`.
  *
- * Mix of two clients on purpose:
- *
- *   - Octokit (REST) for typed API calls — create-from-template, content
- *     write, PR open. These return well-shaped data we care about (URLs,
- *     SHAs).
- *   - `gh` CLI shell-out for repository secret seeding. Secrets need to be
- *     encrypted with the repo's libsodium public key before PUT — Octokit
- *     doesn't bundle libsodium and the wrapper packages are ~800 KB.
- *     `gh secret set` does the encryption transparently. The operator
- *     already has `gh` (it's part of the runbook), so the dep is free.
+ * Every call goes through Octokit (REST) authenticated with the operator's
+ * `--gh-token` PAT — a single identity for the whole flow (create-from-
+ * template, content write, PR open, and Actions-secret seeding). Secret
+ * seeding uses the `actions.getRepoPublicKey` + `createOrUpdateRepoSecret`
+ * endpoints, encrypting the value with the repo's libsodium public key
+ * (`crypto_box_seal`) before PUT, per GitHub's API contract.
  *
  * The Octokit instance is created lazily so a missing token surfaces as a
  * clear error rather than a cryptic auth failure inside a downstream call.
  */
 
 import { Octokit } from '@octokit/rest';
-
-import { safeExeca } from './exec.js';
+import _sodium from 'libsodium-wrappers';
 
 export interface GhAuth {
   /** A GitHub Personal Access Token (Classic or Fine-grained) with at least
@@ -113,47 +108,86 @@ export async function createRepoFromTemplate(
 // Seed secrets via gh CLI
 // ----------------------------------------------------------------------------
 
-export interface SetRepoSecretInput {
+export interface SetRepoSecretsInput {
+  /** PAT used for the whole `init` flow — needs Actions Secrets: write
+   *  (fine-grained) or `repo` scope (classic). */
+  token: string;
   /** `<owner>/<repo>`. */
   repo: string;
-  /** Secret name (e.g. `CLOUDFLARE_API_TOKEN`). */
-  name: string;
-  /** Secret value. Passed via stdin to `gh secret set` so it never lands in
-   *  argv or the shell history. */
-  value: string;
+  /** Secrets to seed, in order. Values are encrypted with the repo public key
+   *  before they leave the process — plaintext never lands in argv or on the
+   *  wire. */
+  secrets: ReadonlyArray<{ name: string; value: string }>;
 }
 
-export interface SetSecretResult {
-  written: boolean;
-  reason?: string;
+export interface SetRepoSecretsResult {
+  /** Secret names successfully written, in order. */
+  seeded: string[];
+  /** Set when a secret failed; seeding stops at the first failure (so `seeded`
+   *  is the prefix that succeeded and the rest are pending). */
+  failed?: { name: string; reason: string };
+}
+
+function parseRepoSlug(repo: string): { owner: string; repo: string } | null {
+  const slash = repo.indexOf('/');
+  if (slash <= 0 || slash === repo.length - 1 || repo.indexOf('/', slash + 1) !== -1) return null;
+  return { owner: repo.slice(0, slash), repo: repo.slice(slash + 1) };
 }
 
 /**
- * Set a single repository Actions secret via `gh secret set`. Value is piped
- * on stdin — never on argv — so it doesn't land in process listing or any
- * shell history. Returns `written: false` with a clear reason when `gh`
- * isn't installed (B2 — required for the `--gh-token` escape hatch where the
- * operator supplies a PAT and may not have `gh` at all).
+ * Seed repository Actions secrets via the GitHub API, authenticated with the
+ * operator's PAT (single identity for the whole flow — no `gh` CLI / ambient
+ * auth). GitHub requires each value to be sealed-box encrypted with the repo's
+ * public key (`crypto_box_seal`); we fetch that key **once** and reuse it for
+ * every secret. `createOrUpdateRepoSecret` is idempotent, so a re-run
+ * overwrites cleanly. Stops at the first failure and reports what was seeded.
  */
-export async function setRepoSecret(input: SetRepoSecretInput): Promise<SetSecretResult> {
-  const res = await safeExeca(
-    'gh',
-    ['secret', 'set', input.name, '--repo', input.repo, '--body', '-'],
-    { input: input.value },
-  );
-  if (res === null) {
+export async function setRepoSecrets(input: SetRepoSecretsInput): Promise<SetRepoSecretsResult> {
+  const firstName = input.secrets[0]?.name ?? '(none)';
+  const parsed = parseRepoSlug(input.repo);
+  if (!parsed) {
     return {
-      written: false,
-      reason: '`gh` CLI not installed — install from https://cli.github.com or seed secrets manually',
+      seeded: [],
+      failed: { name: firstName, reason: `invalid repo "${input.repo}" (expected <owner>/<repo>)` },
     };
   }
-  if (res.exitCode !== 0) {
+  const { owner, repo } = parsed;
+  const octokit = client(input.token);
+
+  let key: Awaited<ReturnType<typeof octokit.actions.getRepoPublicKey>>;
+  try {
+    key = await octokit.actions.getRepoPublicKey({ owner, repo });
+  } catch (err) {
     return {
-      written: false,
-      reason: `gh secret set failed (${res.exitCode ?? 'signal'}): ${res.stderr || res.stdout}`,
+      seeded: [],
+      failed: { name: firstName, reason: `fetching the repo public key failed: ${(err as Error).message}` },
     };
   }
-  return { written: true };
+
+  await _sodium.ready;
+  const sodium = _sodium;
+  const publicKey = sodium.from_base64(key.data.key, sodium.base64_variants.ORIGINAL);
+
+  const seeded: string[] = [];
+  for (const s of input.secrets) {
+    const encrypted_value = sodium.to_base64(
+      sodium.crypto_box_seal(sodium.from_string(s.value), publicKey),
+      sodium.base64_variants.ORIGINAL,
+    );
+    try {
+      await octokit.actions.createOrUpdateRepoSecret({
+        owner,
+        repo,
+        secret_name: s.name,
+        encrypted_value,
+        key_id: key.data.key_id,
+      });
+    } catch (err) {
+      return { seeded, failed: { name: s.name, reason: `setting secret ${s.name} failed: ${(err as Error).message}` } };
+    }
+    seeded.push(s.name);
+  }
+  return { seeded };
 }
 
 // ----------------------------------------------------------------------------
