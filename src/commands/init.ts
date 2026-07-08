@@ -12,7 +12,7 @@ import {
   createBranch,
   createRepoFromTemplate,
   openPullRequest,
-  setRepoSecret,
+  setRepoSecrets,
 } from '../lib/github.js';
 import { generatePgsodiumRootKey, renderProdTfvars } from '../lib/secrets.js';
 import { findWorkspace } from '../lib/tfc.js';
@@ -108,7 +108,7 @@ export const initCommand = new Command('init')
 
     const created = await createRegionRepo({ opts, ghToken, owner, newRepoName, newRepoFull, region });
     if (publicConfig) {
-      await seedRepoSecrets({ publicConfig, newRepoFull });
+      await seedRepoSecrets({ ghToken, publicConfig, newRepoFull });
     }
     const pr = publicConfig
       ? await openInfraPr({ opts, ghToken, region, newRepoFull, publicConfig, created })
@@ -341,10 +341,11 @@ async function createRegionRepo(args: {
 
 // ---- Execute: seed 5 repo secrets (production mode only) ----
 async function seedRepoSecrets(args: {
+  ghToken: string;
   publicConfig: PublicConfig;
   newRepoFull: string;
 }): Promise<void> {
-  const { publicConfig, newRepoFull } = args;
+  const { ghToken, publicConfig, newRepoFull } = args;
   const secrets: Array<{ name: string; value: string }> = [
     { name: 'CLOUDFLARE_API_TOKEN', value: publicConfig.cfToken },
     { name: 'CLOUDFLARE_ACCOUNT_ID', value: publicConfig.cfAccount },
@@ -354,28 +355,22 @@ async function seedRepoSecrets(args: {
   ];
   const secSpin = p.spinner();
   secSpin.start(`Seeding ${secrets.length} repo secrets…`);
-  const seeded: string[] = [];
-  for (const s of secrets) {
-    const r = await setRepoSecret({ repo: newRepoFull, name: s.name, value: s.value });
-    if (!r.written) {
-      secSpin.stop(pc.red(`✗ Failed to set ${s.name}: ${r.reason ?? 'unknown'}`));
-      const remaining = secrets
-        .slice(secrets.findIndex((x) => x.name === s.name))
-        .map((x) => x.name);
-      p.cancel(
-        [
-          seeded.length > 0
-            ? `Already seeded on ${newRepoFull}: ${seeded.join(', ')}.`
-            : `Nothing seeded yet on ${newRepoFull}.`,
-          `Still pending: ${remaining.join(', ')}.`,
-          '',
-          `Make sure \`gh\` is installed and signed in (\`gh auth login\`).`,
-          `Re-run with --use-existing-repo to retry (GitHub will overwrite the already-set secrets idempotently).`,
-        ].join('\n'),
-      );
-      process.exit(1);
-    }
-    seeded.push(s.name);
+  const { seeded, failed } = await setRepoSecrets({ token: ghToken, repo: newRepoFull, secrets });
+  if (failed) {
+    secSpin.stop(pc.red(`✗ Failed to set ${failed.name}: ${failed.reason}`));
+    const remaining = secrets.slice(seeded.length).map((x) => x.name);
+    p.cancel(
+      [
+        seeded.length > 0
+          ? `Already seeded on ${newRepoFull}: ${seeded.join(', ')}.`
+          : `Nothing seeded yet on ${newRepoFull}.`,
+        `Still pending: ${remaining.join(', ')}.`,
+        '',
+        `Make sure your --gh-token PAT has "Actions Secrets: write" (fine-grained) or \`repo\` scope (classic).`,
+        `Re-run with --use-existing-repo to retry (GitHub will overwrite the already-set secrets idempotently).`,
+      ].join('\n'),
+    );
+    process.exit(1);
   }
   secSpin.stop(pc.green(`✓ Seeded ${secrets.length} secrets on ${newRepoFull}`));
 }

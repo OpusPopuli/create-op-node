@@ -33,6 +33,7 @@
     "cloudflare": "^4.0.0",
     "commander": "^13.1.0",
     "execa": "^9.5.2",
+    "libsodium-wrappers": "^0.8.4",
     "picocolors": "^1.1.1",
     "zod": "^3.24.1"
   },

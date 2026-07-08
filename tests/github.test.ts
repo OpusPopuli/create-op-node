@@ -9,6 +9,8 @@ const createOrUpdateFileMock = vi.hoisted(() => vi.fn());
 const getRefMock = vi.hoisted(() => vi.fn());
 const createRefMock = vi.hoisted(() => vi.fn());
 const createPullMock = vi.hoisted(() => vi.fn());
+const getRepoPublicKeyMock = vi.hoisted(() => vi.fn());
+const createOrUpdateSecretMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@octokit/rest', () => ({
   Octokit: vi.fn(() => ({
@@ -24,15 +26,21 @@ vi.mock('@octokit/rest', () => ({
     pulls: {
       create: createPullMock,
     },
+    actions: {
+      getRepoPublicKey: getRepoPublicKeyMock,
+      createOrUpdateRepoSecret: createOrUpdateSecretMock,
+    },
   })),
 }));
+
+import _sodium from 'libsodium-wrappers';
 
 import {
   commitFile,
   createBranch,
   createRepoFromTemplate,
   openPullRequest,
-  setRepoSecret,
+  setRepoSecrets,
   _resetClient,
 } from '../src/lib/github.js';
 
@@ -45,6 +53,8 @@ beforeEach(() => {
   getRefMock.mockReset();
   createRefMock.mockReset();
   createPullMock.mockReset();
+  getRepoPublicKeyMock.mockReset();
+  createOrUpdateSecretMock.mockReset();
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -97,50 +107,104 @@ describe('createRepoFromTemplate', () => {
   });
 });
 
-describe('setRepoSecret', () => {
-  it('pipes the value via stdin to `gh secret set`', async () => {
-    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+describe('setRepoSecrets', () => {
+  async function freshRepoKeypair() {
+    await _sodium.ready;
+    const kp = _sodium.crypto_box_keypair();
+    const key = _sodium.to_base64(kp.publicKey, _sodium.base64_variants.ORIGINAL);
+    return { kp, key };
+  }
 
-    const r = await setRepoSecret({
+  function decrypt(kp: { publicKey: Uint8Array; privateKey: Uint8Array }, b64: string): string {
+    return _sodium.to_string(
+      _sodium.crypto_box_seal_open(
+        _sodium.from_base64(b64, _sodium.base64_variants.ORIGINAL),
+        kp.publicKey,
+        kp.privateKey,
+      ),
+    );
+  }
+
+  it('fetches the repo public key once and seals every secret under the PAT', async () => {
+    const { kp, key } = await freshRepoKeypair();
+    getRepoPublicKeyMock.mockResolvedValueOnce({ data: { key, key_id: 'kid-1' } });
+    createOrUpdateSecretMock.mockResolvedValue({ status: 201 });
+
+    const r = await setRepoSecrets({
+      token: 'pat-xyz',
       repo: 'OpusPopuli/opuspopuli-node-us-ca',
-      name: 'CLOUDFLARE_API_TOKEN',
-      value: 'cfat_secret',
+      secrets: [
+        { name: 'CLOUDFLARE_API_TOKEN', value: 'cfat_secret' },
+        { name: 'TF_API_TOKEN', value: 'tf_secret' },
+      ],
     });
 
-    expect(r.written).toBe(true);
-    const call = execaMock.mock.calls[0];
-    expect(call).toBeTruthy();
-    const [cmd, args, opts] = call as [string, string[], { input: string }];
-    expect(cmd).toBe('gh');
-    expect(args).toContain('secret');
-    expect(args).toContain('set');
-    expect(args).toContain('CLOUDFLARE_API_TOKEN');
-    expect(args).toContain('--body');
-    expect(args).toContain('-');
-    // Value MUST go via stdin, never argv.
-    expect(args).not.toContain('cfat_secret');
-    expect(opts.input).toBe('cfat_secret');
-  });
-
-  it('returns a clear reason on gh exit != 0', async () => {
-    execaMock.mockResolvedValueOnce({
-      exitCode: 1,
-      stdout: '',
-      stderr: 'gh: not authenticated',
+    expect(r).toEqual({ seeded: ['CLOUDFLARE_API_TOKEN', 'TF_API_TOKEN'] });
+    // Key fetched ONCE for both secrets; no shell-out.
+    expect(getRepoPublicKeyMock).toHaveBeenCalledTimes(1);
+    expect(getRepoPublicKeyMock).toHaveBeenCalledWith({
+      owner: 'OpusPopuli',
+      repo: 'opuspopuli-node-us-ca',
     });
+    expect(execaMock).not.toHaveBeenCalled();
+    expect(createOrUpdateSecretMock).toHaveBeenCalledTimes(2);
 
-    const r = await setRepoSecret({ repo: 'a/b', name: 'X', value: 'v' });
-    expect(r.written).toBe(false);
-    expect(r.reason).toContain('not authenticated');
+    // Each ciphertext round-trips back to its plaintext (valid, decryptable, and
+    // the plaintext never appears in the payload).
+    const [put1, put2] = createOrUpdateSecretMock.mock.calls.map(
+      (c) => c[0] as { secret_name: string; encrypted_value: string; key_id: string },
+    );
+    expect(put1!.key_id).toBe('kid-1');
+    expect(put1!.encrypted_value).not.toContain('cfat_secret');
+    expect(decrypt(kp, put1!.encrypted_value)).toBe('cfat_secret');
+    expect(decrypt(kp, put2!.encrypted_value)).toBe('tf_secret');
   });
 
-  it("returns 'gh not installed' cleanly on ENOENT (B2 — supports the --gh-token escape hatch when gh isn't on PATH)", async () => {
-    const err = Object.assign(new Error('spawn gh ENOENT'), { code: 'ENOENT' });
-    execaMock.mockRejectedValueOnce(err);
+  it('reports the public-key fetch failure without attempting any PUT', async () => {
+    getRepoPublicKeyMock.mockRejectedValueOnce(new Error('403 Forbidden'));
+    const r = await setRepoSecrets({
+      token: 'pat',
+      repo: 'a/b',
+      secrets: [{ name: 'X', value: 'v' }],
+    });
+    expect(r.seeded).toEqual([]);
+    expect(r.failed?.reason).toContain('403');
+    expect(createOrUpdateSecretMock).not.toHaveBeenCalled();
+  });
 
-    const r = await setRepoSecret({ repo: 'a/b', name: 'X', value: 'v' });
-    expect(r.written).toBe(false);
-    expect(r.reason).toContain('not installed');
+  it('stops at the first PUT failure and reports what was seeded', async () => {
+    const { key } = await freshRepoKeypair();
+    getRepoPublicKeyMock.mockResolvedValueOnce({ data: { key, key_id: 'k' } });
+    createOrUpdateSecretMock
+      .mockResolvedValueOnce({ status: 201 }) // first succeeds
+      .mockRejectedValueOnce(new Error('422 Unprocessable')); // second fails
+
+    const r = await setRepoSecrets({
+      token: 'pat',
+      repo: 'a/b',
+      secrets: [
+        { name: 'FIRST', value: 'v1' },
+        { name: 'SECOND', value: 'v2' },
+        { name: 'THIRD', value: 'v3' },
+      ],
+    });
+    expect(r.seeded).toEqual(['FIRST']);
+    expect(r.failed).toMatchObject({ name: 'SECOND' });
+    expect(r.failed?.reason).toContain('422');
+    // Stopped — THIRD never attempted; key still fetched once.
+    expect(createOrUpdateSecretMock).toHaveBeenCalledTimes(2);
+    expect(getRepoPublicKeyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a malformed repo slug before hitting the API', async () => {
+    const r = await setRepoSecrets({
+      token: 'pat',
+      repo: 'no-slash',
+      secrets: [{ name: 'X', value: 'v' }],
+    });
+    expect(r.seeded).toEqual([]);
+    expect(r.failed?.reason).toContain('expected <owner>/<repo>');
+    expect(getRepoPublicKeyMock).not.toHaveBeenCalled();
   });
 });
 
