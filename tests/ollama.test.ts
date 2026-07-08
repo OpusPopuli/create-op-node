@@ -35,6 +35,19 @@ function stubFetch(handler: (url: string, init?: RequestInit) => { status: numbe
   return fn;
 }
 
+// A fetch that never settles on its own but rejects (like the real one) when
+// its AbortSignal fires — lets fake timers drive the request timeout.
+function stubHangingFetch() {
+  return vi.fn(
+    (_url: string, init?: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('The operation was aborted.', 'AbortError')),
+        );
+      }),
+  );
+}
+
 describe('DEFAULT_MODELS + OLLAMA_URL', () => {
   it('uses qwen3.5:9b + nomic-embed-text by default', () => {
     expect(DEFAULT_MODELS).toEqual(['qwen3.5:9b', 'nomic-embed-text']);
@@ -92,6 +105,16 @@ describe('checkOllamaHealth', () => {
     const h = await checkOllamaHealth();
     expect(h.models).toEqual([]);
   });
+
+  it('returns reachable=false when the request times out (hung daemon)', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', stubHangingFetch());
+    const pending = checkOllamaHealth();
+    await vi.advanceTimersByTimeAsync(6_000); // > OLLAMA_HEALTH_TIMEOUT_MS (5s)
+    const h = await pending;
+    vi.useRealTimers();
+    expect(h.reachable).toBe(false);
+  });
 });
 
 describe('pullModel', () => {
@@ -144,6 +167,30 @@ describe('warmModel', () => {
     const r = await warmModel('x');
     expect(r.ok).toBe(false);
     expect(r.reason).toContain('HTTP 503');
+  });
+
+  it('times out with a clear reason when warming hangs', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', stubHangingFetch());
+    const pending = warmModel('qwen3.5:9b');
+    await vi.advanceTimersByTimeAsync(121_000); // > OLLAMA_WARM_TIMEOUT_MS (120s)
+    const r = await pending;
+    vi.useRealTimers();
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toMatch(/timed out after 120s/i);
+  });
+
+  it('reports a non-timeout fetch failure with the underlying message', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('ECONNREFUSED'))),
+    );
+    const r = await warmModel('qwen3.5:9b');
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toContain('ECONNREFUSED');
+      expect(r.reason).not.toMatch(/timed out/i);
+    }
   });
 });
 

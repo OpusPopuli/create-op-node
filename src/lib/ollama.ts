@@ -19,6 +19,15 @@ import { safeExeca } from './exec.js';
 
 export const OLLAMA_URL = 'http://localhost:11434';
 
+/** Health probe (`/api/tags`) is a metadata read — it should answer almost
+ *  instantly, so a short timeout keeps a hung daemon from stalling bootstrap. */
+const OLLAMA_HEALTH_TIMEOUT_MS = 5_000;
+
+/** Warming (`/api/generate`) loads the model into VRAM on first call, which
+ *  for a 50 GB model legitimately takes minutes — hence a generous cap that
+ *  still bounds a truly-wedged daemon. */
+const OLLAMA_WARM_TIMEOUT_MS = 120_000;
+
 /** Default LLM the platform ships against — small enough to pull on a fresh
  *  Studio in minutes, capable enough to validate the inference path
  *  end-to-end. Operators can override at bootstrap time with `--llm-model`,
@@ -72,8 +81,10 @@ export async function startOllamaService(): Promise<{ ok: boolean; reason?: stri
 }
 
 export async function checkOllamaHealth(url: string = OLLAMA_URL): Promise<OllamaHealth> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), OLLAMA_HEALTH_TIMEOUT_MS);
   try {
-    const res = await fetch(`${url}/api/tags`);
+    const res = await fetch(`${url}/api/tags`, { signal: ctrl.signal });
     if (!res.ok) return { reachable: false, models: [] };
     const body = (await res.json()) as { models?: Array<{ name?: string }> };
     const models = (body.models ?? [])
@@ -81,7 +92,11 @@ export async function checkOllamaHealth(url: string = OLLAMA_URL): Promise<Ollam
       .filter((n) => n.length > 0);
     return { reachable: true, models };
   } catch {
+    // Unreachable, non-200, non-JSON, or timed out (AbortError) — all "not
+    // healthy" from the caller's perspective.
     return { reachable: false, models: [] };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -118,11 +133,14 @@ export interface WarmResult {
  * not on a real user. We stream=false + ignore the response body.
  */
 export async function warmModel(name: string, url: string = OLLAMA_URL): Promise<WarmResult> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), OLLAMA_WARM_TIMEOUT_MS);
   try {
     const res = await fetch(`${url}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: name, prompt: 'hi', stream: false }),
+      signal: ctrl.signal,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -135,10 +153,13 @@ export async function warmModel(name: string, url: string = OLLAMA_URL): Promise
     await res.text();
     return { ok: true };
   } catch (err) {
-    return {
-      ok: false,
-      reason: `warm ${name} failed: ${(err as Error).message}`,
-    };
+    const reason =
+      (err as Error).name === 'AbortError'
+        ? `warm ${name} timed out after ${OLLAMA_WARM_TIMEOUT_MS / 1000}s`
+        : `warm ${name} failed: ${(err as Error).message}`;
+    return { ok: false, reason };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
