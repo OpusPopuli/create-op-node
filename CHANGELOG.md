@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3](https://github.com/OpusPopuli/create-op-node/compare/v0.11.2...v0.11.3) (2026-07-09)
+
+
+### Bug Fixes
+
+* **polling:** retry a transient output fetch instead of reporting output-missing ([ded70a7](https://github.com/OpusPopuli/create-op-node/commit/ded70a7e647792a0d18c75455ebc864a43868b7a))
+* **polling:** retry a transient output fetch instead of reporting output-missing ([f5d6137](https://github.com/OpusPopuli/create-op-node/commit/f5d6137bb6d3cb45079b75442eb1cb11151b3549)), closes [#59](https://github.com/OpusPopuli/create-op-node/issues/59)
+
 ## [0.11.2](https://github.com/OpusPopuli/create-op-node/compare/v0.11.1...v0.11.2) (2026-07-08)
 
 
