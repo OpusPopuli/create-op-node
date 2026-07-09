@@ -198,6 +198,8 @@ describe('renderLaunchAgentPlist', () => {
         supabaseAnonKey: SAFE_JWT,
         supabaseServiceRoleKey: SAFE_JWT,
         dashboardPassword: SAFE_BASE64,
+        gatewayHmacSecret: SAFE_BASE64,
+        grafanaAdminPassword: SAFE_BASE64,
         supabaseUrl: 'http://localhost:8000',
       });
       expect(out).toContain('launchctl setenv POSTGRES_PASSWORD');
@@ -205,6 +207,8 @@ describe('renderLaunchAgentPlist', () => {
       expect(out).toContain('launchctl setenv SUPABASE_ANON_KEY');
       expect(out).toContain('launchctl setenv SUPABASE_SERVICE_ROLE_KEY');
       expect(out).toContain('launchctl setenv DASHBOARD_PASSWORD');
+      expect(out).toContain(`launchctl setenv GATEWAY_HMAC_SECRET "${SAFE_BASE64}"`);
+      expect(out).toContain(`launchctl setenv GRAFANA_ADMIN_PASSWORD "${SAFE_BASE64}"`);
       expect(out).toContain('launchctl setenv SUPABASE_URL "http://localhost:8000"');
     });
 
@@ -216,6 +220,8 @@ describe('renderLaunchAgentPlist', () => {
         'SUPABASE_ANON_KEY',
         'SUPABASE_SERVICE_ROLE_KEY',
         'DASHBOARD_PASSWORD',
+        'GATEWAY_HMAC_SECRET',
+        'GRAFANA_ADMIN_PASSWORD',
         'SUPABASE_URL',
       ]) {
         expect(out).not.toContain(v);
@@ -228,6 +234,8 @@ describe('renderLaunchAgentPlist', () => {
       ['supabaseAnonKey', 'has`backtick'],
       ['supabaseServiceRoleKey', 'has space'],
       ['dashboardPassword', 'has\nnewline'],
+      ['gatewayHmacSecret', 'has;evil'],
+      ['grafanaAdminPassword', 'has$dollar'],
     ])('refuses %s with shell metacharacters', (field, evil) => {
       expect(() =>
         renderLaunchAgentPlist({ keyFilePath: '/k', [field]: evil } as Parameters<

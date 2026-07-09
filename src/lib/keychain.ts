@@ -35,7 +35,9 @@ export type SecretAccount =
   | 'dashboard-password'
   | 'prompts-db-password'
   | 'prompt-service-api-key'
-  | 'prompt-service-admin-api-key';
+  | 'prompt-service-admin-api-key'
+  | 'gateway-hmac-secret'
+  | 'grafana-admin-password';
 
 export interface SecretCoordinates {
   /** Region label, used to scope the service identifier. */
@@ -59,6 +61,8 @@ const FRIENDLY: Record<SecretAccount, string> = {
   'prompts-db-password': 'prompt-service Postgres password',
   'prompt-service-api-key': 'prompt-service HMAC API key',
   'prompt-service-admin-api-key': 'prompt-service admin API key',
+  'gateway-hmac-secret': 'API Gateway HMAC secret',
+  'grafana-admin-password': 'Grafana admin password',
 };
 
 function labelFor(coords: SecretCoordinates): string {

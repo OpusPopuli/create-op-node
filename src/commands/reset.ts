@@ -13,7 +13,8 @@
  *
  * Accounts to wipe (under service `org.opuspopuli.<region>`):
  *   pgsodium-root-key, tunnel-token, postgres-password, jwt-secret,
- *   supabase-anon-key, supabase-service-role-key, dashboard-password
+ *   supabase-anon-key, supabase-service-role-key, dashboard-password,
+ *   gateway-hmac-secret, grafana-admin-password
  *
  * Wiping pgsodium-root-key permanently destroys every value in
  * supabase_vault for this region. Wiping postgres-password locks you out

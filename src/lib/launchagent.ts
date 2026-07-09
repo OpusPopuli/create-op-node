@@ -118,6 +118,14 @@ export interface PlistInput {
   supabaseAnonKey?: string;
   supabaseServiceRoleKey?: string;
   dashboardPassword?: string;
+  /** API Gateway HMAC secret (base64url). When set, plist exports
+   *  `GATEWAY_HMAC_SECRET`. The derived `API_KEYS` JSON is NOT emitted here:
+   *  its `{`/`"`/`:` characters can't pass a `launchctl setenv` value safely,
+   *  so the op-compose wrapper (and bootstrap's own compose env) render it. */
+  gatewayHmacSecret?: string;
+  /** Grafana admin password (base64url). When set, plist exports
+   *  `GRAFANA_ADMIN_PASSWORD`. */
+  grafanaAdminPassword?: string;
   /** Public-facing Supabase URL — what browsers + microservices use to reach
    *  Kong. Local dev: `http://localhost:8000`. Tunnel: `https://supabase.<domain>`. */
   supabaseUrl?: string;
@@ -190,6 +198,8 @@ function validatePlistInput(input: PlistInput): void {
     ['supabaseAnonKey', input.supabaseAnonKey],
     ['supabaseServiceRoleKey', input.supabaseServiceRoleKey],
     ['dashboardPassword', input.dashboardPassword],
+    ['gatewayHmacSecret', input.gatewayHmacSecret],
+    ['grafanaAdminPassword', input.grafanaAdminPassword],
   ];
   for (const [name, value] of supabaseFields) {
     if (value !== undefined && !SAFE_LAUNCHCTL_VALUE_RE.test(value)) {
@@ -231,6 +241,12 @@ function buildSetenvCommand(input: PlistInput): string {
       : []),
     ...(input.dashboardPassword !== undefined
       ? [`launchctl setenv DASHBOARD_PASSWORD "${input.dashboardPassword}"`]
+      : []),
+    ...(input.gatewayHmacSecret !== undefined
+      ? [`launchctl setenv GATEWAY_HMAC_SECRET "${input.gatewayHmacSecret}"`]
+      : []),
+    ...(input.grafanaAdminPassword !== undefined
+      ? [`launchctl setenv GRAFANA_ADMIN_PASSWORD "${input.grafanaAdminPassword}"`]
       : []),
     ...(input.supabaseUrl !== undefined
       ? [`launchctl setenv SUPABASE_URL "${input.supabaseUrl}"`]
@@ -289,6 +305,10 @@ export interface SetupInput {
   supabaseAnonKey?: string;
   supabaseServiceRoleKey?: string;
   dashboardPassword?: string;
+  /** API Gateway HMAC secret — exported as GATEWAY_HMAC_SECRET. */
+  gatewayHmacSecret?: string;
+  /** Grafana admin password — exported as GRAFANA_ADMIN_PASSWORD. */
+  grafanaAdminPassword?: string;
   /** Public-facing Supabase URL. */
   supabaseUrl?: string;
   paths?: LaunchAgentPaths;
@@ -321,6 +341,10 @@ function plistInputFromSetup(input: SetupInput, keyFilePath: string): PlistInput
       ? { supabaseServiceRoleKey: input.supabaseServiceRoleKey }
       : {}),
     ...(input.dashboardPassword !== undefined ? { dashboardPassword: input.dashboardPassword } : {}),
+    ...(input.gatewayHmacSecret !== undefined ? { gatewayHmacSecret: input.gatewayHmacSecret } : {}),
+    ...(input.grafanaAdminPassword !== undefined
+      ? { grafanaAdminPassword: input.grafanaAdminPassword }
+      : {}),
     ...(input.supabaseUrl !== undefined ? { supabaseUrl: input.supabaseUrl } : {}),
   };
 }

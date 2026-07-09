@@ -25,9 +25,29 @@ describe('renderOpComposeScript', () => {
       'AUTH_JWT_SECRET',
       'SUPABASE_URL',
       'TUNNEL_TOKEN',
+      'GATEWAY_HMAC_SECRET',
+      'API_KEYS',
+      'GRAFANA_ADMIN_PASSWORD',
     ]) {
       expect(s).toContain(v);
     }
+  });
+
+  it('reads gateway-hmac-secret + grafana-admin-password as REQUIRED secrets', () => {
+    // Both are needed in every mode (the gateway signs microservice requests
+    // regardless of Tunnel exposure), so the wrapper must require_secret them —
+    // a missing entry should hard-fail, not silently fall through.
+    const s = renderOpComposeScript({ region: 'us-ca' });
+    expect(s).toMatch(/GATEWAY_HMAC_SECRET="\$\(require_secret gateway-hmac-secret\)"/);
+    expect(s).toMatch(/GRAFANA_ADMIN_PASSWORD="\$\(require_secret grafana-admin-password\)"/);
+  });
+
+  it('renders API_KEYS as JSON derived from GATEWAY_HMAC_SECRET (api-gateway key = the secret)', () => {
+    // The api-gateway's key in API_KEYS MUST equal GATEWAY_HMAC_SECRET so the
+    // gateway's HMAC signature verifies at each microservice. The wrapper
+    // builds the JSON from the single Keychain value.
+    const s = renderOpComposeScript({ region: 'us-ca' });
+    expect(s).toMatch(/export API_KEYS="\{\\"api-gateway\\":\\"\$\{GATEWAY_HMAC_SECRET\}\\"\}"/);
   });
 
   it('ends with `exec docker compose "$@"` so all args pass through', () => {

@@ -4,14 +4,18 @@ import { describe, expect, it } from 'vitest';
 
 import {
   generateDashboardPassword,
+  generateGatewayHmacSecret,
+  generateGrafanaAdminPassword,
   generateHmacApiKey,
   generateJwtSecret,
   generatePgsodiumRootKey,
   generatePostgresPassword,
+  renderApiKeys,
   renderProdTfvars,
   signSupabaseJwt,
   verifySupabaseJwt,
 } from '../src/lib/secrets.js';
+import { WELL_KNOWN_GATEWAY_HMAC_SECRET } from '../src/lib/constants.js';
 
 describe('generatePgsodiumRootKey', () => {
   it('returns 64 lowercase hex chars', () => {
@@ -107,6 +111,55 @@ describe('generateHmacApiKey', () => {
 
   it('produces a different value on every call', () => {
     expect(generateHmacApiKey()).not.toBe(generateHmacApiKey());
+  });
+});
+
+describe('generateGatewayHmacSecret', () => {
+  it('returns a URL-safe base64url string (no + / = chars)', () => {
+    const s = generateGatewayHmacSecret();
+    // 32 bytes → 43 chars base64url unpadded
+    expect(s.length).toBeGreaterThanOrEqual(40);
+    expect(s).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(s).not.toMatch(/[+/=]/);
+  });
+
+  it('is never the well-known template default (statistically certain)', () => {
+    // The whole point of generating it — a bootstrapped node must not carry
+    // the shared placeholder every checkout of the template ships.
+    for (let i = 0; i < 20; i++) {
+      expect(generateGatewayHmacSecret()).not.toBe(WELL_KNOWN_GATEWAY_HMAC_SECRET);
+    }
+  });
+
+  it('produces a different value on every call', () => {
+    expect(generateGatewayHmacSecret()).not.toBe(generateGatewayHmacSecret());
+  });
+});
+
+describe('renderApiKeys', () => {
+  it('wraps the gateway secret as {"api-gateway":"<secret>"}', () => {
+    const secret = 'abc123_-XYZ';
+    expect(renderApiKeys(secret)).toBe('{"api-gateway":"abc123_-XYZ"}');
+  });
+
+  it('parses back to an object whose api-gateway key equals the input secret', () => {
+    const secret = generateGatewayHmacSecret();
+    const parsed = JSON.parse(renderApiKeys(secret)) as Record<string, string>;
+    expect(parsed['api-gateway']).toBe(secret);
+  });
+});
+
+describe('generateGrafanaAdminPassword', () => {
+  it('returns a URL-safe base64url string', () => {
+    const pw = generateGrafanaAdminPassword();
+    expect(pw).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(pw).not.toMatch(/[+/=]/);
+    expect(pw.length).toBeGreaterThanOrEqual(24);
+  });
+
+  it('is never the literal string "admin" and differs across calls', () => {
+    expect(generateGrafanaAdminPassword()).not.toBe('admin');
+    expect(generateGrafanaAdminPassword()).not.toBe(generateGrafanaAdminPassword());
   });
 });
 

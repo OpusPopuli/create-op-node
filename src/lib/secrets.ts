@@ -77,6 +77,46 @@ export function generateHmacApiKey(): string {
 }
 
 /**
+ * 32-byte CSPRNG HMAC secret rendered as base64url. Used for
+ * `GATEWAY_HMAC_SECRET` — the shared secret the API Gateway signs
+ * gateway→microservice requests with (X-HMAC-Auth). The same value is
+ * JSON-wrapped into `API_KEYS` as `{"api-gateway":"<this>"}` so each
+ * microservice accepts the gateway's signature.
+ *
+ * MUST replace the template's well-known compose default
+ * (WELL_KNOWN_GATEWAY_HMAC_SECRET) on any node exposed via the Cloudflare
+ * Tunnel — every checkout of the template ships that identical placeholder.
+ *
+ * Base64url alphabet (`[A-Za-z0-9_-]`) keeps the value safe to embed inside
+ * the `API_KEYS` JSON string without escaping and inside HTTP headers.
+ */
+export function generateGatewayHmacSecret(): string {
+  return base64url(randomBytes(32));
+}
+
+/**
+ * Render the `API_KEYS` env value from a `GATEWAY_HMAC_SECRET`. The backend
+ * microservices read `API_KEYS` as a JSON object mapping caller name → key;
+ * the api-gateway's key MUST equal `GATEWAY_HMAC_SECRET` so the gateway's
+ * HMAC signature verifies. `JSON.stringify` handles any escaping (the
+ * base64url alphabet never needs it, but this keeps the contract explicit).
+ */
+export function renderApiKeys(gatewayHmacSecret: string): string {
+  return JSON.stringify({ 'api-gateway': gatewayHmacSecret });
+}
+
+/**
+ * 24-byte CSPRNG password rendered as base64url. Used for
+ * `GRAFANA_ADMIN_PASSWORD` — overrides Grafana's `admin`/`admin` compose
+ * default. Grafana is bound to loopback by default but the runbook's Phase 10
+ * exposes it via the Tunnel, so a real value matters there. base64url keeps
+ * it free of shell/URL metacharacters for the op-compose wrapper export.
+ */
+export function generateGrafanaAdminPassword(): string {
+  return base64url(randomBytes(24));
+}
+
+/**
  * 48-byte (384-bit) base64 secret used to sign every Supabase-issued JWT.
  *
  * gotrue, postgrest, storage, and studio all verify tokens against this

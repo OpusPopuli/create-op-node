@@ -55,6 +55,19 @@ export const URL_SAFE_PASSWORD_RE = /^[A-Za-z0-9_-]+$/;
  *  and `:` for the port. Letters, digits, `-`, `_`, `.`, `:`, `/`. */
 export const SAFE_URL_RE = /^[A-Za-z0-9:/_.-]+$/;
 
+/** The well-known placeholder the opuspopuli-node template ships as the
+ *  compose-level default for `GATEWAY_HMAC_SECRET` (and, JSON-wrapped, for
+ *  `API_KEYS`). Every checkout of the template carries this identical string,
+ *  so it MUST never be the live value on a node exposed via the Cloudflare
+ *  Tunnel (`public` profile). bootstrap generates a real per-node value and
+ *  refuses to activate the public profile if this default is still in force.
+ *
+ *  Kept as a single constant so the generator, the guard, and the tests all
+ *  compare against the exact same literal. */
+export const WELL_KNOWN_GATEWAY_HMAC_SECRET =
+  // eslint-disable-next-line sonarjs/hardcoded-secret-signatures, sonarjs/no-hardcoded-passwords -- this is the PUBLIC well-known template default we are guarding AGAINST, not a live credential
+  'local-only-hmac-secret-rotate-before-tunnel-exposure';
+
 /** Default network timeout used by `verify`'s probes (TLS handshake, HTTP
  *  GET /health, GraphQL POST). One number so tls.ts and http.ts don't drift. */
 export const VERIFY_NETWORK_TIMEOUT_MS = 10_000;
