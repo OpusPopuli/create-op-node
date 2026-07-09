@@ -269,33 +269,50 @@ export async function getRunStatus(
 }
 
 /**
- * Pull a named output value from a workspace's current state version.
- * Returns `null` when:
+ * Discriminated result of pulling a named output. The three cases must stay
+ * distinct so the poll loop can tell a recoverable transient apart from a
+ * genuine absence (#59):
  *
- *   - the workspace, token, or HTTP call fails (any non-200 status)
- *   - the named output isn't present in the response
- *   - the output value isn't a string (e.g. the operator changed the type)
+ *   - `value`  — the output is present and usable.
+ *   - `absent` — the request succeeded (HTTP 200) but the named output isn't
+ *                in the state, or its value isn't a string (e.g. the operator
+ *                changed the type). Permanent — retrying won't help.
+ *   - `error`  — the HTTP call failed (`getJson` degraded a timeout/blip to
+ *                `status: 0`, or a non-200 such as a 404/425 while the state
+ *                version is still settling). Retryable.
+ */
+export type OutputResult =
+  | { kind: 'value'; value: string }
+  | { kind: 'absent' }
+  | { kind: 'error' };
+
+/**
+ * Pull a named output value from a workspace's current state version.
  *
  * Caller should poll the matching run for `applied` status first; an
- * in-flight workspace returns a 404 / 425 here.
+ * in-flight workspace returns a 404 / 425 here, which surfaces as `error`
+ * (retryable) rather than `absent` — a network blip on the final fetch must
+ * not be misreported as a missing output. See {@link OutputResult}.
  */
 export async function fetchOutput(
   auth: TfcAuth,
   workspaceId: string,
   outputName: string,
-): Promise<string | null> {
+): Promise<OutputResult> {
   const res = await getJson(
     auth.token,
     `/workspaces/${encodeURIComponent(workspaceId)}/current-state-version-outputs`,
   );
-  if (res.status !== 200) return null;
+  // status 0 (timeout/network) or any non-200: could be transient (the state
+  // version may still be settling right after apply), so let the caller retry.
+  if (res.status !== 200) return { kind: 'error' };
 
   const body = res.body as {
     data?: Array<{ attributes?: { name?: string; value?: unknown; sensitive?: boolean } }>;
   };
   const match = body.data?.find((o) => o.attributes?.name === outputName);
-  if (!match) return null;
+  if (!match) return { kind: 'absent' };
 
   const value = match.attributes?.value;
-  return typeof value === 'string' ? value : null;
+  return typeof value === 'string' ? { kind: 'value', value } : { kind: 'absent' };
 }

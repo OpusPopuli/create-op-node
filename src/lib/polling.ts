@@ -13,7 +13,7 @@
  * timers or HTTP. `sleep` is a parameter; tests pass a no-op.
  */
 
-import { fetchOutput, findWorkspace, getRunStatus } from './tfc.js';
+import { fetchOutput, findWorkspace, getRunStatus, type OutputResult } from './tfc.js';
 
 export interface WaitInput {
   token: string;
@@ -149,20 +149,35 @@ async function waitForRunOutput(
     );
     if (r?.finished) {
       if (!r.succeeded) return { kind: 'run-failed', status: r.status };
-      deps.onProgress?.('fetching');
-      const value = await safePoll(
-        () =>
-          deps.fetchOutput(
-            { token: input.token, organization: input.organization },
-            input.workspaceId,
-            input.outputName,
-          ),
-        () => deps.onProgress?.('retry'),
-      );
-      return value !== null ? { kind: 'success', value } : { kind: 'output-missing' };
+      const out = await tryFetchOutput(input, deps);
+      if (out.kind === 'value') return { kind: 'success', value: out.value };
+      if (out.kind === 'absent') return { kind: 'output-missing' };
+      // out.kind === 'error': a transient failure fetching the output of an
+      // already-applied run. Don't misreport it as output-missing — fall
+      // through, sleep, and retry within the remaining run budget. (#59)
     }
     await deps.sleep(budgets.pollMs);
   }
 
   return { kind: 'timeout' };
+}
+
+// Fetch the output once, normalizing a thrown/degraded call into the same
+// `error` case fetchOutput already uses for a non-200 — so the run loop has a
+// single retryable signal. `onProgress('retry')` fires on a transient error so
+// the UI can show the hiccup instead of stalling silently. (#59)
+async function tryFetchOutput(input: WaitInput, deps: WaitDeps): Promise<OutputResult> {
+  deps.onProgress?.('fetching');
+  const out = await safePoll(
+    () =>
+      deps.fetchOutput(
+        { token: input.token, organization: input.organization },
+        input.workspaceId,
+        input.outputName,
+      ),
+    () => deps.onProgress?.('retry'),
+  );
+  if (out === null) return { kind: 'error' }; // safePoll swallowed a throw
+  if (out.kind === 'error') deps.onProgress?.('retry');
+  return out;
 }

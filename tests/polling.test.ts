@@ -11,7 +11,7 @@ function makeDeps(over: Partial<WaitDeps>): WaitDeps {
   return {
     findWorkspace: vi.fn().mockResolvedValue(null),
     getRunStatus: vi.fn().mockResolvedValue(null),
-    fetchOutput: vi.fn().mockResolvedValue(null),
+    fetchOutput: vi.fn().mockResolvedValue({ kind: 'absent' }),
     sleep: vi.fn().mockResolvedValue(undefined),
     now: (() => {
       let t = 0;
@@ -39,14 +39,14 @@ describe('waitForApply', () => {
         .fn()
         .mockResolvedValueOnce({ id: 'run-1', status: 'planning', finished: false, succeeded: false })
         .mockResolvedValueOnce({ id: 'run-1', status: 'applied', finished: true, succeeded: true }),
-      fetchOutput: vi.fn().mockResolvedValue('eyJh-the-token'),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'value', value: 'eyJh-the-token' }),
     });
     const r = await waitForApply(INPUT, BUDGETS, deps);
     expect(r).toEqual({ kind: 'success', value: 'eyJh-the-token' });
     expect(deps.fetchOutput).toHaveBeenCalledTimes(1);
   });
 
-  it('returns output-missing when the run succeeded but the output is null', async () => {
+  it('returns output-missing when the run succeeded but the output is genuinely absent', async () => {
     const deps = makeDeps({
       getRunStatus: vi.fn().mockResolvedValueOnce({
         id: 'run-1',
@@ -54,7 +54,7 @@ describe('waitForApply', () => {
         finished: true,
         succeeded: true,
       }),
-      fetchOutput: vi.fn().mockResolvedValue(null),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'absent' }),
     });
     const r = await waitForApply(INPUT, BUDGETS, deps);
     expect(r.kind).toBe('output-missing');
@@ -97,7 +97,7 @@ describe('waitForApply', () => {
         finished: true,
         succeeded: true,
       }),
-      fetchOutput: vi.fn().mockResolvedValue('v'),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'value', value: 'v' }),
     });
     const r = await waitForApply({ ...INPUT, runId: null }, BUDGETS, deps);
     expect(r.kind).toBe('success');
@@ -136,7 +136,7 @@ describe('waitForApply', () => {
         .mockResolvedValueOnce({ id: 'run-late', status: 'planning', finished: false, succeeded: false })
         .mockResolvedValueOnce({ id: 'run-late', status: 'planning', finished: false, succeeded: false })
         .mockResolvedValueOnce({ id: 'run-late', status: 'applied', finished: true, succeeded: true }),
-      fetchOutput: vi.fn().mockResolvedValue('v'),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'value', value: 'v' }),
     });
     const r = await waitForApply({ ...INPUT, runId: null }, budgets, deps);
     // Critically: discovery used several ticks but the run phase still finished
@@ -152,7 +152,7 @@ describe('waitForApply — transient failure resilience (issue #31)', () => {
         .fn()
         .mockRejectedValueOnce(new Error('ECONNRESET'))
         .mockResolvedValueOnce({ id: 'run-1', status: 'applied', finished: true, succeeded: true }),
-      fetchOutput: vi.fn().mockResolvedValue('the-token'),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'value', value: 'the-token' }),
     });
     const r = await waitForApply(INPUT, BUDGETS, deps);
     expect(r).toEqual({ kind: 'success', value: 'the-token' });
@@ -168,7 +168,7 @@ describe('waitForApply — transient failure resilience (issue #31)', () => {
       getRunStatus: vi
         .fn()
         .mockResolvedValueOnce({ id: 'run-9', status: 'applied', finished: true, succeeded: true }),
-      fetchOutput: vi.fn().mockResolvedValue('tok'),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'value', value: 'tok' }),
     });
     const r = await waitForApply({ ...INPUT, runId: null }, BUDGETS, deps);
     expect(r.kind).toBe('success');
@@ -183,10 +183,45 @@ describe('waitForApply — transient failure resilience (issue #31)', () => {
         .fn()
         .mockRejectedValueOnce(new Error('blip'))
         .mockResolvedValueOnce({ id: 'run-1', status: 'applied', finished: true, succeeded: true }),
-      fetchOutput: vi.fn().mockResolvedValue('tok'),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'value', value: 'tok' }),
     });
     await waitForApply(INPUT, BUDGETS, deps);
     expect(onProgress).toHaveBeenCalledWith('retry');
+  });
+});
+
+describe('waitForApply — transient output-fetch retry (issue #59)', () => {
+  it('retries a transient error on the final output fetch, then succeeds', async () => {
+    const onProgress = vi.fn();
+    const deps = makeDeps({
+      onProgress,
+      getRunStatus: vi
+        .fn()
+        .mockResolvedValue({ id: 'run-1', status: 'applied', finished: true, succeeded: true }),
+      // First fetch after apply hits a network blip (error), second returns the value.
+      fetchOutput: vi
+        .fn()
+        .mockResolvedValueOnce({ kind: 'error' })
+        .mockResolvedValueOnce({ kind: 'value', value: 'recovered-token' }),
+    });
+    const r = await waitForApply(INPUT, BUDGETS, deps);
+    // Not misreported as output-missing — the blip is retried within budget.
+    expect(r).toEqual({ kind: 'success', value: 'recovered-token' });
+    expect(deps.fetchOutput).toHaveBeenCalledTimes(2);
+    expect(onProgress).toHaveBeenCalledWith('retry');
+  });
+
+  it('reports timeout (not output-missing) when the output fetch keeps erroring', async () => {
+    let now = 0;
+    const deps = makeDeps({
+      now: () => (now += 50),
+      getRunStatus: vi
+        .fn()
+        .mockResolvedValue({ id: 'run-1', status: 'applied', finished: true, succeeded: true }),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'error' }),
+    });
+    const r = await waitForApply(INPUT, BUDGETS, deps);
+    expect(r.kind).toBe('timeout');
   });
 });
 
@@ -204,7 +239,7 @@ describe('waitForApply — discovery checks before sleeping (issue #35)', () => 
       getRunStatus: vi
         .fn()
         .mockResolvedValueOnce({ id: 'run-0', status: 'applied', finished: true, succeeded: true }),
-      fetchOutput: vi.fn().mockResolvedValue('v'),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'value', value: 'v' }),
     });
     const r = await waitForApply({ ...INPUT, runId: null }, BUDGETS, deps);
     expect(r.kind).toBe('success');
@@ -221,7 +256,7 @@ describe('waitForApply — discovery checks before sleeping (issue #35)', () => 
       getRunStatus: vi
         .fn()
         .mockResolvedValueOnce({ id: 'run-x', status: 'applied', finished: true, succeeded: true }),
-      fetchOutput: vi.fn().mockResolvedValue('v'),
+      fetchOutput: vi.fn().mockResolvedValue({ kind: 'value', value: 'v' }),
     });
     const r = await waitForApply({ ...INPUT, runId: null }, budgets, deps);
     expect(deps.findWorkspace).toHaveBeenCalled();
