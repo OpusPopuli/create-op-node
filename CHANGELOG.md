@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/OpusPopuli/create-op-node/compare/v0.11.3...v0.12.0) (2026-07-09)
+
+
+### Features
+
+* **bootstrap:** generate gateway/grafana secrets + public-profile guard ([#27](https://github.com/OpusPopuli/create-op-node/issues/27)) ([628878a](https://github.com/OpusPopuli/create-op-node/commit/628878aaa39d9f3f5362acb425ef30a6f05af15c))
+* **bootstrap:** generate gateway/grafana secrets and guard tunnel exposure ([5b9fcc5](https://github.com/OpusPopuli/create-op-node/commit/5b9fcc5b5f5f800fb7047a790c0bffd6f1c26885)), closes [#27](https://github.com/OpusPopuli/create-op-node/issues/27)
+
 ## [0.11.3](https://github.com/OpusPopuli/create-op-node/compare/v0.11.2...v0.11.3) (2026-07-09)
 
 
