@@ -193,6 +193,19 @@ export SUPABASE_ANON_KEY="$(require_secret supabase-anon-key)"
 export SUPABASE_SERVICE_ROLE_KEY="$(require_secret supabase-service-role-key)"
 export DASHBOARD_PASSWORD="$(require_secret dashboard-password)"
 
+# API Gateway HMAC secret. The gateway signs gateway→microservice requests
+# with this (X-HMAC-Auth) in EVERY mode, so it is required. API_KEYS is the
+# JSON map each microservice reads to verify the caller; the api-gateway's
+# key MUST equal GATEWAY_HMAC_SECRET. We render the JSON from the single
+# Keychain value here so the compose \`\${GATEWAY_HMAC_SECRET:-…}\` /
+# \`\${API_KEYS:-…}\` well-known defaults are always overridden with a real
+# per-node value.
+export GATEWAY_HMAC_SECRET="$(require_secret gateway-hmac-secret)"
+export API_KEYS="{\\"api-gateway\\":\\"\${GATEWAY_HMAC_SECRET}\\"}"
+
+# Grafana admin password — overrides the compose \`admin\`/\`admin\` default.
+export GRAFANA_ADMIN_PASSWORD="$(require_secret grafana-admin-password)"
+
 # AUTH_JWT_SECRET historically equals JWT_SECRET in dev/UAT — supply that
 # default if the operator hasn't set one independently.
 export AUTH_JWT_SECRET="\${AUTH_JWT_SECRET:-$JWT_SECRET}"

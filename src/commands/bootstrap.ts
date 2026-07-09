@@ -10,6 +10,7 @@ import {
   SAFE_URL_RE,
   TUNNEL_TOKEN_RE,
   URL_SAFE_PASSWORD_RE,
+  WELL_KNOWN_GATEWAY_HMAC_SECRET,
 } from '../lib/constants.js';
 import {
   detectBrew,
@@ -34,10 +35,13 @@ import {
 } from '../lib/keychain.js';
 import {
   generateDashboardPassword,
+  generateGatewayHmacSecret,
+  generateGrafanaAdminPassword,
   generateHmacApiKey,
   generateJwtSecret,
   generatePgsodiumRootKey,
   generatePostgresPassword,
+  renderApiKeys,
   signSupabaseJwt,
   verifySupabaseJwt,
 } from '../lib/secrets.js';
@@ -255,6 +259,12 @@ interface CollectedSecrets {
   supabaseAnonKey: string;
   supabaseServiceRoleKey: string;
   dashboardPassword: string;
+  /** API Gateway HMAC secret — signs gateway→microservice requests. Real
+   *  per-node value; MUST NOT equal WELL_KNOWN_GATEWAY_HMAC_SECRET on a
+   *  Tunnel-exposed node. */
+  gatewayHmacSecret: string;
+  /** Grafana admin password — overrides the `admin`/`admin` compose default. */
+  grafanaAdminPassword: string;
   promptServiceUrl: string;
   supabaseUrl: string;
 }
@@ -608,6 +618,35 @@ async function collectCoreSecrets(args: {
     generate: generateDashboardPassword,
   });
 
+  // API Gateway HMAC secret. Always generated so a bootstrapped node never
+  // runs on the template's well-known compose default (which every checkout
+  // shares). The value ALSO drives API_KEYS `{"api-gateway":"<this>"}`, so
+  // the api-gateway's key equals GATEWAY_HMAC_SECRET and its signature
+  // verifies. URL-safe alphabet keeps it clean inside the API_KEYS JSON.
+  // Reject the well-known default explicitly: if a prior run (or a manual
+  // paste) stored the placeholder, treat it as invalid and regenerate.
+  const gatewayHmacSecret = await loadSecret({
+    region,
+    account: 'gateway-hmac-secret',
+    label: 'API Gateway HMAC secret',
+    validate: (v) =>
+      URL_SAFE_PASSWORD_RE.test(v) && v !== WELL_KNOWN_GATEWAY_HMAC_SECRET
+        ? undefined
+        : 'must be base64url chars only (no + / =) and not the well-known template default',
+    generate: generateGatewayHmacSecret,
+  });
+
+  const grafanaAdminPassword = await loadSecret({
+    region,
+    account: 'grafana-admin-password',
+    label: 'Grafana admin password',
+    // URL-safe alphabet — exported into the compose env for Grafana's
+    // GF_SECURITY_ADMIN_PASSWORD; keep it free of shell/URL metacharacters.
+    validate: (v) =>
+      URL_SAFE_PASSWORD_RE.test(v) ? undefined : 'must be base64url chars only (no + / =)',
+    generate: generateGrafanaAdminPassword,
+  });
+
   return {
     pgsodiumKey,
     tunnelToken,
@@ -616,6 +655,8 @@ async function collectCoreSecrets(args: {
     supabaseAnonKey,
     supabaseServiceRoleKey,
     dashboardPassword,
+    gatewayHmacSecret,
+    grafanaAdminPassword,
   };
 }
 
@@ -765,6 +806,8 @@ async function runLaunchAgentPhase(args: {
     supabaseAnonKey: secrets.supabaseAnonKey,
     supabaseServiceRoleKey: secrets.supabaseServiceRoleKey,
     dashboardPassword: secrets.dashboardPassword,
+    gatewayHmacSecret: secrets.gatewayHmacSecret,
+    grafanaAdminPassword: secrets.grafanaAdminPassword,
     supabaseUrl: secrets.supabaseUrl,
   });
   if (!la.ok) {
@@ -889,12 +932,74 @@ export function buildComposeEnv(args: {
     SUPABASE_ANON_KEY: secrets.supabaseAnonKey,
     SUPABASE_SERVICE_ROLE_KEY: secrets.supabaseServiceRoleKey,
     DASHBOARD_PASSWORD: secrets.dashboardPassword,
+    // Real per-node gateway HMAC secret + the derived API_KEYS map. These
+    // override the template's well-known `${GATEWAY_HMAC_SECRET:-…}` /
+    // `${API_KEYS:-…}` compose defaults so a Tunnel-exposed node never signs
+    // with the shared placeholder. The api-gateway's key MUST equal
+    // GATEWAY_HMAC_SECRET, which renderApiKeys guarantees.
+    GATEWAY_HMAC_SECRET: secrets.gatewayHmacSecret,
+    API_KEYS: renderApiKeys(secrets.gatewayHmacSecret),
+    GRAFANA_ADMIN_PASSWORD: secrets.grafanaAdminPassword,
     SUPABASE_URL: secrets.supabaseUrl,
     AUTH_JWT_SECRET: process.env['AUTH_JWT_SECRET'] ?? secrets.jwtSecret,
     ...(secrets.tunnelToken !== undefined ? { TUNNEL_TOKEN: secrets.tunnelToken } : {}),
     ...(llmModel ? { LLM_MODEL: llmModel } : {}),
     ...(embeddingModel ? { EMBEDDINGS_MODEL: embeddingModel } : {}),
   };
+}
+
+// ---- Public-profile secret guard (#27) ----
+// A node exposed via the Cloudflare Tunnel (the `public` compose profile,
+// activated for every non-`--local-only` bootstrap) MUST NOT sign
+// gateway→microservice requests with the template's well-known
+// GATEWAY_HMAC_SECRET / API_KEYS default — every checkout of the template
+// carries that identical string. buildComposeEnv always injects a real
+// per-node value, so in normal bootstrap this guard never trips; it is a
+// fail-closed backstop against a future refactor that lets the placeholder
+// (or an unset value) reach a Tunnel-exposed compose `up`.
+//
+// `--local-only` bootstraps do NOT activate the public profile, so the
+// defaults are acceptable there and MUST NOT be blocked.
+export type PublicProfileSecretVerdict =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+// Pure decision — unit-tested independently of the interactive compose flow.
+// `env` is the resolved compose env buildComposeEnv produced.
+export function checkPublicProfileSecrets(
+  env: NodeJS.ProcessEnv,
+): PublicProfileSecretVerdict {
+  const gateway = env['GATEWAY_HMAC_SECRET'];
+  const apiKeys = env['API_KEYS'];
+  const bad = (v: string | undefined): boolean =>
+    v === undefined || v.length === 0 || v.includes(WELL_KNOWN_GATEWAY_HMAC_SECRET);
+  if (bad(gateway) || bad(apiKeys)) {
+    return {
+      ok: false,
+      reason:
+        'Refusing to expose this node via the Cloudflare Tunnel (public profile) with the ' +
+        'well-known GATEWAY_HMAC_SECRET / API_KEYS default. Every copy of the template ships ' +
+        'the same placeholder value — a Tunnel-exposed gateway signed with it is trivially ' +
+        'forgeable. Re-run `create-op-node bootstrap` so it generates a real per-node secret ' +
+        '(or use `--local-only` to run without the public profile).',
+    };
+  }
+  return { ok: true };
+}
+
+// Enforce the guard, aborting bootstrap with an operator-friendly message
+// when the public profile would carry the well-known default. No-op when
+// the public profile isn't in play (--local-only).
+function enforcePublicProfileSecrets(args: {
+  localOnly: boolean;
+  env: NodeJS.ProcessEnv;
+}): void {
+  if (args.localOnly) return;
+  const verdict = checkPublicProfileSecrets(args.env);
+  if (!verdict.ok) {
+    p.cancel(verdict.reason);
+    process.exit(1);
+  }
 }
 
 // ---- Phase 8b: fail-closed image-signature gate ----
@@ -1034,6 +1139,10 @@ async function runStackPhase(args: {
     profiles: opts.localOnly ? LOCAL_PROFILES : PUBLIC_PROFILES,
     env: composeEnv,
   };
+
+  // Fail-closed: never bring up the public (Tunnel-exposed) profile with the
+  // template's well-known GATEWAY_HMAC_SECRET / API_KEYS default. (#27)
+  enforcePublicProfileSecrets({ localOnly: Boolean(opts.localOnly), env: composeEnv });
 
   // In --local-only mode, evict any cloudflared container left over from a
   // prior public bootstrap on this Studio. Without this, `compose ps` would

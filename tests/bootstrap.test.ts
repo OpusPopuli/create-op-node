@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildComposeEnv, estimatedPullTime, LLM_MODEL_CHOICES, planSignatureGate, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
+import { buildComposeEnv, checkPublicProfileSecrets, estimatedPullTime, LLM_MODEL_CHOICES, planSignatureGate, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_LLM_MODEL } from '../src/lib/ollama.js';
+import { WELL_KNOWN_GATEWAY_HMAC_SECRET } from '../src/lib/constants.js';
 
 const SECRETS = {
   pgsodiumKey: 'a'.repeat(64),
@@ -11,6 +12,8 @@ const SECRETS = {
   supabaseAnonKey: 'anon.jwt',
   supabaseServiceRoleKey: 'service.jwt',
   dashboardPassword: 'dash-pw',
+  gatewayHmacSecret: 'gw-hmac-real-per-node',
+  grafanaAdminPassword: 'grafana-pw',
   promptServiceUrl: 'https://prompts.opuspopuli.org',
   supabaseUrl: 'https://supabase.example.org',
 };
@@ -25,11 +28,20 @@ describe('buildComposeEnv', () => {
       SUPABASE_ANON_KEY: SECRETS.supabaseAnonKey,
       SUPABASE_SERVICE_ROLE_KEY: SECRETS.supabaseServiceRoleKey,
       DASHBOARD_PASSWORD: SECRETS.dashboardPassword,
+      GATEWAY_HMAC_SECRET: SECRETS.gatewayHmacSecret,
+      GRAFANA_ADMIN_PASSWORD: SECRETS.grafanaAdminPassword,
       SUPABASE_URL: SECRETS.supabaseUrl,
       TUNNEL_TOKEN: SECRETS.tunnelToken,
       LLM_MODEL: 'qwen3.5:9b',
       EMBEDDINGS_MODEL: 'nomic-embed-text',
     });
+  });
+
+  it('derives API_KEYS as {"api-gateway":"<GATEWAY_HMAC_SECRET>"} so the gateway signature verifies', () => {
+    const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'm', embeddingModel: 'e' });
+    expect(env.API_KEYS).toBe(`{"api-gateway":"${SECRETS.gatewayHmacSecret}"}`);
+    const parsed = JSON.parse(env.API_KEYS!) as Record<string, string>;
+    expect(parsed['api-gateway']).toBe(env.GATEWAY_HMAC_SECRET);
   });
 
   it('omits TUNNEL_TOKEN in local-only mode (tunnelToken undefined)', () => {
@@ -242,5 +254,56 @@ describe('planSignatureGate (fail-closed image gate — #34)', () => {
 
   it('skip takes precedence over a null image list', () => {
     expect(planSignatureGate(null, { skipSignatureCheck: true })).toEqual({ kind: 'skip' });
+  });
+});
+
+describe('checkPublicProfileSecrets (public-profile HMAC guard — #27)', () => {
+  const realKeys = {
+    GATEWAY_HMAC_SECRET: 'gw-hmac-real-per-node',
+    API_KEYS: '{"api-gateway":"gw-hmac-real-per-node"}',
+  };
+
+  it('allows real per-node values', () => {
+    expect(checkPublicProfileSecrets(realKeys)).toEqual({ ok: true });
+  });
+
+  it('rejects the well-known default GATEWAY_HMAC_SECRET', () => {
+    const verdict = checkPublicProfileSecrets({
+      GATEWAY_HMAC_SECRET: WELL_KNOWN_GATEWAY_HMAC_SECRET,
+      API_KEYS: `{"api-gateway":"${WELL_KNOWN_GATEWAY_HMAC_SECRET}"}`,
+    });
+    expect(verdict.ok).toBe(false);
+    if (!verdict.ok) expect(verdict.reason).toMatch(/well-known/i);
+  });
+
+  it('rejects when API_KEYS still wraps the well-known default even if GATEWAY_HMAC_SECRET is real', () => {
+    const verdict = checkPublicProfileSecrets({
+      GATEWAY_HMAC_SECRET: 'gw-hmac-real-per-node',
+      API_KEYS: `{"api-gateway":"${WELL_KNOWN_GATEWAY_HMAC_SECRET}"}`,
+    });
+    expect(verdict.ok).toBe(false);
+  });
+
+  it('rejects an unset GATEWAY_HMAC_SECRET', () => {
+    expect(checkPublicProfileSecrets({ API_KEYS: realKeys.API_KEYS }).ok).toBe(false);
+  });
+
+  it('rejects an unset API_KEYS', () => {
+    expect(
+      checkPublicProfileSecrets({ GATEWAY_HMAC_SECRET: realKeys.GATEWAY_HMAC_SECRET }).ok,
+    ).toBe(false);
+  });
+
+  it('rejects an empty-string value', () => {
+    expect(
+      checkPublicProfileSecrets({ GATEWAY_HMAC_SECRET: '', API_KEYS: realKeys.API_KEYS }).ok,
+    ).toBe(false);
+  });
+
+  it('accepts the env buildComposeEnv produces for a real bootstrap', () => {
+    // End-to-end: the guard must PASS on exactly what bootstrap injects, so a
+    // normal production bootstrap is never blocked by its own backstop.
+    const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'm', embeddingModel: 'e' });
+    expect(checkPublicProfileSecrets(env)).toEqual({ ok: true });
   });
 });
