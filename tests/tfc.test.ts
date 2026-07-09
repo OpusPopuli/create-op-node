@@ -207,13 +207,28 @@ describe('fetchOutput', () => {
       },
     }));
     const v = await fetchOutput({ token: TOKEN, organization: ORG }, 'ws-1', 'tunnel_token');
-    expect(v).toBe('eyJh…');
+    expect(v).toEqual({ kind: 'value', value: 'eyJh…' });
   });
 
-  it('returns null when the named output is missing', async () => {
+  it('reports absent when the request succeeds but the named output is missing', async () => {
     installFetch(() => ({ status: 200, body: { data: [] } }));
     const v = await fetchOutput({ token: TOKEN, organization: ORG }, 'ws-1', 'tunnel_token');
-    expect(v).toBeNull();
+    expect(v).toEqual({ kind: 'absent' });
+  });
+
+  it('reports absent when the output is present but not a string', async () => {
+    installFetch(() => ({
+      status: 200,
+      body: { data: [{ attributes: { name: 'tunnel_token', value: { nested: 1 } } }] },
+    }));
+    const v = await fetchOutput({ token: TOKEN, organization: ORG }, 'ws-1', 'tunnel_token');
+    expect(v).toEqual({ kind: 'absent' });
+  });
+
+  it('reports error (retryable) on a non-200 — e.g. state still settling', async () => {
+    installFetch(() => ({ status: 404, body: null }));
+    const v = await fetchOutput({ token: TOKEN, organization: ORG }, 'ws-1', 'tunnel_token');
+    expect(v).toEqual({ kind: 'error' });
   });
 });
 
@@ -248,7 +263,7 @@ describe('network resilience (issue #31)', () => {
     expect(r.issues.join(' ')).toMatch(/couldn't reach terraform cloud while checking the organization/i);
   });
 
-  it('findWorkspace / getRunStatus / fetchOutput degrade to null when fetch throws', async () => {
+  it('findWorkspace / getRunStatus degrade to null and fetchOutput to error when fetch throws', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() => Promise.reject(new Error('ECONNRESET'))),
@@ -259,9 +274,11 @@ describe('network resilience (issue #31)', () => {
     await expect(
       getRunStatus({ token: TOKEN, organization: ORG }, 'run-123'),
     ).resolves.toBeNull();
+    // A thrown fetch degrades to status 0 → retryable `error`, NOT `absent`, so
+    // the poll loop retries instead of misreporting a missing output. (#59)
     await expect(
       fetchOutput({ token: TOKEN, organization: ORG }, 'ws-1', 'tunnel_token'),
-    ).resolves.toBeNull();
+    ).resolves.toEqual({ kind: 'error' });
   });
 
   it('aborts and reports a network error when a request exceeds the timeout', async () => {
