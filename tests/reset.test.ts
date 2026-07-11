@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   buildResetInput,
+  RESET_COMPOSE_ENV,
   RESET_PHASES,
   runReset,
   type ResetDeps,
@@ -141,6 +142,25 @@ describe('runReset', () => {
     );
   });
 
+  it('passes inert interpolation values to composeDown without loading real secrets', async () => {
+    const deps = depsFor();
+    await runReset(fullInput(), deps);
+    expect(deps.composeDown).toHaveBeenCalledWith(
+      expect.objectContaining({ env: RESET_COMPOSE_ENV }),
+    );
+    expect(Object.keys(RESET_COMPOSE_ENV)).toEqual(expect.arrayContaining([
+      'POSTGRES_PASSWORD',
+      'JWT_SECRET',
+      'PGSODIUM_ROOT_KEY',
+      'PROMPTS_DB_PASSWORD',
+      'PROMPT_SERVICE_API_KEY',
+      'BACKUPS_DIR_HOST',
+    ]));
+    expect(new Set(Object.values(RESET_COMPOSE_ENV))).toEqual(
+      new Set(['reset-interpolation-only', process.cwd()]),
+    );
+  });
+
   it('detail line distinguishes wipe vs preserve in Stop stack phase', async () => {
     const wipe = fullInput();
     wipe.stack!.wipeVolumes = true;
@@ -265,12 +285,16 @@ describe('runReset', () => {
     expect(ph?.detail).toContain('volume in use');
   });
 
-  it('continues past compose failure — LaunchAgent + docker logout still run', async () => {
+  it('preserves the LaunchAgent after compose failure but still runs docker logout', async () => {
     const deps = depsFor({
       composeDown: vi.fn(() => Promise.resolve({ ok: false, reason: 'boom' })),
     });
-    await runReset(fullInput(), deps);
-    expect(deps.teardownLaunchAgent).toHaveBeenCalledTimes(1);
+    const report = await runReset(fullInput(), deps);
+    expect(deps.teardownLaunchAgent).not.toHaveBeenCalled();
+    expect(report.phases.find((ph) => ph.name === RESET_PHASES.LAUNCH_AGENT)).toMatchObject({
+      status: 'warn',
+      detail: expect.stringContaining('stack could still be running'),
+    });
     expect(deps.dockerLogout).toHaveBeenCalledTimes(1);
   });
 

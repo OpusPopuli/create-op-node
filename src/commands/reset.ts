@@ -57,6 +57,27 @@ interface ResetOptions {
 
 const REGION_RE = /^[a-z0-9-]{2,32}$/;
 
+// Compose interpolates required variables before it executes even a `down`.
+// Teardown does not consume these values, so use inert placeholders instead
+// of making reset depend on secrets still being available in Keychain. Keep
+// this list aligned with the required vars in the supported compose overlays.
+export const RESET_COMPOSE_ENV: NodeJS.ProcessEnv = {
+  PGSODIUM_ROOT_KEY: 'reset-interpolation-only',
+  // eslint-disable-next-line sonarjs/no-hardcoded-passwords -- intentionally public, inert teardown placeholder
+  POSTGRES_PASSWORD: 'reset-interpolation-only',
+  JWT_SECRET: 'reset-interpolation-only',
+  SUPABASE_ANON_KEY: 'reset-interpolation-only',
+  SUPABASE_SERVICE_ROLE_KEY: 'reset-interpolation-only',
+  // eslint-disable-next-line sonarjs/no-hardcoded-passwords -- intentionally public, inert teardown placeholder
+  DASHBOARD_PASSWORD: 'reset-interpolation-only',
+  // eslint-disable-next-line sonarjs/no-hardcoded-passwords -- intentionally public, inert teardown placeholder
+  PROMPTS_DB_PASSWORD: 'reset-interpolation-only',
+  PROMPT_SERVICE_API_KEYS: 'reset-interpolation-only',
+  PROMPT_SERVICE_ADMIN_API_KEYS: 'reset-interpolation-only',
+  PROMPT_SERVICE_API_KEY: 'reset-interpolation-only',
+  BACKUPS_DIR_HOST: process.cwd(),
+};
+
 /* ------------------------------------------------------------------ *
  *  Phase-name constants (review S4 / N7)                             *
  *                                                                    *
@@ -132,12 +153,10 @@ const DEFAULT_DEPS: ResetDeps = {
 /**
  * Run the three reset phases in reverse-bootstrap order.
  *
- * **Continue-on-failure policy**: each phase runs independently — a
- * `composeDown` failure does NOT short-circuit the LaunchAgent or
- * docker-logout phases. This is intentional: reset is best-effort
- * cleanup, and the operator usually wants the LaunchAgent gone even if
- * the docker daemon is down. Use the returned `ResetReport` to inspect
- * which phases failed.
+ * **Failure policy**: docker logout remains best-effort, but a failed stack
+ * stop preserves the LaunchAgent and key file. Removing that environment
+ * source while containers may still be running strands the node in a
+ * partially-reset state.
  *
  * Each phase calls `deps.onPhase` exactly once before runReset moves
  * on, so a CLI consumer can render spinners in lockstep.
@@ -152,8 +171,9 @@ export async function runReset(input: ResetInput, deps: ResetDeps = DEFAULT_DEPS
     deps.onPhase?.(ph);
   };
 
-  push(await resetStopStackPhase(input, deps));
-  push(await resetLaunchAgentPhase(input, deps));
+  const stopStack = await resetStopStackPhase(input, deps);
+  push(stopStack);
+  push(await resetLaunchAgentPhase(input, deps, stopStack));
   push(await resetDockerLogoutPhase(input, deps));
 
   return { phases };
@@ -179,6 +199,7 @@ async function resetStopStackPhase(input: ResetInput, deps: ResetDeps): Promise<
     files: input.stack.composeFiles,
     cwd: input.stack.repoPath,
     ...(input.stack.envFile ? { envFile: input.stack.envFile } : {}),
+    env: RESET_COMPOSE_ENV,
     wipeVolumes: input.stack.wipeVolumes,
     removeOrphans: input.stack.removeOrphans,
     ...(input.stack.wipeImages ? { removeImages: 'all' as const } : {}),
@@ -194,9 +215,20 @@ async function resetStopStackPhase(input: ResetInput, deps: ResetDeps): Promise<
 }
 
 // ---- Phase 2: LaunchAgent ------------------------------------------
-async function resetLaunchAgentPhase(input: ResetInput, deps: ResetDeps): Promise<ResetPhase> {
+async function resetLaunchAgentPhase(
+  input: ResetInput,
+  deps: ResetDeps,
+  stopStack: ResetPhase,
+): Promise<ResetPhase> {
   if (!input.launchAgent) {
     return { name: RESET_PHASES.LAUNCH_AGENT, status: 'skipped', detail: '--skip-launch-agent or no plist found' };
+  }
+  if (stopStack.status === 'fail') {
+    return {
+      name: RESET_PHASES.LAUNCH_AGENT,
+      status: 'warn',
+      detail: 'preserved because the stack could still be running',
+    };
   }
   if (input.dryRun) {
     return {
