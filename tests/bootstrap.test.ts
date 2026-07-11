@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { Command, Option } from 'commander';
 
-import { buildComposeEnv, checkPublicProfileSecrets, estimatedPullTime, LLM_MODEL_CHOICES, planSignatureGate, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
+import { buildComposeEnv, checkPublicProfileSecrets, collectComposeFile, estimatedPullTime, LLM_MODEL_CHOICES, planSignatureGate, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_LLM_MODEL } from '../src/lib/ollama.js';
 import { WELL_KNOWN_GATEWAY_HMAC_SECRET } from '../src/lib/constants.js';
 
@@ -89,6 +90,65 @@ describe('resolveComposeFiles', () => {
 
   it('normalizes trailing-slash repo paths via path.join', () => {
     expect(resolveComposeFiles('/repo/', ['x.yml'])).toEqual(['/repo/x.yml']);
+  });
+});
+
+describe('collectComposeFile (#82)', () => {
+  it('seeds an array on the first occurrence (previous undefined)', () => {
+    expect(collectComposeFile('docker-compose-prod.yml', undefined)).toEqual([
+      'docker-compose-prod.yml',
+    ]);
+  });
+
+  it('accumulates subsequent occurrences instead of replacing', () => {
+    const first = collectComposeFile('docker-compose-prod.yml', undefined);
+    expect(collectComposeFile('docker-compose-prompt-service.yml', first)).toEqual([
+      'docker-compose-prod.yml',
+      'docker-compose-prompt-service.yml',
+    ]);
+  });
+
+  it('does not mutate the previous array', () => {
+    const prev = ['a.yml'];
+    collectComposeFile('b.yml', prev);
+    expect(prev).toEqual(['a.yml']);
+  });
+
+  // Regression guard for #82: wired through commander the way the real
+  // `--compose-file` option is, a single OR repeated flag must yield an ARRAY.
+  // Before the fix, commander stored the last string (e.g. "b"), and
+  // resolveComposeFiles's `.map` threw "inputs.map is not a function".
+  it('yields an array (not a bare string) through a commander Option — single flag', () => {
+    let parsed: string[] | undefined;
+    new Command('t')
+      .addOption(new Option('--compose-file <path>').argParser(collectComposeFile))
+      .action((o: { composeFile?: string[] }) => { parsed = o.composeFile; })
+      .parse(['node', 't', '--compose-file', 'docker-compose-prod.yml'], { from: 'node' });
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed).toEqual(['docker-compose-prod.yml']);
+    // and it flows cleanly through resolveComposeFiles (the crash site)
+    expect(resolveComposeFiles('/repo', parsed)).toEqual(['/repo/docker-compose-prod.yml']);
+  });
+
+  it('yields an accumulated array through a commander Option — repeated flags', () => {
+    let parsed: string[] | undefined;
+    new Command('t')
+      .addOption(new Option('--compose-file <path>').argParser(collectComposeFile))
+      .action((o: { composeFile?: string[] }) => { parsed = o.composeFile; })
+      .parse(
+        ['node', 't', '--compose-file', 'docker-compose-prod.yml', '--compose-file', 'docker-compose-prompt-service.yml'],
+        { from: 'node' },
+      );
+    expect(parsed).toEqual(['docker-compose-prod.yml', 'docker-compose-prompt-service.yml']);
+  });
+
+  it('leaves composeFile undefined when the flag is absent (so downstream ?? default applies)', () => {
+    let parsed: string[] | undefined = ['sentinel'];
+    new Command('t')
+      .addOption(new Option('--compose-file <path>').argParser(collectComposeFile))
+      .action((o: { composeFile?: string[] }) => { parsed = o.composeFile; })
+      .parse(['node', 't'], { from: 'node' });
+    expect(parsed).toBeUndefined();
   });
 });
 

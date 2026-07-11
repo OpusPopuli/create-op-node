@@ -145,7 +145,7 @@ export const bootstrapCommand = new Command('bootstrap')
     new Option(
       '--compose-file <path>',
       'Repeatable. Compose file relative to repo root. Default: prod + backup (production), prod only (--local-only).',
-    ),
+    ).argParser(collectComposeFile),
   )
   .addOption(new Option('--env-file <path>', 'Compose --env-file. Default: .env.production'))
   .addOption(new Option('--skip-brew', "Skip the Homebrew package install pass").default(false))
@@ -1291,6 +1291,25 @@ export function resolveComposeFiles(
 ): string[] {
   const inputs = composeFile ?? ['docker-compose-prod.yml'];
   return inputs.map((f) => (f.startsWith('/') ? f : join(repoPath, f)));
+}
+
+/**
+ * Commander `argParser` for the repeatable `--compose-file` option (shared by
+ * `bootstrap` and `reset`).
+ *
+ * Without a reducer, commander stores a value-taking option as the LAST string
+ * passed — NOT an array. So `--compose-file a --compose-file b` yields the bare
+ * string `"b"`, and even a single `--compose-file a` yields `"a"`. Both then
+ * hit `resolveComposeFiles`'s `.map`, which throws
+ * `inputs.map is not a function`. (#82)
+ *
+ * This accumulates each occurrence into an array. `previous` is `undefined` on
+ * the first invocation (the option carries no default), so it's seeded with an
+ * empty array; downstream code keeps its `?? default` fallback for the
+ * flag-absent case.
+ */
+export function collectComposeFile(value: string, previous: string[] | undefined): string[] {
+  return [...(previous ?? []), value];
 }
 
 /**

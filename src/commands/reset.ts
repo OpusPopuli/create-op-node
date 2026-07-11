@@ -35,7 +35,7 @@ import { assertNever } from '../lib/assert.js';
 import type { ContainerSnapshot } from '../lib/docker.js';
 import type { LaunchAgentPaths, TeardownResult } from '../lib/launchagent.js';
 
-import { resolveComposeFiles } from './bootstrap.js';
+import { collectComposeFile, resolveComposeFiles } from './bootstrap.js';
 
 interface ResetOptions {
   region?: string;
@@ -285,7 +285,7 @@ export const resetCommand = new Command('reset')
     new Option(
       '--compose-file <path>',
       'Repeatable. Compose file relative to repo root. Default: docker-compose-prod.yml',
-    ).default(['docker-compose-prod.yml'] as string[]),
+    ).argParser(collectComposeFile),
   )
   .addOption(new Option('--env-file <path>', 'Compose --env-file. Default: .env.production'))
   .addOption(
