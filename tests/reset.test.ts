@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   buildResetInput,
+  buildTeardownEnv,
   RESET_PHASES,
   runReset,
   type ResetDeps,
@@ -113,6 +114,67 @@ describe('buildResetInput', () => {
     expect(buildResetInput(base).dryRun).toBe(false);
     expect(buildResetInput({ ...base, opts: { dryRun: true } }).dryRun).toBe(true);
   });
+
+  it('threads teardownEnv into stack.env when provided (#85)', () => {
+    const input = buildResetInput({
+      ...base,
+      repoPath: '/repo',
+      teardownEnv: { DB_DSN: 'reset-teardown-placeholder' },
+    });
+    expect(input.stack?.env).toEqual({ DB_DSN: 'reset-teardown-placeholder' });
+  });
+
+  it('omits stack.env when no teardownEnv is provided', () => {
+    const input = buildResetInput({ ...base, repoPath: '/repo' });
+    expect(input.stack).not.toHaveProperty('env');
+  });
+});
+
+// buildTeardownEnv is name-agnostic — it fills whatever `${VAR:?…}` names the
+// compose text references. Tests use neutral placeholders (DB_DSN, CACHE_URL…)
+// rather than the real secret names to keep the assertions clear and avoid
+// tripping the hard-coded-credential linter on illustrative literals.
+describe('buildTeardownEnv (#85)', () => {
+  it('placeholders each ${VAR:?…}-required variable found in the compose text', () => {
+    const env = buildTeardownEnv(
+      ['a: ${DB_DSN:?required}\nb: ${CACHE_URL:?must be set}'],
+      {},
+    );
+    expect(env).toEqual({
+      DB_DSN: 'reset-teardown-placeholder',
+      CACHE_URL: 'reset-teardown-placeholder',
+    });
+  });
+
+  it('also matches the colon-less ${VAR?…} form', () => {
+    expect(buildTeardownEnv(['${EDGE_ID?nope}'], {})).toHaveProperty('EDGE_ID');
+  });
+
+  it('ignores ${VAR:-default} and bare ${VAR} — those never fail interpolation', () => {
+    const env = buildTeardownEnv(
+      ['a: ${SERVICE_URL:-http://localhost:8000}\nb: ${NODE_ENV}\nc: ${EXTRA:-x}'],
+      {},
+    );
+    expect(env).toEqual({});
+  });
+
+  it('does not override a variable already set (non-empty) in the base env', () => {
+    const env = buildTeardownEnv(['${DB_DSN:?x}'], { DB_DSN: 'real-value' });
+    expect(env).not.toHaveProperty('DB_DSN');
+  });
+
+  it('fills a variable that is present but EMPTY in the base env', () => {
+    const env = buildTeardownEnv(['${DB_DSN:?x}'], { DB_DSN: '' });
+    expect(env.DB_DSN).toBe('reset-teardown-placeholder');
+  });
+
+  it('dedupes required vars across multiple compose files', () => {
+    const env = buildTeardownEnv(
+      ['${CACHE_URL:?a}', '${CACHE_URL:?b}\n${PANEL_HOST:?c}'],
+      {},
+    );
+    expect(Object.keys(env).sort()).toEqual(['CACHE_URL', 'PANEL_HOST']);
+  });
 });
 
 describe('runReset', () => {
@@ -128,6 +190,23 @@ describe('runReset', () => {
     expect(deps.composeDown).toHaveBeenCalledTimes(1);
     expect(deps.teardownLaunchAgent).toHaveBeenCalledTimes(1);
     expect(deps.dockerLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes stack.env through to composeDown so down can interpolate ${VAR:?} (#85)', async () => {
+    const deps = depsFor();
+    const input = fullInput();
+    input.stack!.env = { DB_DSN: 'reset-teardown-placeholder' };
+    await runReset(input, deps);
+    expect(deps.composeDown).toHaveBeenCalledWith(
+      expect.objectContaining({ env: { DB_DSN: 'reset-teardown-placeholder' } }),
+    );
+  });
+
+  it('omits env from the composeDown call when stack.env is unset', async () => {
+    const deps = depsFor();
+    await runReset(fullInput(), deps);
+    const call = (deps.composeDown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as object;
+    expect(call).not.toHaveProperty('env');
   });
 
   it('passes wipeVolumes + removeOrphans through to composeDown', async () => {

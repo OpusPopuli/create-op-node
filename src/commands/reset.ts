@@ -21,7 +21,7 @@
  * of the existing database. Don't do either without a backup.
  */
 
-import { access } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
 
 import { Command, Option } from 'commander';
 import * as p from '@clack/prompts';
@@ -112,6 +112,11 @@ export interface ResetInput {
      *  next bootstrap — used for "wipe everything and start over" loops. */
     wipeImages: boolean;
     removeOrphans: boolean;
+    /** Placeholder env overlay so `docker compose down` can interpolate the
+     *  template's `${VAR:?…}`-required variables. `down` never uses the
+     *  values, so placeholders suffice — and reset then works even when the
+     *  Keychain secrets are already gone. (#85) */
+    env?: NodeJS.ProcessEnv;
   };
   launchAgent?: {
     paths: LaunchAgentPaths;
@@ -179,6 +184,9 @@ async function resetStopStackPhase(input: ResetInput, deps: ResetDeps): Promise<
     files: input.stack.composeFiles,
     cwd: input.stack.repoPath,
     ...(input.stack.envFile ? { envFile: input.stack.envFile } : {}),
+    // Hydrate placeholder values for the template's `${VAR:?…}` required vars
+    // so interpolation succeeds; `down` doesn't use the values. (#85)
+    ...(input.stack.env ? { env: input.stack.env } : {}),
     wipeVolumes: input.stack.wipeVolumes,
     removeOrphans: input.stack.removeOrphans,
     ...(input.stack.wipeImages ? { removeImages: 'all' as const } : {}),
@@ -359,6 +367,12 @@ export const resetCommand = new Command('reset')
 
     await confirmReset({ opts, region, wipeData });
 
+    // Scan the compose files for `${VAR:?…}`-required vars so `compose down`
+    // can interpolate — otherwise it aborts before removing anything. (#85)
+    const teardownEnv = repoPath
+      ? await computeTeardownEnv(resolveComposeFiles(repoPath, opts.composeFile))
+      : undefined;
+
     const input = buildResetInput({
       opts,
       repoPath,
@@ -367,6 +381,7 @@ export const resetCommand = new Command('reset')
       wipeData,
       wipeImages,
       removeOrphans,
+      ...(teardownEnv ? { teardownEnv } : {}),
     });
     await runResetWithSpinners({ opts, region, wipeData, input });
   });
@@ -529,6 +544,67 @@ async function confirmReset(args: {
   }
 }
 
+// ---- Teardown env hydration (#85) ----
+//
+// `docker compose down` interpolates the WHOLE compose file, so the template's
+// `${POSTGRES_PASSWORD:?…}` / `${JWT_SECRET:?…}` required variables must be
+// defined or `down` aborts before removing anything — even though teardown
+// never USES the values. Rather than hydrate real secrets from Keychain (which
+// reset shouldn't depend on — you may be tearing down precisely because the
+// secrets are gone), we scan the compose files for their `:?`-required variable
+// names and fill each with a benign placeholder. Reading the required set from
+// the compose text keeps it in sync with the template instead of drifting
+// against a hardcoded list.
+
+/** A value only needs to be non-empty to satisfy `${VAR:?…}` interpolation;
+ *  `down` doesn't parse it. */
+const TEARDOWN_PLACEHOLDER = 'reset-teardown-placeholder';
+
+/** Captures NAME in `${NAME:?…}` and `${NAME?…}` — the interpolation forms that
+ *  FAIL when the variable is unset. Deliberately does NOT match
+ *  `${NAME:-default}` (uses its default) or bare `${NAME}` (resolves to empty,
+ *  no error), which don't need filling. */
+const REQUIRED_VAR_RE = /\$\{([A-Za-z_]\w*):?\?/g;
+
+/**
+ * Build a minimal env overlay defining every `${VAR:?…}`-required variable
+ * referenced by the given compose file contents, using a placeholder for any
+ * not already present (non-empty) in `baseEnv`. Pure — unit-tested. (#85)
+ */
+export function buildTeardownEnv(
+  composeFileContents: string[],
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const overlay: NodeJS.ProcessEnv = {};
+  for (const text of composeFileContents) {
+    for (const match of text.matchAll(REQUIRED_VAR_RE)) {
+      const name = match[1]!;
+      const existing = baseEnv[name];
+      if (existing === undefined || existing === '') {
+        overlay[name] = TEARDOWN_PLACEHOLDER;
+      }
+    }
+  }
+  return overlay;
+}
+
+/**
+ * Read the resolved compose files and compute the teardown env overlay.
+ * Unreadable files are skipped (a genuinely-missing compose file surfaces
+ * later when `down` runs); an empty overlay results when nothing is readable.
+ */
+async function computeTeardownEnv(composeFiles: string[]): Promise<NodeJS.ProcessEnv> {
+  const contents: string[] = [];
+  for (const file of composeFiles) {
+    try {
+      contents.push(await readFile(file, 'utf8'));
+    } catch {
+      // Skip — `down` will report a genuinely-missing compose file itself.
+    }
+  }
+  return buildTeardownEnv(contents);
+}
+
 // ---- Build the runReset input from the resolved snapshot + flags ----
 export function buildResetInput(args: {
   opts: ResetOptions;
@@ -538,8 +614,9 @@ export function buildResetInput(args: {
   wipeData: boolean;
   wipeImages: boolean;
   removeOrphans: boolean;
+  teardownEnv?: NodeJS.ProcessEnv;
 }): ResetInput {
-  const { opts, repoPath, plistExists, launchAgentPaths, wipeData, wipeImages, removeOrphans } = args;
+  const { opts, repoPath, plistExists, launchAgentPaths, wipeData, wipeImages, removeOrphans, teardownEnv } = args;
   const stack = repoPath
     ? {
         repoPath,
@@ -548,6 +625,7 @@ export function buildResetInput(args: {
         wipeImages,
         removeOrphans,
         ...(opts.envFile ? { envFile: opts.envFile } : {}),
+        ...(teardownEnv ? { env: teardownEnv } : {}),
       }
     : undefined;
   const launchAgent =
