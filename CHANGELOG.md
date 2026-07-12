@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3](https://github.com/OpusPopuli/create-op-node/compare/v0.12.2...v0.12.3) (2026-07-12)
+
+
+### Bug Fixes
+
+* **bootstrap:** hydrate prompt-service env + detect existing docker cask ([#91](https://github.com/OpusPopuli/create-op-node/issues/91)) ([b142022](https://github.com/OpusPopuli/create-op-node/commit/b1420223d4780e94a13faf3658f0c9893e5de41e)), closes [#90](https://github.com/OpusPopuli/create-op-node/issues/90) [#89](https://github.com/OpusPopuli/create-op-node/issues/89)
+
 ## [0.12.2](https://github.com/OpusPopuli/create-op-node/compare/v0.12.1...v0.12.2) (2026-07-11)
 
 
