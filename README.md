@@ -72,7 +72,7 @@ The chosen models flow two places:
 1. **Ollama**: bootstrap pulls + warms them so the daemon has them
    resident before the stack comes up. The embedding model pulls first
    (small, fast feedback); the LLM pulls second (can be tens of GB).
-2. **The node `.env`**: bootstrap writes `LLM_MODEL`, `EMBEDDINGS_MODEL`,
+2. **The node `.env`**: bootstrap writes `LLM_MODEL`, `EMBEDDINGS_OLLAMA_MODEL`,
    and `EMBEDDINGS_PROVIDER` into a managed block of the region repo's
    `.env`, which docker compose auto-loads. This is the **single source of
    truth** — every service (and every future partial recreate) resolves
@@ -91,9 +91,10 @@ The chosen models flow two places:
 
 > **`--embeddings-provider` picks where embeddings run.** The default is
 > `xenova` (in-process), which bundles its own embedding model and ignores
-> `EMBEDDINGS_MODEL`. Pass `--embeddings-provider ollama` to use the host
-> daemon with `--embedding-model` — the value is written to `.env` as the
-> single source of truth. See `docs/provider-pattern.md`.
+> `EMBEDDINGS_OLLAMA_MODEL`. Pass `--embeddings-provider ollama` to use the host
+> daemon with `--embedding-model` — the value is written to `.env` (as
+> `EMBEDDINGS_OLLAMA_MODEL`, the key the backend reads) as the single source of
+> truth. See `docs/provider-pattern.md`.
 
 > **Template contract**: for `LLM_MODEL` to actually change the running
 > model, the region repo's `docker-compose-prod.yml` must use

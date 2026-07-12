@@ -227,7 +227,7 @@ export const bootstrapCommand = new Command('bootstrap')
 
     // Model selection: flags override > interactive prompt > defaults. The
     // resolved values flow to both Ollama (pull + warm) and the LaunchAgent
-    // (LLM_MODEL / EMBEDDINGS_MODEL). bootstrap is the source of truth for
+    // (LLM_MODEL / EMBEDDINGS_OLLAMA_MODEL). bootstrap is the source of truth for
     // what model runs. (N3)
     const llmModelChoice = opts.llmModel ?? (await selectLlmModel(opts));
     const [embeddingModel, llmModel] = resolveModels({
@@ -838,7 +838,7 @@ async function collectSecretsPhase(args: {
 }
 
 // ---- Phase 6: LaunchAgent ----
-// Note: model config (LLM_MODEL / EMBEDDINGS_MODEL / NODE_ENV) is deliberately
+// Note: model config (LLM_MODEL / EMBEDDINGS_OLLAMA_MODEL / NODE_ENV) is deliberately
 // NOT exported here. Those are non-secret substitution vars that live in the
 // node's `.env` (see runEnvFilePhase) — a launchctl setenv value would shadow
 // `.env` at compose interpolation time (shell env > .env), defeating the
@@ -1086,7 +1086,7 @@ export function buildComposeEnv(args: {
     ...(secrets.promptServiceAdminApiKeys !== undefined
       ? { PROMPT_SERVICE_ADMIN_API_KEYS: secrets.promptServiceAdminApiKeys }
       : {}),
-    // Model config (LLM_MODEL / EMBEDDINGS_MODEL / NODE_ENV) is intentionally
+    // Model config (LLM_MODEL / EMBEDDINGS_OLLAMA_MODEL / NODE_ENV) is intentionally
     // NOT injected here — it lives in the node's `.env` (runEnvFilePhase),
     // which docker compose auto-loads. Injecting it into the subprocess env
     // would shadow `.env` (shell env > .env) and reintroduce the drift the

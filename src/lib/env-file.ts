@@ -12,7 +12,7 @@
  * regardless of recreate order or how the operator's shell was started.
  *
  * This file deliberately carries ONLY non-secret substitution config
- * (`LLM_MODEL`, `EMBEDDINGS_MODEL`, `EMBEDDINGS_PROVIDER`, `NODE_ENV`).
+ * (`LLM_MODEL`, `EMBEDDINGS_PROVIDER`, `EMBEDDINGS_OLLAMA_MODEL`, `NODE_ENV`).
  * Bootstrap-critical SECRETS stay in the macOS Keychain and are hydrated into
  * the compose subprocess by `bin/op-compose` (see `op-compose-script.ts`) —
  * they never touch a plaintext `.env`, preserving the vault-first principle.
@@ -46,7 +46,7 @@ export const MANAGED_END = '# <<< op-node managed <<<';
 export const MANAGED_KEYS = [
   'LLM_MODEL',
   'EMBEDDINGS_PROVIDER',
-  'EMBEDDINGS_MODEL',
+  'EMBEDDINGS_OLLAMA_MODEL',
   'NODE_ENV',
 ] as const;
 export type ManagedKey = (typeof MANAGED_KEYS)[number];
@@ -63,9 +63,11 @@ export interface ManagedEnvSelection {
   /** Resolved LLM model id (e.g. `qwen3.6:35b-a3b`). Always present — bootstrap
    *  always resolves one via flag/prompt/default. */
   llmModel: string;
-  /** Resolved embeddings model id. Emitted even under the `xenova` provider
-   *  (documents the intended model); only the knowledge service under
-   *  `EMBEDDINGS_PROVIDER=ollama` actually reads it. */
+  /** Resolved embeddings model id. Written as `EMBEDDINGS_OLLAMA_MODEL` — the
+   *  exact key the backend's embeddings config reads
+   *  (packages/config-provider/src/configs/embeddings.config.ts). Emitted even
+   *  under `xenova` (documents the intended model); only the knowledge service
+   *  under `EMBEDDINGS_PROVIDER=ollama` actually reads it. */
   embeddingModel?: string;
   /** `xenova` (in-process, default) or `ollama`. */
   embeddingsProvider?: string;
@@ -78,7 +80,7 @@ function selectionToPairs(sel: ManagedEnvSelection): ReadonlyArray<[ManagedKey, 
   return [
     ['LLM_MODEL', sel.llmModel],
     ['EMBEDDINGS_PROVIDER', sel.embeddingsProvider],
-    ['EMBEDDINGS_MODEL', sel.embeddingModel],
+    ['EMBEDDINGS_OLLAMA_MODEL', sel.embeddingModel],
     ['NODE_ENV', sel.nodeEnv],
   ];
 }
@@ -280,7 +282,7 @@ export async function readEnvModelConfig(repoDir: string): Promise<NodeEnvModelC
   const map = parseEnvContent(content);
   const cfg: NodeEnvModelConfig = {};
   const llm = map.get('LLM_MODEL');
-  const emb = map.get('EMBEDDINGS_MODEL');
+  const emb = map.get('EMBEDDINGS_OLLAMA_MODEL');
   const prov = map.get('EMBEDDINGS_PROVIDER');
   const node = map.get('NODE_ENV');
   if (llm !== undefined) cfg.llmModel = llm;
