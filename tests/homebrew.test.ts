@@ -6,6 +6,9 @@ vi.mock('execa', () => ({
   ExecaError: class {},
 }));
 
+const accessMock = vi.hoisted(() => vi.fn());
+vi.mock('node:fs/promises', () => ({ access: accessMock }));
+
 import {
   detectBrew,
   HOMEBREW_INSTALL_COMMAND,
@@ -16,7 +19,10 @@ import {
   type PackageSpec,
 } from '../src/lib/homebrew.js';
 
-beforeEach(() => execaMock.mockReset());
+beforeEach(() => {
+  execaMock.mockReset();
+  accessMock.mockReset();
+});
 afterEach(() => vi.restoreAllMocks());
 
 describe('detectBrew', () => {
@@ -57,14 +63,23 @@ describe('STUDIO_PACKAGES + HOMEBREW_INSTALL_COMMAND', () => {
       'rclone',
       'ollama',
       'cosign',
-      'docker',
+      'docker-desktop',
       'tailscale',
     ]);
   });
 
-  it('marks docker + tailscale as casks (need GUI authorization)', () => {
-    expect(STUDIO_PACKAGES.find((p) => p.name === 'docker')?.kind).toBe('cask');
+  it('marks docker-desktop + tailscale as casks (need GUI authorization)', () => {
+    expect(STUDIO_PACKAGES.find((p) => p.name === 'docker-desktop')?.kind).toBe('cask');
     expect(STUDIO_PACKAGES.find((p) => p.name === 'tailscale')?.kind).toBe('cask');
+  });
+
+  it('gives the GUI casks an appPath so an existing app skips reinstall (#89)', () => {
+    expect(STUDIO_PACKAGES.find((p) => p.name === 'docker-desktop')?.appPath).toBe(
+      '/Applications/Docker.app',
+    );
+    expect(STUDIO_PACKAGES.find((p) => p.name === 'tailscale')?.appPath).toBe(
+      '/Applications/Tailscale.app',
+    );
   });
 
   it('includes cosign as a formula (fail-closed image-signature gate — #34)', () => {
@@ -106,6 +121,30 @@ describe('isPackageInstalled', () => {
     const err = Object.assign(new Error('spawn brew ENOENT'), { code: 'ENOENT' });
     execaMock.mockRejectedValueOnce(err);
     expect(await isPackageInstalled({ name: 'jq', kind: 'formula' })).toBe(false);
+  });
+
+  it('short-circuits to true (no brew call) when a cask appPath exists — #89', async () => {
+    accessMock.mockResolvedValueOnce(undefined); // app present
+    const r = await isPackageInstalled({
+      name: 'docker-desktop',
+      kind: 'cask',
+      appPath: '/Applications/Docker.app',
+    });
+    expect(r).toBe(true);
+    expect(execaMock).not.toHaveBeenCalled();
+  });
+
+  it('falls through to brew list when a cask appPath is absent — #89', async () => {
+    accessMock.mockRejectedValueOnce(new Error('ENOENT')); // app missing
+    execaMock.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' });
+    const r = await isPackageInstalled({
+      name: 'docker-desktop',
+      kind: 'cask',
+      appPath: '/Applications/Docker.app',
+    });
+    expect(r).toBe(true);
+    const [, args] = execaMock.mock.calls[0] as [string, string[]];
+    expect(args).toEqual(['list', '--cask', 'docker-desktop']);
   });
 });
 

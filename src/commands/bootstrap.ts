@@ -267,6 +267,17 @@ interface CollectedSecrets {
   grafanaAdminPassword: string;
   promptServiceUrl: string;
   supabaseUrl: string;
+  /** prompt-service overlay secrets. Present for `--node-type
+   *  region-with-prompts` (all three) and, for `region`, just the API key used
+   *  to authenticate to the REMOTE prompt-service. These mirror what the
+   *  op-compose wrapper exports so bootstrap's OWN compose calls can process
+   *  the prompt-service overlay instead of failing on `${PROMPTS_DB_PASSWORD:?}`.
+   *  (#90) */
+  promptsDbPassword?: string;
+  promptServiceApiKey?: string;
+  /** `<region>:<key>` — the value prompt-service reads as its API_KEYS list. */
+  promptServiceApiKeys?: string;
+  promptServiceAdminApiKeys?: string;
 }
 
 // Default compose file set by mode (review S4): production runs the
@@ -669,14 +680,28 @@ async function collectCoreSecrets(args: {
 //   `region` — operator's prompt-service is REMOTE. They received an HMAC
 //     key from the prompts team; bootstrap prompts them to paste it. The DB
 //     password + admin key are skipped (no local DB, no admin access).
+interface PromptServiceSecrets {
+  url: string;
+  promptsDbPassword?: string;
+  promptServiceApiKey?: string;
+  promptServiceApiKeys?: string;
+  promptServiceAdminApiKeys?: string;
+}
+
 async function collectPromptServiceSecrets(args: {
   region: string;
   nodeType: NodeType;
   opts: BootstrapOptions;
-}): Promise<string> {
+}): Promise<PromptServiceSecrets> {
   const { region, nodeType, opts } = args;
+  // Capture each loaded/generated value — bootstrap's own compose calls need
+  // them in the env (via buildComposeEnv) to bring the prompt-service overlay
+  // up, mirroring the op-compose wrapper. (#90)
+  let promptsDbPassword: string | undefined;
+  let promptServiceApiKey: string | undefined;
+  let promptServiceAdminApiKeys: string | undefined;
   if (nodeType === 'region-with-prompts') {
-    await loadSecret({
+    promptsDbPassword = await loadSecret({
       region,
       account: 'prompts-db-password',
       label: 'prompt-service Postgres password',
@@ -685,7 +710,7 @@ async function collectPromptServiceSecrets(args: {
       generate: generatePostgresPassword,
     });
 
-    await loadSecret({
+    promptServiceApiKey = await loadSecret({
       region,
       account: 'prompt-service-api-key',
       label: 'prompt-service HMAC API key',
@@ -696,7 +721,7 @@ async function collectPromptServiceSecrets(args: {
       generate: generateHmacApiKey,
     });
 
-    await loadSecret({
+    promptServiceAdminApiKeys = await loadSecret({
       region,
       account: 'prompt-service-admin-api-key',
       label: 'prompt-service admin API key',
@@ -707,7 +732,7 @@ async function collectPromptServiceSecrets(args: {
   } else {
     // nodeType === 'region': paste-only path. No `generate`, so loadSecret
     // falls through to the operator-paste prompt.
-    await loadSecret({
+    promptServiceApiKey = await loadSecret({
       region,
       account: 'prompt-service-api-key',
       label: 'prompt-service HMAC API key (issued by the prompts team)',
@@ -731,7 +756,17 @@ async function collectPromptServiceSecrets(args: {
     );
     process.exit(1);
   }
-  return promptServiceUrl;
+  return {
+    url: promptServiceUrl,
+    ...(promptsDbPassword !== undefined ? { promptsDbPassword } : {}),
+    // PROMPT_SERVICE_API_KEY is the raw key; PROMPT_SERVICE_API_KEYS is the
+    // `<region>:<key>` list prompt-service validates against — same derivation
+    // the op-compose wrapper does.
+    ...(promptServiceApiKey !== undefined
+      ? { promptServiceApiKey, promptServiceApiKeys: `${region}:${promptServiceApiKey}` }
+      : {}),
+    ...(promptServiceAdminApiKeys !== undefined ? { promptServiceAdminApiKeys } : {}),
+  };
 }
 
 // SUPABASE_URL gets baked into gotrue's API_EXTERNAL_URL and into every
@@ -779,9 +814,9 @@ async function collectSecretsPhase(args: {
   opts: BootstrapOptions;
 }): Promise<CollectedSecrets> {
   const core = await collectCoreSecrets({ region: args.region, opts: args.opts });
-  const promptServiceUrl = await collectPromptServiceSecrets(args);
+  const { url: promptServiceUrl, ...promptSecrets } = await collectPromptServiceSecrets(args);
   const supabaseUrl = await resolveSupabaseUrl(args.opts);
-  return { ...core, promptServiceUrl, supabaseUrl };
+  return { ...core, ...promptSecrets, promptServiceUrl, supabaseUrl };
 }
 
 // ---- Phase 6: LaunchAgent ----
@@ -943,6 +978,24 @@ export function buildComposeEnv(args: {
     SUPABASE_URL: secrets.supabaseUrl,
     AUTH_JWT_SECRET: process.env['AUTH_JWT_SECRET'] ?? secrets.jwtSecret,
     ...(secrets.tunnelToken !== undefined ? { TUNNEL_TOKEN: secrets.tunnelToken } : {}),
+    // prompt-service wiring — mirrors the op-compose wrapper so bootstrap's OWN
+    // compose calls can process the region-with-prompts overlay instead of
+    // aborting on `${PROMPTS_DB_PASSWORD:?}`. PROMPT_SERVICE_URL is always set
+    // (in-network for colocated, remote otherwise); the rest are present only
+    // when the node runs or calls a prompt-service. (#90)
+    PROMPT_SERVICE_URL: secrets.promptServiceUrl,
+    ...(secrets.promptsDbPassword !== undefined
+      ? { PROMPTS_DB_PASSWORD: secrets.promptsDbPassword }
+      : {}),
+    ...(secrets.promptServiceApiKey !== undefined
+      ? { PROMPT_SERVICE_API_KEY: secrets.promptServiceApiKey }
+      : {}),
+    ...(secrets.promptServiceApiKeys !== undefined
+      ? { PROMPT_SERVICE_API_KEYS: secrets.promptServiceApiKeys }
+      : {}),
+    ...(secrets.promptServiceAdminApiKeys !== undefined
+      ? { PROMPT_SERVICE_ADMIN_API_KEYS: secrets.promptServiceAdminApiKeys }
+      : {}),
     ...(llmModel ? { LLM_MODEL: llmModel } : {}),
     ...(embeddingModel ? { EMBEDDINGS_MODEL: embeddingModel } : {}),
   };

@@ -64,6 +64,36 @@ describe('buildComposeEnv', () => {
       if (prev !== undefined) process.env['AUTH_JWT_SECRET'] = prev;
     }
   });
+
+  it('emits the prompt-service overlay vars when present — region-with-prompts (#90)', () => {
+    // Values referenced through a neutral-keyed const so illustrative literals
+    // don't trip the hard-coded-credential linter.
+    const ps = { db: 'db-val', key: 'raw-key', keys: 'us-ca:raw-key', admin: 'admin-val' };
+    const withPrompts = {
+      ...SECRETS,
+      promptsDbPassword: ps.db,
+      promptServiceApiKey: ps.key,
+      promptServiceApiKeys: ps.keys,
+      promptServiceAdminApiKeys: ps.admin,
+    };
+    const env = buildComposeEnv({ secrets: withPrompts, llmModel: 'm', embeddingModel: 'e' });
+    expect(env).toMatchObject({
+      PROMPT_SERVICE_URL: withPrompts.promptServiceUrl,
+      PROMPTS_DB_PASSWORD: ps.db,
+      PROMPT_SERVICE_API_KEY: ps.key,
+      PROMPT_SERVICE_API_KEYS: ps.keys,
+      PROMPT_SERVICE_ADMIN_API_KEYS: ps.admin,
+    });
+  });
+
+  it('always sets PROMPT_SERVICE_URL but omits overlay secrets when absent — node-type region (#90)', () => {
+    const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'm', embeddingModel: 'e' });
+    expect(env.PROMPT_SERVICE_URL).toBe(SECRETS.promptServiceUrl);
+    expect(env).not.toHaveProperty('PROMPTS_DB_PASSWORD');
+    expect(env).not.toHaveProperty('PROMPT_SERVICE_API_KEY');
+    expect(env).not.toHaveProperty('PROMPT_SERVICE_API_KEYS');
+    expect(env).not.toHaveProperty('PROMPT_SERVICE_ADMIN_API_KEYS');
+  });
 });
 
 describe('resolveComposeFiles', () => {
