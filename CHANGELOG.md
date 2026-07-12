@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0](https://github.com/OpusPopuli/create-op-node/compare/v0.14.0...v0.15.0) (2026-07-12)
+
+
+### Features
+
+* **verify:** --local-only mode + fix --image array collector ([#104](https://github.com/OpusPopuli/create-op-node/issues/104), [#103](https://github.com/OpusPopuli/create-op-node/issues/103)) ([#105](https://github.com/OpusPopuli/create-op-node/issues/105)) ([914e3e0](https://github.com/OpusPopuli/create-op-node/commit/914e3e018bd7730ae824f320b1881488e8f98bd3))
+
 ## [0.14.0](https://github.com/OpusPopuli/create-op-node/compare/v0.13.0...v0.14.0) (2026-07-12)
 
 
