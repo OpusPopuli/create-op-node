@@ -10,7 +10,8 @@ import { graphqlProbe, httpProbe, type GraphqlProbeInput, type GraphqlProbeResul
 import { unwrap } from '../lib/prompts.js';
 import { tlsHandshake, type TlsProbeInput, type TlsHandshakeResult } from '../lib/tls.js';
 import { checkOllamaHealth, modelPresent, type EmbeddingsProvider, type OllamaHealth } from '../lib/ollama.js';
-import { readEnvModelConfig } from '../lib/env-file.js';
+import { readEnvModelConfig, type NodeEnvModelConfig } from '../lib/env-file.js';
+import { looksLikeNodeRepo } from '../lib/noderepo.js';
 
 interface VerifyOptions {
   domain?: string;
@@ -262,7 +263,7 @@ async function verifyCloudflarePhase(input: VerifyInput, deps: VerifyDeps, push:
   }
 }
 
-// ---- Phase 5: cosign signature check (optional) --------------------
+// ---- Phase 6: cosign signature check (optional) --------------------
 async function verifyCosignPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   if (input.images.length === 0) {
     push({
@@ -441,26 +442,59 @@ function resolveCfToken(opts: VerifyOptions): string | undefined {
   }
 }
 
-// Resolve the model config the Ollama presence phase asserts. Explicit
-// --llm-model wins; otherwise read the node's `.env` (single source of truth
-// written by bootstrap). Undefined when neither yields a model — the phase
-// then skips, preserving off-LAN "run from anywhere" behavior.
-async function resolveOllamaVerifyInput(opts: VerifyOptions): Promise<VerifyInput['ollama']> {
-  let llmModel = opts.llmModel;
-  let embeddingModel = opts.embeddingModel;
-  let provider = opts.embeddingsProvider;
-  if (!llmModel) {
-    const cfg = await readEnvModelConfig(opts.repoDir ?? process.cwd());
-    llmModel = cfg.llmModel;
-    embeddingModel = embeddingModel ?? cfg.embeddingModel;
-    provider = provider ?? (cfg.embeddingsProvider as EmbeddingsProvider | undefined);
-  }
+/** Narrow an arbitrary `.env` string to a known provider, or undefined. */
+function normalizeProvider(v: string | undefined): EmbeddingsProvider | undefined {
+  return v === 'ollama' || v === 'xenova' ? v : undefined;
+}
+
+/**
+ * Merge CLI flags over the node `.env` config, per field. A flag always wins
+ * over the file for its own field, but a field the flag omits still falls back
+ * to `.env` — so `--llm-model foo` on the node still picks up the provider /
+ * embedding model from `.env`. Undefined when no model resolves at all (the
+ * phase then skips). Pure — unit-tested independently of the filesystem.
+ */
+export function mergeOllamaModelConfig(
+  opts: Pick<VerifyOptions, 'llmModel' | 'embeddingModel' | 'embeddingsProvider'>,
+  envCfg: NodeEnvModelConfig,
+): VerifyInput['ollama'] {
+  const llmModel = opts.llmModel ?? envCfg.llmModel;
   if (!llmModel) return undefined;
+  const embeddingModel = opts.embeddingModel ?? envCfg.embeddingModel;
+  const provider = normalizeProvider(opts.embeddingsProvider ?? envCfg.embeddingsProvider);
   return {
     llmModel,
     ...(embeddingModel ? { embeddingModel } : {}),
     ...(provider ? { provider } : {}),
   };
+}
+
+// Resolve the model config the Ollama presence phase asserts. Reads the node
+// `.env` (single source of truth written by bootstrap) and merges flags over
+// it per field. The `.env` is only read from a dir we trust — an explicit
+// --repo-dir, or a cwd that actually looks like a node repo — so a stray
+// `.env` in an unrelated cwd can't trigger a localhost probe (false fail).
+async function resolveOllamaVerifyInput(opts: VerifyOptions): Promise<VerifyInput['ollama']> {
+  const explicit = opts.repoDir !== undefined;
+  const dir = opts.repoDir ?? process.cwd();
+  const envCfg: NodeEnvModelConfig =
+    explicit || (await looksLikeNodeRepo(dir)) ? await readEnvModelConfig(dir) : {};
+
+  // Surface a typo'd EMBEDDINGS_PROVIDER instead of silently skipping the
+  // embedding-model check (only the .env can carry a bad value — the flag is
+  // constrained by commander `.choices`).
+  if (
+    opts.embeddingsProvider === undefined &&
+    envCfg.embeddingsProvider !== undefined &&
+    normalizeProvider(envCfg.embeddingsProvider) === undefined
+  ) {
+    p.note(
+      `${pc.yellow('⚠')} Unrecognized EMBEDDINGS_PROVIDER=${envCfg.embeddingsProvider} in .env — expected xenova|ollama; the embedding-model check is disabled.`,
+      'verify',
+    );
+  }
+
+  return mergeOllamaModelConfig(opts, envCfg);
 }
 
 // Run the checks behind a single spinner that advances per phase.
