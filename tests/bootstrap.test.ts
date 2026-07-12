@@ -37,12 +37,12 @@ describe('buildComposeEnv', () => {
   });
 
   it('does NOT inject model config — that lives in the node .env (single source of truth)', () => {
-    // LLM_MODEL / EMBEDDINGS_MODEL / NODE_ENV must NOT be in the compose
+    // LLM_MODEL / EMBEDDINGS_OLLAMA_MODEL / NODE_ENV must NOT be in the compose
     // subprocess env: a shell-env value shadows `.env` at interpolation time
     // (shell > .env), which would reintroduce the drift the .env exists to kill.
     const env = buildComposeEnv({ secrets: SECRETS });
     expect(env).not.toHaveProperty('LLM_MODEL');
-    expect(env).not.toHaveProperty('EMBEDDINGS_MODEL');
+    expect(env).not.toHaveProperty('EMBEDDINGS_OLLAMA_MODEL');
     expect(env).not.toHaveProperty('NODE_ENV');
   });
 

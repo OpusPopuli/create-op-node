@@ -130,7 +130,7 @@ export interface PlistInput {
  * Required: `PGSODIUM_ROOT_KEY`. Optional: `TUNNEL_TOKEN` + the Supabase
  * credentials — omitted from the setenv list when their inputs are undefined.
  *
- * Model config (`LLM_MODEL` / `EMBEDDINGS_MODEL` / `NODE_ENV`) is deliberately
+ * Model config (`LLM_MODEL` / `EMBEDDINGS_OLLAMA_MODEL` / `NODE_ENV`) is deliberately
  * NOT set here: those are non-secret substitution vars that live in the node's
  * `.env` (single source of truth). A launchctl setenv value would shadow
  * `.env` at compose interpolation time, so it stays out of the launchd session.

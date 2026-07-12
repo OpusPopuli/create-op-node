@@ -41,7 +41,7 @@ describe('buildManagedEnvContent — fresh file', () => {
     const map = parseEnvContent(built.content);
     expect(map.get('LLM_MODEL')).toBe('qwen3.6:35b-a3b');
     expect(map.get('EMBEDDINGS_PROVIDER')).toBe('ollama');
-    expect(map.get('EMBEDDINGS_MODEL')).toBe('nomic-embed-text');
+    expect(map.get('EMBEDDINGS_OLLAMA_MODEL')).toBe('nomic-embed-text');
     expect(map.get('NODE_ENV')).toBe('development');
     expect(built.content).toContain(MANAGED_BEGIN);
     expect(built.content).toContain(MANAGED_END);

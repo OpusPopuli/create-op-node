@@ -117,7 +117,7 @@ describe('renderLaunchAgentPlist', () => {
     ).toThrow(/launchd path interpolation/);
   });
 
-  it('NEVER emits model config — LLM_MODEL / EMBEDDINGS_MODEL / NODE_ENV live in .env (#98)', () => {
+  it('NEVER emits model config — LLM_MODEL / EMBEDDINGS_OLLAMA_MODEL / NODE_ENV live in .env (#98)', () => {
     // Model config is non-secret substitution config that belongs in the
     // node's `.env` (single source of truth). A launchctl setenv value would
     // shadow `.env` at compose interpolation time, so the plist must not carry
@@ -127,7 +127,7 @@ describe('renderLaunchAgentPlist', () => {
       tunnelToken: 'ey.tunnel.tok',
     });
     expect(out).not.toContain('LLM_MODEL');
-    expect(out).not.toContain('EMBEDDINGS_MODEL');
+    expect(out).not.toContain('EMBEDDINGS_OLLAMA_MODEL');
     expect(out).not.toContain('NODE_ENV');
   });
 
