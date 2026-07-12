@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Command, Option } from 'commander';
 
-import { buildComposeEnv, checkPublicProfileSecrets, collectComposeFile, estimatedPullTime, LLM_MODEL_CHOICES, planSignatureGate, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
+import { buildComposeEnv, checkPublicProfileSecrets, collectComposeFile, estimatedPullTime, LLM_MODEL_CHOICES, modelsToPull, planSignatureGate, recommendLlmModel, resolveComposeFiles, resolveModels } from '../src/commands/bootstrap.js';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_LLM_MODEL } from '../src/lib/ollama.js';
 import { WELL_KNOWN_GATEWAY_HMAC_SECRET } from '../src/lib/constants.js';
 
@@ -219,6 +219,20 @@ describe('resolveModels', () => {
     const [first, second] = resolveModels({});
     expect(first).toBe(DEFAULT_EMBEDDING_MODEL);
     expect(second).toBe(DEFAULT_LLM_MODEL);
+  });
+});
+
+describe('modelsToPull', () => {
+  it('pulls the LLM only under the xenova (in-process) provider', () => {
+    expect(
+      modelsToPull({ provider: 'xenova', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text' }),
+    ).toEqual(['qwen2.5:7b']);
+  });
+
+  it('pulls embedding first then LLM under the ollama provider', () => {
+    expect(
+      modelsToPull({ provider: 'ollama', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text' }),
+    ).toEqual(['nomic-embed-text', 'qwen2.5:7b']);
   });
 });
 

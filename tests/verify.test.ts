@@ -26,6 +26,10 @@ const okGql = (): Awaited<ReturnType<VerifyDeps['graphql']>> => ({
   typename: 'Query',
 });
 
+const okOllama = (
+  models: string[] = ['qwen2.5:7b', 'nomic-embed-text:latest'],
+): Awaited<ReturnType<VerifyDeps['ollama']>> => ({ reachable: true, models });
+
 function depsFor(overrides: Partial<VerifyDeps> = {}): VerifyDeps {
   return {
     tls: vi.fn(() => Promise.resolve(okTls())),
@@ -33,6 +37,7 @@ function depsFor(overrides: Partial<VerifyDeps> = {}): VerifyDeps {
     graphql: vi.fn(() => Promise.resolve(okGql())),
     tunnel: vi.fn(() => Promise.resolve({ ok: true, connections: 4, status: 'healthy' })),
     cosign: vi.fn(() => Promise.resolve({ ok: true, output: 'Verified OK' })),
+    ollama: vi.fn(() => Promise.resolve(okOllama())),
     ...overrides,
   };
 }
@@ -90,12 +95,13 @@ describe('summarize', () => {
 });
 
 describe('runVerify orchestration', () => {
-  it('returns 5 phases on a clean run with no images', async () => {
+  it('returns 6 phases on a clean run with no images', async () => {
     const report = await runVerify(baseInput, depsFor());
     expect(report.phases.map((ph) => ph.name)).toEqual([
       'TLS handshake',
       'GET /health',
       'GraphQL { __typename }',
+      'Ollama models',
       'Cloudflare Tunnel',
       'cosign verify',
     ]);
@@ -220,5 +226,73 @@ describe('runVerify orchestration', () => {
     // succeeds we got the readonly guarantee.
     const report: VerifyReport = { phases: [] };
     expect(report.phases).toHaveLength(0);
+  });
+});
+
+describe('Ollama model-presence phase', () => {
+  const ollamaPhase = (report: VerifyReport): VerifyPhase | undefined =>
+    report.phases.find((ph) => ph.name === 'Ollama models');
+
+  it('skips when no model is resolved (off-LAN run) and never probes the daemon', async () => {
+    const deps = depsFor();
+    const report = await runVerify(baseInput, deps);
+    expect(ollamaPhase(report)?.status).toBe('skipped');
+    expect(deps.ollama).not.toHaveBeenCalled();
+  });
+
+  it('passes when the configured LLM is installed', async () => {
+    const report = await runVerify(
+      { ...baseInput, ollama: { llmModel: 'qwen2.5:7b' } },
+      depsFor({ ollama: vi.fn(() => Promise.resolve(okOllama(['qwen2.5:7b']))) }),
+    );
+    const ph = ollamaPhase(report);
+    expect(ph?.status).toBe('ok');
+    expect(ph?.detail).toContain('qwen2.5:7b');
+  });
+
+  it('fails with the exact ollama pull remedy when the LLM is missing (the drift)', async () => {
+    const report = await runVerify(
+      { ...baseInput, ollama: { llmModel: 'qwen3.5:35b' } },
+      depsFor({ ollama: vi.fn(() => Promise.resolve(okOllama(['qwen2.5:72b']))) }),
+    );
+    const ph = ollamaPhase(report);
+    expect(ph?.status).toBe('fail');
+    expect(ph?.detail).toContain('ollama pull qwen3.5:35b');
+  });
+
+  it('fails when the local daemon is unreachable', async () => {
+    const report = await runVerify(
+      { ...baseInput, ollama: { llmModel: 'qwen2.5:7b' } },
+      depsFor({ ollama: vi.fn(() => Promise.resolve({ reachable: false, models: [] })) }),
+    );
+    const ph = ollamaPhase(report);
+    expect(ph?.status).toBe('fail');
+    expect(ph?.detail).toContain('brew services start ollama');
+  });
+
+  it('does NOT assert the embedding model under the xenova provider', async () => {
+    // Embedding model absent from Ollama, but provider is xenova (in-process),
+    // so it must not be required — the LLM alone is present, so the phase passes.
+    const report = await runVerify(
+      {
+        ...baseInput,
+        ollama: { llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text', provider: 'xenova' },
+      },
+      depsFor({ ollama: vi.fn(() => Promise.resolve(okOllama(['qwen2.5:7b']))) }),
+    );
+    expect(ollamaPhase(report)?.status).toBe('ok');
+  });
+
+  it('asserts the embedding model under the ollama provider', async () => {
+    const report = await runVerify(
+      {
+        ...baseInput,
+        ollama: { llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text', provider: 'ollama' },
+      },
+      depsFor({ ollama: vi.fn(() => Promise.resolve(okOllama(['qwen2.5:7b']))) }),
+    );
+    const ph = ollamaPhase(report);
+    expect(ph?.status).toBe('fail');
+    expect(ph?.detail).toContain('ollama pull nomic-embed-text');
   });
 });

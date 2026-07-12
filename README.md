@@ -238,7 +238,7 @@ npx create-op-node verify --domain your-domain.example
 ```
 
 Off-LAN health probe of a live node, runnable from anywhere with internet
-access. Five phases:
+access. Six phases:
 
 1. **TLS handshake** to `api.<domain>:443` — surfaces cert subject, issuer,
    and days-to-expiry. Warns when the cert is within `--cert-warn-days`
@@ -248,12 +248,22 @@ access. Five phases:
 3. **`POST https://api.<domain>/api`** with `{ __typename }` must return a
    valid GraphQL envelope (catches the "TLS green, but a misconfigured
    proxy returns HTML" case).
-4. **Cloudflare Tunnel status** (optional) — looks up `connections` via
+4. **Ollama model presence** (optional, node-local) — asserts the configured
+   `LLM_MODEL` is actually pulled into the local Ollama, failing loudly with
+   the exact `ollama pull <model>` remedy if not. This catches the
+   config↔runtime drift that otherwise 404s at inference time (a node set to
+   a model that was never downloaded). The model is read from `--llm-model`
+   or, when omitted, the node's `.env` (`--repo-dir`, default cwd) — so
+   running `verify` **on the node** needs no flags. **Skipped** when no model
+   resolves, which keeps an off-LAN `verify --domain …` from tripping it. The
+   embedding model is asserted only under `--embeddings-provider ollama`
+   (xenova computes embeddings in-process).
+5. **Cloudflare Tunnel status** (optional) — looks up `connections` via
    the CF API. Zero connectors registered → warning that cloudflared on
    the Studio is offline. Requires all three of `--cf-token` (or
    `--cf-token-file`), `--cf-account-id`, `--tunnel-id`; partial
    configuration warns + names the missing flag.
-5. **`cosign verify`** (optional, repeatable `--image`) — keyless
+6. **`cosign verify`** (optional, repeatable `--image`) — keyless
    verification against the GitHub Actions OIDC issuer + Fulcio +
    the Rekor transparency log. Silently skipped when `cosign` isn't on
    `PATH` (install with `brew install cosign` to enable).
@@ -280,6 +290,17 @@ npx create-op-node verify \
 invocations — the latter ends up in `ps` output, the former doesn't.
 Use `--api-host <host>` to override the default `api.<domain>`
 construction when your node exposes the API at a different subdomain.
+
+Run it **on the node** (from the region repo dir) to also catch model
+drift with zero extra flags — the Ollama phase reads `LLM_MODEL` from the
+`.env` bootstrap wrote:
+
+```bash
+cd ~/Development/opuspopuli-node-us-ca
+npx create-op-node verify --domain yournode.example.org
+# or pin the model explicitly from anywhere:
+npx create-op-node verify --domain yournode.example.org --llm-model qwen3.6:35b-a3b
+```
 
 ## Bootstrapping a region config
 
