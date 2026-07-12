@@ -64,6 +64,56 @@ describe('collectImage (#103)', () => {
   });
 });
 
+describe('runVerify --local-only (#104)', () => {
+  it('skips domain/tunnel probes but still runs the node-local checks', async () => {
+    const deps = depsFor();
+    const report = await runVerify(
+      {
+        ...baseInput,
+        localOnly: true,
+        ollama: { llmModel: 'qwen2.5:7b' },
+        images: ['ghcr.io/opuspopuli/api:latest'],
+      },
+      deps,
+    );
+    const status = (name: string): VerifyPhase['status'] | undefined =>
+      report.phases.find((ph) => ph.name === name)?.status;
+
+    // Domain-dependent phases are skipped (not failed) and never probed.
+    for (const name of [
+      'TLS handshake',
+      'GET /health',
+      'GraphQL { __typename }',
+      'Cloudflare Tunnel',
+    ]) {
+      expect(status(name)).toBe('skipped');
+    }
+    expect(deps.tls).not.toHaveBeenCalled();
+    expect(deps.http).not.toHaveBeenCalled();
+    expect(deps.graphql).not.toHaveBeenCalled();
+    expect(deps.tunnel).not.toHaveBeenCalled();
+
+    // Node-local checks still run.
+    expect(status('Ollama models')).toBe('ok');
+    expect(status('cosign verify ghcr.io/opuspopuli/api:latest')).toBe('ok');
+
+    // A healthy local-only node has zero failures → exit 0.
+    expect(summarize(report).ok).toBe(true);
+  });
+
+  it('a missing model still fails under --local-only (local checks are authoritative)', async () => {
+    const deps = depsFor({
+      ollama: () => Promise.resolve({ reachable: true, models: ['some-other-model'] }),
+    });
+    const report = await runVerify(
+      { ...baseInput, localOnly: true, ollama: { llmModel: 'qwen2.5:7b' } },
+      deps,
+    );
+    expect(report.phases.find((ph) => ph.name === 'Ollama models')?.status).toBe('fail');
+    expect(summarize(report).ok).toBe(false);
+  });
+});
+
 describe('summarize', () => {
   it('ok=true when no phase failed', () => {
     expect(

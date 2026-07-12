@@ -27,6 +27,7 @@ interface VerifyOptions {
   embeddingModel?: string;
   embeddingsProvider?: EmbeddingsProvider;
   repoDir?: string;
+  localOnly?: boolean;
 }
 
 const DOMAIN_RE = /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i;
@@ -93,6 +94,11 @@ export interface VerifyInput {
     embeddingModel?: string;
     provider?: EmbeddingsProvider;
   };
+  /** Node has no public domain/tunnel (bootstrap --local-only). Skips the
+   *  domain-dependent probes (TLS, /health, GraphQL, Cloudflare) as `skipped`
+   *  rather than failing them, leaving the node-local checks (Ollama, cosign)
+   *  to decide the outcome. See #104. */
+  localOnly?: boolean;
 }
 
 const DEFAULT_DEPS: VerifyDeps = {
@@ -127,8 +133,18 @@ export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_D
   return { phases };
 }
 
+// Record a domain-dependent phase as `skipped` on a --local-only node (no
+// public endpoint / tunnel to reach), preserving phase ordering + counts so a
+// healthy local node exits 0 instead of failing inapplicable probes. See #104.
+function skipLocalOnly(name: string, detail: string, push: PushVerifyPhase): void {
+  push({ name, status: 'skipped', detail });
+}
+
+const LOCAL_ONLY_NO_ENDPOINT = 'local-only node — no public endpoint to probe';
+
 // ---- Phase 1: TLS handshake ---------------------------------------
 async function verifyTlsPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
+  if (input.localOnly) return skipLocalOnly('TLS handshake', LOCAL_ONLY_NO_ENDPOINT, push);
   const tls = await deps.tls({ host: input.apiHost });
   if (!tls.ok) {
     push({ name: 'TLS handshake', status: 'fail', detail: tls.reason });
@@ -148,6 +164,7 @@ async function verifyTlsPhase(input: VerifyInput, deps: VerifyDeps, push: PushVe
 
 // ---- Phase 2: GET /health ------------------------------------------
 async function verifyHealthPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
+  if (input.localOnly) return skipLocalOnly('GET /health', LOCAL_ONLY_NO_ENDPOINT, push);
   const health = await deps.http({ url: `https://${input.apiHost}/health` });
   if (health.ok) {
     push({ name: 'GET /health', status: 'ok', detail: `HTTP ${health.status}` });
@@ -158,6 +175,7 @@ async function verifyHealthPhase(input: VerifyInput, deps: VerifyDeps, push: Pus
 
 // ---- Phase 3: GraphQL { __typename } -------------------------------
 async function verifyGraphqlPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
+  if (input.localOnly) return skipLocalOnly('GraphQL { __typename }', LOCAL_ONLY_NO_ENDPOINT, push);
   const gql = await deps.graphql({ url: `https://${input.apiHost}/api` });
   if (gql.ok) {
     push({ name: 'GraphQL { __typename }', status: 'ok', detail: `typename=${gql.typename}` });
@@ -216,6 +234,7 @@ async function verifyOllamaModelsPhase(input: VerifyInput, deps: VerifyDeps, pus
 
 // ---- Phase 5: Cloudflare Tunnel status (optional) ------------------
 async function verifyCloudflarePhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
+  if (input.localOnly) return skipLocalOnly('Cloudflare Tunnel', 'local-only node — no tunnel', push);
   const cfFields: ReadonlyArray<[string, string | undefined]> = [
     ['--cf-token', input.cf?.token],
     ['--cf-account-id', input.cf?.accountId],
@@ -346,16 +365,25 @@ export const verifyCommand = new Command('verify')
     new Option('--repo-dir <path>', "Node repo dir whose .env supplies the model config when --llm-model is omitted (default: cwd)."),
   )
   .addOption(
+    new Option(
+      '--local-only',
+      'Node has no public domain/tunnel — skip the TLS/health/GraphQL/tunnel probes (no domain prompt) and run only the node-local checks (Ollama model presence, cosign).',
+    ).default(false),
+  )
+  .addOption(
     new Option('--show-skipped', 'Include skipped phases in the summary').default(false),
   )
   .action(async (opts: VerifyOptions) => {
     p.intro(pc.bgCyan(pc.black(' create-op-node verify ')));
 
-    const domain = await resolveDomain(opts);
+    const localOnly = opts.localOnly ?? false;
+    // A local-only node has no public endpoint, so don't resolve/prompt for a
+    // domain — the domain-dependent phases self-skip below.
+    const domain = localOnly ? undefined : await resolveDomain(opts);
     const certWarnDays = resolveCertWarnDays(opts);
     const cfToken = resolveCfToken(opts);
 
-    const apiHost = opts.apiHost ?? `api.${domain}`;
+    const apiHost = localOnly ? '' : (opts.apiHost ?? `api.${domain}`);
     const images = opts.image ?? [];
     const ollama = await resolveOllamaVerifyInput(opts);
     // Fixed phases: TLS, health, GraphQL, Ollama, Cloudflare (5) + cosign
@@ -369,6 +397,7 @@ export const verifyCommand = new Command('verify')
       opts,
       images,
       totalPhases,
+      localOnly,
       ...(ollama ? { ollama } : {}),
     });
 
@@ -515,9 +544,10 @@ async function runVerifyWithSpinner(args: {
   opts: VerifyOptions;
   images: string[];
   totalPhases: number;
+  localOnly: boolean;
   ollama?: VerifyInput['ollama'];
 }): Promise<VerifyReport> {
-  const { apiHost, certWarnDays, cfToken, opts, images, totalPhases, ollama } = args;
+  const { apiHost, certWarnDays, cfToken, opts, images, totalPhases, localOnly, ollama } = args;
 
   let phaseIndex = 0;
   let activeSpin: ReturnType<typeof p.spinner> | null = null;
@@ -543,6 +573,7 @@ async function runVerifyWithSpinner(args: {
         ...(opts.tunnelId ? { tunnelId: opts.tunnelId } : {}),
       },
       images,
+      localOnly,
       ...(ollama ? { ollama } : {}),
     },
     deps,
