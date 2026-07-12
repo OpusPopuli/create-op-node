@@ -73,6 +73,12 @@ export async function writePgsodiumKeyFile(
   try {
     const dir = dirname(keyFile);
     await mkdir(dir, { recursive: true, mode: 0o700 });
+    // Remove any existing key file first. It's written mode 0400 (read-only),
+    // so on a re-run `writeFile` (which opens O_WRONLY|O_TRUNC) would fail
+    // EACCES — the `mode` option only applies when the file is created, not to
+    // an existing one. `force: true` ignores a missing file, keeping the write
+    // idempotent across bootstrap re-runs. (#93)
+    await rm(keyFile, { force: true });
     await writeFile(keyFile, key, { mode: 0o400 });
     // mkdir's mode option respects umask; chmod is the belt to the suspenders.
     await chmod(dir, 0o700);

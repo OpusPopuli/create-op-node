@@ -290,6 +290,19 @@ describe('writePgsodiumKeyFile', () => {
     const r = await writePgsodiumKeyFile('A'.repeat(64), target);
     expect(r.ok).toBe(false);
   });
+
+  it('overwrites an existing read-only (0400) key file on re-run (#93)', async () => {
+    const target = join(dir, 'pgsodium_root_key');
+    const first = await writePgsodiumKeyFile(VALID_KEY, target);
+    expect(first.ok).toBe(true);
+    // A second run must succeed despite the existing mode-0400 (read-only)
+    // file — the pre-fix code failed here with EACCES.
+    const newKey = 'b'.repeat(64);
+    const second = await writePgsodiumKeyFile(newKey, target);
+    expect(second.ok).toBe(true);
+    expect(await readFile(target, 'utf8')).toBe(newKey);
+    expect((await stat(target)).mode & 0o777).toBe(0o400);
+  });
 });
 
 describe('writeLaunchAgentPlist', () => {

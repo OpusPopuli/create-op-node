@@ -96,6 +96,12 @@ describe('DEFAULT_IDENTITY_REGEXP — ref-pinned to release.yml (#34)', () => {
     ).toBe(true);
   });
 
+  it('matches the prompt-service repo release identity (#94)', () => {
+    expect(
+      re.test(id('OpusPopuli/prompt-service/.github/workflows/release.yml@refs/heads/main')),
+    ).toBe(true);
+  });
+
   it('rejects a different workflow in the same repo (no longer any-workflow)', () => {
     expect(re.test(id('OpusPopuli/opuspopuli/.github/workflows/ci.yml@refs/heads/main'))).toBe(false);
   });
