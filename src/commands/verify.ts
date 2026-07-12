@@ -9,6 +9,9 @@ import { cosignVerifyImage, type CosignVerifyInput, type CosignVerifyResult } fr
 import { graphqlProbe, httpProbe, type GraphqlProbeInput, type GraphqlProbeResult, type HttpProbeInput, type HttpProbeResult } from '../lib/http.js';
 import { unwrap } from '../lib/prompts.js';
 import { tlsHandshake, type TlsProbeInput, type TlsHandshakeResult } from '../lib/tls.js';
+import { checkOllamaHealth, modelPresent, type EmbeddingsProvider, type OllamaHealth } from '../lib/ollama.js';
+import { readEnvModelConfig, type NodeEnvModelConfig } from '../lib/env-file.js';
+import { looksLikeNodeRepo } from '../lib/noderepo.js';
 
 interface VerifyOptions {
   domain?: string;
@@ -20,6 +23,10 @@ interface VerifyOptions {
   image?: string[];
   certWarnDays?: string;
   showSkipped?: boolean;
+  llmModel?: string;
+  embeddingModel?: string;
+  embeddingsProvider?: EmbeddingsProvider;
+  repoDir?: string;
 }
 
 const DOMAIN_RE = /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i;
@@ -60,6 +67,9 @@ export interface VerifyDeps {
   graphql: (input: GraphqlProbeInput) => Promise<GraphqlProbeResult>;
   tunnel: (input: TunnelStatusInput) => Promise<TunnelStatusResult>;
   cosign: (input: CosignVerifyInput) => Promise<CosignVerifyResult>;
+  /** Local Ollama health probe (`/api/tags`). Defaults to checkOllamaHealth
+   *  against localhost — meaningful only when verify runs ON the node. */
+  ollama: (url?: string) => Promise<OllamaHealth>;
   /** Called once per phase as it resolves — lets the CLI render spinners.
    *  Pass a no-op for tests that just want the report. */
   onPhase?: (phase: VerifyPhase) => void;
@@ -75,6 +85,14 @@ export interface VerifyInput {
     tunnelId?: string;
   };
   images: ReadonlyArray<string>;
+  /** Configured model(s) to assert are present in the LOCAL Ollama. Resolved
+   *  from `--llm-model` or the node `.env` (readEnvModelConfig). Absent →
+   *  the Ollama phase is skipped (preserves off-LAN "run from anywhere"). */
+  ollama?: {
+    llmModel: string;
+    embeddingModel?: string;
+    provider?: EmbeddingsProvider;
+  };
 }
 
 const DEFAULT_DEPS: VerifyDeps = {
@@ -83,6 +101,7 @@ const DEFAULT_DEPS: VerifyDeps = {
   graphql: graphqlProbe,
   tunnel: tunnelStatus,
   cosign: cosignVerifyImage,
+  ollama: checkOllamaHealth,
 };
 
 type PushVerifyPhase = (ph: VerifyPhase) => void;
@@ -101,6 +120,7 @@ export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_D
   await verifyTlsPhase(input, deps, push);
   await verifyHealthPhase(input, deps, push);
   await verifyGraphqlPhase(input, deps, push);
+  await verifyOllamaModelsPhase(input, deps, push);
   await verifyCloudflarePhase(input, deps, push);
   await verifyCosignPhase(input, deps, push);
 
@@ -146,7 +166,55 @@ async function verifyGraphqlPhase(input: VerifyInput, deps: VerifyDeps, push: Pu
   }
 }
 
-// ---- Phase 4: Cloudflare Tunnel status (optional) ------------------
+// ---- Phase 4: Ollama model presence (optional, node-local) ---------
+//
+// Catches the config↔runtime drift that silently 404s at inference time: the
+// configured LLM_MODEL naming a model that was never pulled into the host
+// Ollama. Probes the LOCAL daemon, so it's meaningful only when verify runs
+// ON the node — hence skipped (not failed) when no model was resolved, which
+// keeps an off-LAN `verify --domain …` from tripping it.
+async function verifyOllamaModelsPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
+  const cfg = input.ollama;
+  if (!cfg?.llmModel) {
+    push({
+      name: 'Ollama models',
+      status: 'skipped',
+      detail: 'pass --llm-model (or run on the node so its .env is read) to enable',
+    });
+    return;
+  }
+
+  const health = await deps.ollama();
+  if (!health.reachable) {
+    push({
+      name: 'Ollama models',
+      status: 'fail',
+      detail:
+        'configured model set but the local Ollama daemon is unreachable on :11434 — ' +
+        'start it with `brew services start ollama` (run this check on the node)',
+    });
+    return;
+  }
+
+  // Assert the LLM always; assert the embedding model only when the knowledge
+  // service actually uses the Ollama provider for it (xenova is in-process).
+  const required = [cfg.llmModel];
+  if (cfg.provider === 'ollama' && cfg.embeddingModel) required.push(cfg.embeddingModel);
+
+  const missing = required.filter((m) => !modelPresent(m, health.models));
+  if (missing.length > 0) {
+    const remedy = missing.map((m) => `ollama pull ${m}`).join(' && ');
+    push({
+      name: 'Ollama models',
+      status: 'fail',
+      detail: `not installed: ${missing.join(', ')} — remedy: ${remedy}`,
+    });
+    return;
+  }
+  push({ name: 'Ollama models', status: 'ok', detail: `${required.join(', ')} present` });
+}
+
+// ---- Phase 5: Cloudflare Tunnel status (optional) ------------------
 async function verifyCloudflarePhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   const cfFields: ReadonlyArray<[string, string | undefined]> = [
     ['--cf-token', input.cf?.token],
@@ -195,7 +263,7 @@ async function verifyCloudflarePhase(input: VerifyInput, deps: VerifyDeps, push:
   }
 }
 
-// ---- Phase 5: cosign signature check (optional) --------------------
+// ---- Phase 6: cosign signature check (optional) --------------------
 async function verifyCosignPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   if (input.images.length === 0) {
     push({
@@ -253,6 +321,21 @@ export const verifyCommand = new Command('verify')
     new Option('--cert-warn-days <n>', 'Warn if cert expires within N days').default('14'),
   )
   .addOption(
+    new Option(
+      '--llm-model <model>',
+      'Assert this model is present in the local Ollama (catches config↔runtime drift). Defaults to LLM_MODEL from the node .env when run on the node.',
+    ),
+  )
+  .addOption(
+    new Option('--embedding-model <model>', 'Also assert this embedding model is present (only checked when --embeddings-provider=ollama).'),
+  )
+  .addOption(
+    new Option('--embeddings-provider <provider>', 'Embeddings provider the node runs; the embedding model is only asserted for `ollama`.').choices(['xenova', 'ollama']),
+  )
+  .addOption(
+    new Option('--repo-dir <path>', "Node repo dir whose .env supplies the model config when --llm-model is omitted (default: cwd)."),
+  )
+  .addOption(
     new Option('--show-skipped', 'Include skipped phases in the summary').default(false),
   )
   .action(async (opts: VerifyOptions) => {
@@ -264,7 +347,10 @@ export const verifyCommand = new Command('verify')
 
     const apiHost = opts.apiHost ?? `api.${domain}`;
     const images = opts.image ?? [];
-    const totalPhases = 4 + (images.length === 0 ? 1 : images.length);
+    const ollama = await resolveOllamaVerifyInput(opts);
+    // Fixed phases: TLS, health, GraphQL, Ollama, Cloudflare (5) + cosign
+    // (one line when no --image, else one per image).
+    const totalPhases = 5 + (images.length === 0 ? 1 : images.length);
 
     const report = await runVerifyWithSpinner({
       apiHost,
@@ -273,6 +359,7 @@ export const verifyCommand = new Command('verify')
       opts,
       images,
       totalPhases,
+      ...(ollama ? { ollama } : {}),
     });
 
     renderVerifySummary(report, { opts, totalPhases });
@@ -355,6 +442,61 @@ function resolveCfToken(opts: VerifyOptions): string | undefined {
   }
 }
 
+/** Narrow an arbitrary `.env` string to a known provider, or undefined. */
+function normalizeProvider(v: string | undefined): EmbeddingsProvider | undefined {
+  return v === 'ollama' || v === 'xenova' ? v : undefined;
+}
+
+/**
+ * Merge CLI flags over the node `.env` config, per field. A flag always wins
+ * over the file for its own field, but a field the flag omits still falls back
+ * to `.env` — so `--llm-model foo` on the node still picks up the provider /
+ * embedding model from `.env`. Undefined when no model resolves at all (the
+ * phase then skips). Pure — unit-tested independently of the filesystem.
+ */
+export function mergeOllamaModelConfig(
+  opts: Pick<VerifyOptions, 'llmModel' | 'embeddingModel' | 'embeddingsProvider'>,
+  envCfg: NodeEnvModelConfig,
+): VerifyInput['ollama'] {
+  const llmModel = opts.llmModel ?? envCfg.llmModel;
+  if (!llmModel) return undefined;
+  const embeddingModel = opts.embeddingModel ?? envCfg.embeddingModel;
+  const provider = normalizeProvider(opts.embeddingsProvider ?? envCfg.embeddingsProvider);
+  return {
+    llmModel,
+    ...(embeddingModel ? { embeddingModel } : {}),
+    ...(provider ? { provider } : {}),
+  };
+}
+
+// Resolve the model config the Ollama presence phase asserts. Reads the node
+// `.env` (single source of truth written by bootstrap) and merges flags over
+// it per field. The `.env` is only read from a dir we trust — an explicit
+// --repo-dir, or a cwd that actually looks like a node repo — so a stray
+// `.env` in an unrelated cwd can't trigger a localhost probe (false fail).
+async function resolveOllamaVerifyInput(opts: VerifyOptions): Promise<VerifyInput['ollama']> {
+  const explicit = opts.repoDir !== undefined;
+  const dir = opts.repoDir ?? process.cwd();
+  const envCfg: NodeEnvModelConfig =
+    explicit || (await looksLikeNodeRepo(dir)) ? await readEnvModelConfig(dir) : {};
+
+  // Surface a typo'd EMBEDDINGS_PROVIDER instead of silently skipping the
+  // embedding-model check (only the .env can carry a bad value — the flag is
+  // constrained by commander `.choices`).
+  if (
+    opts.embeddingsProvider === undefined &&
+    envCfg.embeddingsProvider !== undefined &&
+    normalizeProvider(envCfg.embeddingsProvider) === undefined
+  ) {
+    p.note(
+      `${pc.yellow('⚠')} Unrecognized EMBEDDINGS_PROVIDER=${envCfg.embeddingsProvider} in .env — expected xenova|ollama; the embedding-model check is disabled.`,
+      'verify',
+    );
+  }
+
+  return mergeOllamaModelConfig(opts, envCfg);
+}
+
 // Run the checks behind a single spinner that advances per phase.
 async function runVerifyWithSpinner(args: {
   apiHost: string;
@@ -363,8 +505,9 @@ async function runVerifyWithSpinner(args: {
   opts: VerifyOptions;
   images: string[];
   totalPhases: number;
+  ollama?: VerifyInput['ollama'];
 }): Promise<VerifyReport> {
-  const { apiHost, certWarnDays, cfToken, opts, images, totalPhases } = args;
+  const { apiHost, certWarnDays, cfToken, opts, images, totalPhases, ollama } = args;
 
   let phaseIndex = 0;
   let activeSpin: ReturnType<typeof p.spinner> | null = null;
@@ -390,6 +533,7 @@ async function runVerifyWithSpinner(args: {
         ...(opts.tunnelId ? { tunnelId: opts.tunnelId } : {}),
       },
       images,
+      ...(ollama ? { ollama } : {}),
     },
     deps,
   );

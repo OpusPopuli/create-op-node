@@ -250,7 +250,7 @@ export const bootstrapCommand = new Command('bootstrap')
     await runLaunchAgentPhase({ opts, secrets });
     await installWrapperPhase({ repoPath, region, promptServiceUrl: secrets.promptServiceUrl });
     await loginGhcrPhase();
-    await runOllamaPhase({ opts, embeddingModel, llmModel });
+    await runOllamaPhase({ opts, embeddingModel, llmModel, embeddingsProvider });
     await runEnvFilePhase({
       repoPath,
       llmModel,
@@ -913,13 +913,32 @@ async function loginGhcrPhase(): Promise<void> {
   ghcrSpin.stop(pc.green('✓ Logged in to ghcr.io.'));
 }
 
+/**
+ * The models bootstrap pulls into Ollama, in pull order. The LLM is always
+ * pulled. The embedding model is pulled ONLY when the knowledge service will
+ * use the Ollama daemon for embeddings (`EMBEDDINGS_PROVIDER=ollama`); under
+ * the default `xenova` (in-process) provider it's never loaded, so pulling
+ * nomic-embed-text would just waste a download on a fresh node. When present,
+ * the embedding pulls first — it's small, giving fast "✓ pulled" feedback
+ * before the LLM's multi-GB download dominates the spinner. Pure helper.
+ */
+export function modelsToPull(args: {
+  provider: EmbeddingsProvider;
+  llmModel: string;
+  embeddingModel: string;
+}): string[] {
+  const { provider, llmModel, embeddingModel } = args;
+  return provider === 'ollama' ? [embeddingModel, llmModel] : [llmModel];
+}
+
 // ---- Phase 8: Ollama ----
 async function runOllamaPhase(args: {
   opts: BootstrapOptions;
   embeddingModel: string;
   llmModel: string;
+  embeddingsProvider: EmbeddingsProvider;
 }): Promise<void> {
-  const { opts, embeddingModel, llmModel } = args;
+  const { opts, embeddingModel, llmModel, embeddingsProvider } = args;
   if (opts.skipOllama) return;
 
   const olSpin = p.spinner();
@@ -952,7 +971,8 @@ async function runOllamaPhase(args: {
       process.exit(1);
     }
   }
-  const modelReport = await setupModels([embeddingModel, llmModel], (model, status) => {
+  const toPull = modelsToPull({ provider: embeddingsProvider, llmModel, embeddingModel });
+  const modelReport = await setupModels(toPull, (model, status) => {
     olSpin.message(`${status}: ${model}`);
   });
   olSpin.stop(
@@ -962,6 +982,12 @@ async function runOllamaPhase(args: {
         )
       : pc.yellow(`⚠ ${modelReport.failed.length} model pull(s) failed`),
   );
+  if (embeddingsProvider !== 'ollama') {
+    p.note(
+      `${pc.dim('·')} Skipped pulling the embedding model — EMBEDDINGS_PROVIDER=${embeddingsProvider} computes embeddings in-process (no Ollama model needed).`,
+      'Embeddings',
+    );
+  }
   const probe = await probeHostDockerInternal();
   if (!probe.ok) {
     p.note(`${pc.yellow('⚠')} ${probe.reason}`, 'Docker host networking');

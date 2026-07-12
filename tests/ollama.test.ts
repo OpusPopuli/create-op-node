@@ -12,6 +12,7 @@ import {
   DEFAULT_EMBEDDINGS_PROVIDER,
   DEFAULT_LLM_MODEL,
   DEFAULT_MODELS,
+  modelPresent,
   OLLAMA_URL,
   PROBE_ALPINE_TAG,
   probeHostDockerInternal,
@@ -65,6 +66,32 @@ describe('DEFAULT_MODELS + OLLAMA_URL', () => {
 
   it('defaults the embeddings provider to in-process xenova', () => {
     expect(DEFAULT_EMBEDDINGS_PROVIDER).toBe('xenova');
+  });
+});
+
+describe('modelPresent', () => {
+  it('matches an exact tag', () => {
+    expect(modelPresent('qwen2.5:7b', ['qwen2.5:7b', 'nomic-embed-text:latest'])).toBe(true);
+  });
+
+  it('normalizes a bare configured name to :latest', () => {
+    expect(modelPresent('nomic-embed-text', ['nomic-embed-text:latest'])).toBe(true);
+  });
+
+  it('normalizes a bare installed name to :latest', () => {
+    expect(modelPresent('qwen2.5:latest', ['qwen2.5'])).toBe(true);
+  });
+
+  it('returns false on a tag mismatch (the incident: qwen3.5:35b vs qwen2.5:72b)', () => {
+    expect(modelPresent('qwen3.5:35b', ['qwen2.5:72b', 'nomic-embed-text:latest'])).toBe(false);
+  });
+
+  it('returns false for an empty installed list', () => {
+    expect(modelPresent('qwen2.5:7b', [])).toBe(false);
+  });
+
+  it('does not treat different tags of the same model as present', () => {
+    expect(modelPresent('qwen2.5:7b', ['qwen2.5:3b'])).toBe(false);
   });
 
   it('points at localhost:11434', () => {

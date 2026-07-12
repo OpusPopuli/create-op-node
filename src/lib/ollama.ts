@@ -109,6 +109,23 @@ export async function checkOllamaHealth(url: string = OLLAMA_URL): Promise<Ollam
   }
 }
 
+/**
+ * Is `configured` present in the `installed` model list (from
+ * `checkOllamaHealth().models` / `ollama list`)?
+ *
+ * Ollama treats a bare model name as its `:latest` tag — `ollama pull qwen2.5`
+ * installs `qwen2.5:latest`, and `/api/tags` reports the fully-qualified name.
+ * So we normalize BOTH sides to an explicit tag before comparing: a config of
+ * `qwen2.5` matches an installed `qwen2.5:latest`, and vice-versa. A tag
+ * mismatch (the incident: configured `qwen3.5:35b` vs installed `qwen2.5:72b`)
+ * correctly returns false. Pure helper — the presence-check core for `verify`.
+ */
+export function modelPresent(configured: string, installed: readonly string[]): boolean {
+  const norm = (m: string): string => (m.includes(':') ? m : `${m}:latest`);
+  const target = norm(configured);
+  return installed.some((m) => norm(m) === target);
+}
+
 export interface PullResult {
   ok: boolean;
   /** Set when ok=false. */
