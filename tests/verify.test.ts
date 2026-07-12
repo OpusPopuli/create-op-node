@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  collectImage,
   mergeOllamaModelConfig,
   runVerify,
   summarize,
@@ -48,6 +49,20 @@ const baseInput = {
   certWarnDays: 14,
   images: [],
 };
+
+describe('collectImage (#103)', () => {
+  it('accumulates repeated --image values into an array', () => {
+    // Simulate commander invoking the collector once per --image flag.
+    expect(collectImage('a', [])).toEqual(['a']);
+    expect(collectImage('b', ['a'])).toEqual(['a', 'b']);
+  });
+
+  it('treats an undefined starting accumulator as empty (single --image)', () => {
+    expect(collectImage('ghcr.io/opuspopuli/api:latest', undefined)).toEqual([
+      'ghcr.io/opuspopuli/api:latest',
+    ]);
+  });
+});
 
 describe('summarize', () => {
   it('ok=true when no phase failed', () => {

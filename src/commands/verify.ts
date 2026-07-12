@@ -295,6 +295,16 @@ function readTokenFile(path: string): string {
   return raw;
 }
 
+/**
+ * Commander array collector for the repeatable `--image` option. Without an
+ * argParser, commander stores only the last value as a plain string, which the
+ * cosign phase then iterates character-by-character (verifying "g", "h", "c", …
+ * as image refs). Mirrors `collectComposeFile` (#82). See #103.
+ */
+export function collectImage(value: string, previous: string[] | undefined): string[] {
+  return [...(previous ?? []), value];
+}
+
 export const verifyCommand = new Command('verify')
   .description(
     'Off-LAN health probe of a live node — TLS, Apollo Federation reachability, GraphQL smoke. ' +
@@ -313,9 +323,9 @@ export const verifyCommand = new Command('verify')
     new Option('--tunnel-id <id>', 'Cloudflare Tunnel ID to query (required with --cf-token)'),
   )
   .addOption(
-    new Option('--image <ref>', 'Repeatable. Image to cosign-verify (e.g. ghcr.io/opuspopuli/api:tag)').default(
-      [] as string[],
-    ),
+    new Option('--image <ref>', 'Repeatable. Image to cosign-verify (e.g. ghcr.io/opuspopuli/api:tag)')
+      .default([] as string[])
+      .argParser(collectImage),
   )
   .addOption(
     new Option('--cert-warn-days <n>', 'Warn if cert expires within N days').default('14'),
