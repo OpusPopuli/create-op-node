@@ -21,7 +21,7 @@ const SECRETS = {
 
 describe('buildComposeEnv', () => {
   it('maps every secret to its compose env var', () => {
-    const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'qwen3.5:9b', embeddingModel: 'nomic-embed-text' });
+    const env = buildComposeEnv({ secrets: SECRETS });
     expect(env).toMatchObject({
       PGSODIUM_ROOT_KEY: SECRETS.pgsodiumKey,
       POSTGRES_PASSWORD: SECRETS.postgresPassword,
@@ -33,13 +33,21 @@ describe('buildComposeEnv', () => {
       GRAFANA_ADMIN_PASSWORD: SECRETS.grafanaAdminPassword,
       SUPABASE_URL: SECRETS.supabaseUrl,
       TUNNEL_TOKEN: SECRETS.tunnelToken,
-      LLM_MODEL: 'qwen3.5:9b',
-      EMBEDDINGS_MODEL: 'nomic-embed-text',
     });
   });
 
+  it('does NOT inject model config — that lives in the node .env (single source of truth)', () => {
+    // LLM_MODEL / EMBEDDINGS_MODEL / NODE_ENV must NOT be in the compose
+    // subprocess env: a shell-env value shadows `.env` at interpolation time
+    // (shell > .env), which would reintroduce the drift the .env exists to kill.
+    const env = buildComposeEnv({ secrets: SECRETS });
+    expect(env).not.toHaveProperty('LLM_MODEL');
+    expect(env).not.toHaveProperty('EMBEDDINGS_MODEL');
+    expect(env).not.toHaveProperty('NODE_ENV');
+  });
+
   it('derives API_KEYS as {"api-gateway":"<GATEWAY_HMAC_SECRET>"} so the gateway signature verifies', () => {
-    const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'm', embeddingModel: 'e' });
+    const env = buildComposeEnv({ secrets: SECRETS });
     expect(env.API_KEYS).toBe(`{"api-gateway":"${SECRETS.gatewayHmacSecret}"}`);
     const parsed = JSON.parse(env.API_KEYS!) as Record<string, string>;
     expect(parsed['api-gateway']).toBe(env.GATEWAY_HMAC_SECRET);
@@ -48,8 +56,6 @@ describe('buildComposeEnv', () => {
   it('omits TUNNEL_TOKEN in local-only mode (tunnelToken undefined)', () => {
     const env = buildComposeEnv({
       secrets: { ...SECRETS, tunnelToken: undefined },
-      llmModel: 'qwen3.5:9b',
-      embeddingModel: 'nomic-embed-text',
     });
     expect(env).not.toHaveProperty('TUNNEL_TOKEN');
   });
@@ -58,7 +64,7 @@ describe('buildComposeEnv', () => {
     const prev = process.env['AUTH_JWT_SECRET'];
     delete process.env['AUTH_JWT_SECRET'];
     try {
-      const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'm', embeddingModel: 'e' });
+      const env = buildComposeEnv({ secrets: SECRETS });
       expect(env.AUTH_JWT_SECRET).toBe(SECRETS.jwtSecret);
     } finally {
       if (prev !== undefined) process.env['AUTH_JWT_SECRET'] = prev;
@@ -76,7 +82,7 @@ describe('buildComposeEnv', () => {
       promptServiceApiKeys: ps.keys,
       promptServiceAdminApiKeys: ps.admin,
     };
-    const env = buildComposeEnv({ secrets: withPrompts, llmModel: 'm', embeddingModel: 'e' });
+    const env = buildComposeEnv({ secrets: withPrompts });
     expect(env).toMatchObject({
       PROMPT_SERVICE_URL: withPrompts.promptServiceUrl,
       PROMPTS_DB_PASSWORD: ps.db,
@@ -87,7 +93,7 @@ describe('buildComposeEnv', () => {
   });
 
   it('always sets PROMPT_SERVICE_URL but omits overlay secrets when absent — node-type region (#90)', () => {
-    const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'm', embeddingModel: 'e' });
+    const env = buildComposeEnv({ secrets: SECRETS });
     expect(env.PROMPT_SERVICE_URL).toBe(SECRETS.promptServiceUrl);
     expect(env).not.toHaveProperty('PROMPTS_DB_PASSWORD');
     expect(env).not.toHaveProperty('PROMPT_SERVICE_API_KEY');
@@ -226,13 +232,13 @@ describe('LLM_MODEL_CHOICES', () => {
     }
   });
 
-  it('includes a 70B-class option as the lead choice', () => {
-    expect(LLM_MODEL_CHOICES[0]?.value).toBe('qwen2.5:72b');
+  it('leads with the largest tier (35B MoE) for 64 GB+ nodes', () => {
+    expect(LLM_MODEL_CHOICES[0]?.value).toBe('qwen3.6:35b-a3b');
   });
 
-  it('includes the 9B-class default for smaller Studios', () => {
+  it('includes the conservative scripted default among the choices', () => {
     const values = LLM_MODEL_CHOICES.map((c) => c.value);
-    expect(values).toContain(DEFAULT_LLM_MODEL); // qwen3.5:9b
+    expect(values).toContain(DEFAULT_LLM_MODEL); // qwen2.5:7b
   });
 
   it('every hint mentions RAM or pull-time so operators can pick based on hardware', () => {
@@ -289,26 +295,30 @@ describe('recommendLlmModel', () => {
     expect(recommendLlmModel(null)).toBeNull();
   });
 
-  it('recommends qwen2.5:72b for 128 GB / 96 GB Studios', () => {
-    expect(recommendLlmModel(128)).toBe('qwen2.5:72b');
-    expect(recommendLlmModel(96)).toBe('qwen2.5:72b');
+  it('recommends the 35B MoE for 64 GB+ nodes', () => {
+    expect(recommendLlmModel(128)).toBe('qwen3.6:35b-a3b');
+    expect(recommendLlmModel(64)).toBe('qwen3.6:35b-a3b');
   });
 
-  it('recommends qwen2.5:32b for 48-64 GB Studios', () => {
-    expect(recommendLlmModel(64)).toBe('qwen2.5:32b');
-    expect(recommendLlmModel(48)).toBe('qwen2.5:32b');
-    expect(recommendLlmModel(95)).toBe('qwen2.5:32b'); // just under the 96-GB threshold
+  it('recommends qwen3:14b for 32–64 GB nodes', () => {
+    expect(recommendLlmModel(48)).toBe('qwen3:14b');
+    expect(recommendLlmModel(32)).toBe('qwen3:14b');
+    expect(recommendLlmModel(63)).toBe('qwen3:14b'); // just under the 64-GB threshold
   });
 
-  it('recommends qwen3.5:9b for ≤ 36 GB Studios', () => {
-    expect(recommendLlmModel(36)).toBe('qwen3.5:9b');
-    expect(recommendLlmModel(16)).toBe('qwen3.5:9b');
-    expect(recommendLlmModel(47)).toBe('qwen3.5:9b'); // just under the 48-GB threshold
+  it('recommends qwen2.5:7b for 16–32 GB nodes', () => {
+    expect(recommendLlmModel(32 - 1)).toBe('qwen2.5:7b');
+    expect(recommendLlmModel(16)).toBe('qwen2.5:7b');
+  });
+
+  it('recommends qwen2.5:3b for ≤ 16 GB nodes (Mac Mini)', () => {
+    expect(recommendLlmModel(15)).toBe('qwen2.5:3b');
+    expect(recommendLlmModel(8)).toBe('qwen2.5:3b');
   });
 
   it('every recommendation matches a curated option (no orphan recommendations)', () => {
     const values = LLM_MODEL_CHOICES.map((c) => c.value);
-    for (const ram of [16, 36, 48, 64, 96, 128]) {
+    for (const ram of [8, 16, 32, 48, 64, 96, 128]) {
       const rec = recommendLlmModel(ram);
       expect(rec).not.toBeNull();
       expect(values).toContain(rec!);
@@ -393,7 +403,7 @@ describe('checkPublicProfileSecrets (public-profile HMAC guard — #27)', () => 
   it('accepts the env buildComposeEnv produces for a real bootstrap', () => {
     // End-to-end: the guard must PASS on exactly what bootstrap injects, so a
     // normal production bootstrap is never blocked by its own backstop.
-    const env = buildComposeEnv({ secrets: SECRETS, llmModel: 'm', embeddingModel: 'e' });
+    const env = buildComposeEnv({ secrets: SECRETS });
     expect(checkPublicProfileSecrets(env)).toEqual({ ok: true });
   });
 });

@@ -32,18 +32,21 @@ Configures macOS power settings, installs Homebrew + the CLI tool list, sets up 
 
 When you run `bootstrap` interactively (no `-y`, no `--llm-model` flag),
 you'll get a curated picker that **pre-selects** a model based on the
-Studio's detected unified memory:
+node's detected unified memory. Tiers are conservative — the LLM shares
+memory with ~22 containers + Postgres, so they size on *total* footprint,
+not param count:
 
-- `qwen2.5:72b` — 72B, ~50 GB Ollama RAM. Pre-selected on 96 GB+ Studios.
-  Best Spanish + multilingual quality.
-- `qwen2.5:32b` — 32B, ~22 GB Ollama RAM. Pre-selected on 48–95 GB Studios
-  (e.g. 64 GB).
-- `qwen3.5:9b` — 9B, ~8 GB Ollama RAM. Pre-selected on smaller Studios
-  (< 48 GB), and the default for non-interactive `-y` runs (see below).
+- `qwen3.6:35b-a3b` — 35B MoE (~3B active, fast on Apple Silicon),
+  ~24 GB footprint. Pre-selected on 64 GB+ nodes. Best Spanish +
+  multilingual quality.
+- `qwen3:14b` — ~9 GB footprint. Pre-selected on 32–64 GB nodes.
+- `qwen2.5:7b` — ~5 GB footprint. Pre-selected on 16–32 GB nodes, and
+  the default for non-interactive `-y` runs (see below).
+- `qwen2.5:3b` — ~2–3 GB footprint. Pre-selected on ≤ 16 GB nodes (Mac Mini).
 - `Other…` — any Ollama model name you specify.
 
-(If memory detection fails, the picker falls back to pre-selecting
-`qwen2.5:72b`.)
+(If memory detection fails, the picker falls back to pre-selecting the
+conservative scripted default, `qwen2.5:7b`.)
 
 The picker is Qwen-only because the Opus Populi platform serves
 Spanish-speaking civic users and Qwen has the strongest Spanish (and
@@ -51,7 +54,7 @@ broader multilingual) capability of the open-weight models in this
 size class. Pick "Other…" for non-Qwen models.
 
 For non-interactive runs (`-y`) or scripted invocations, the LLM
-defaults to `qwen3.5:9b` (small, fast) — pass `--llm-model` to override:
+defaults to `qwen2.5:7b` (small, fast) — pass `--llm-model` to override:
 
 ```bash
 # Just swap the LLM, keep the default embedding model:
@@ -69,29 +72,43 @@ The chosen models flow two places:
 1. **Ollama**: bootstrap pulls + warms them so the daemon has them
    resident before the stack comes up. The embedding model pulls first
    (small, fast feedback); the LLM pulls second (can be tens of GB).
-2. **LaunchAgent**: the plist exports `LLM_MODEL` and `EMBEDDINGS_MODEL`
-   into the launchd session, which Docker Desktop inherits — so compose
-   services read them via env, no `.env.production` edits needed.
+2. **The node `.env`**: bootstrap writes `LLM_MODEL`, `EMBEDDINGS_MODEL`,
+   and `EMBEDDINGS_PROVIDER` into a managed block of the region repo's
+   `.env`, which docker compose auto-loads. This is the **single source of
+   truth** — every service (and every future partial recreate) resolves
+   `${LLM_MODEL:-…}` to the same value, regardless of shell/launchd env.
+   Model config is deliberately *not* exported via the LaunchAgent: a
+   `launchctl setenv` value would shadow `.env` at interpolation time
+   (shell env > `.env`), reintroducing the exact drift the `.env` prevents.
 
-> **`--embedding-model` only takes effect when the knowledge service
-> runs with `EMBEDDINGS_PROVIDER=ollama`.** The default provider is
-> `xenova` (in-process), which bundles its own embedding model and
-> ignores both `EMBEDDINGS_MODEL` and the local Ollama model. Setting
-> `EMBEDDINGS_PROVIDER=ollama` is a separate decision (set in your
-> region repo's `.env.production`) — see `docs/provider-pattern.md`.
+> **Managed block, not full ownership.** bootstrap owns only the region
+> between `# >>> op-node managed >>>` and `# <<< op-node managed <<<` in
+> your `.env` — anything you hand-add outside it is preserved. On first
+> run against a pre-existing `.env`, your existing model values are adopted
+> into the block rather than overwritten; the block is only rewritten when
+> you explicitly (re)select a model. Secrets never go in `.env` — they stay
+> in the macOS Keychain and are hydrated by `bin/op-compose`.
 
-> **Template contract**: for `--llm-model` to actually change the
-> running model, the region repo's `docker-compose-prod.yml` must use
-> `${LLM_MODEL:-qwen3.5:9b}` (or similar) on the knowledge service's
-> `environment:` block. The current `opuspopuli-node` template does;
-> a fork that hardcodes the value would ignore the flag silently.
+> **`--embeddings-provider` picks where embeddings run.** The default is
+> `xenova` (in-process), which bundles its own embedding model and ignores
+> `EMBEDDINGS_MODEL`. Pass `--embeddings-provider ollama` to use the host
+> daemon with `--embedding-model` — the value is written to `.env` as the
+> single source of truth. See `docs/provider-pattern.md`.
+
+> **Template contract**: for `LLM_MODEL` to actually change the running
+> model, the region repo's `docker-compose-prod.yml` must use
+> `${LLM_MODEL:-…}` on the knowledge service's `environment:` block. The
+> current `opuspopuli-node` template does; a fork that hardcodes the value
+> would ignore the `.env` silently.
 
 For RAM sizing, the [Docker resources doc](https://github.com/OpusPopuli/opuspopuli-node/blob/main/docs/docker-resources.md)
-has a tier table: 9B-class needs ~8 GB Ollama; 70B-class needs ~50 GB;
-frontier MoE needs ~80 GB. Allocate Docker the remainder.
+has a tier table: a 7B-class model needs ~5 GB, the 35B-a3b MoE ~24 GB.
+Allocate Docker the remainder of unified memory.
 
-To switch models post-bootstrap, re-run with the new flag and
-`docker compose down && up -d` to pick up the changed env.
+To switch models post-bootstrap, either re-run bootstrap with the new
+`--llm-model` (rewrites the managed block) or edit `LLM_MODEL` in the
+managed block of your `.env` directly, then `./bin/op-compose -f
+docker-compose-prod.yml up -d` to pick up the change.
 
 ### Local-only mode (no Cloudflare)
 
