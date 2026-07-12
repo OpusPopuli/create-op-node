@@ -13,6 +13,8 @@
  * the operator to confirm before proceeding.
  */
 
+import { access } from 'node:fs/promises';
+
 import { safeExeca } from './exec.js';
 
 export type PackageKind = 'formula' | 'cask';
@@ -20,6 +22,12 @@ export type PackageKind = 'formula' | 'cask';
 export interface PackageSpec {
   name: string;
   kind: PackageKind;
+  /** For casks that install a GUI `.app`: if this path already exists, the app
+   *  is present — possibly installed directly (not via Homebrew) or under a
+   *  since-renamed cask. In that case `brew list` misses it and
+   *  `brew install --cask` fails with "already an App at …", so we skip the
+   *  install and report it as already present. (#89) */
+  appPath?: string;
 }
 
 /** The package set the runbook installs on the Studio. Casks need GUI
@@ -40,8 +48,11 @@ export const STUDIO_PACKAGES = [
   { name: 'ollama', kind: 'formula' },
   // Required for the fail-closed image-signature gate in `bootstrap` (#34).
   { name: 'cosign', kind: 'formula' },
-  { name: 'docker', kind: 'cask' },
-  { name: 'tailscale', kind: 'cask' },
+  // Homebrew renamed the `docker` cask to `docker-desktop`. The appPath skip
+  // means a directly-installed Docker Desktop (the common case) is treated as
+  // present rather than tripping `brew install` on the existing app. (#89)
+  { name: 'docker-desktop', kind: 'cask', appPath: '/Applications/Docker.app' },
+  { name: 'tailscale', kind: 'cask', appPath: '/Applications/Tailscale.app' },
 ] as const satisfies readonly PackageSpec[];
 
 export interface BrewInfo {
@@ -66,11 +77,28 @@ export async function detectBrew(): Promise<BrewInfo> {
 export const HOMEBREW_INSTALL_COMMAND =
   '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"';
 
+/** Does a filesystem path exist? Used to detect a GUI app installed outside
+ *  Homebrew. (#89) */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Is the named package already installed? `brew list <name>` exits 0 when
- * yes, non-zero when no. Cask vs formula lookup uses different flags.
+ * Is the named package already installed? A cask carrying an `appPath` counts
+ * as present when that app already exists (installed directly, or under a
+ * renamed cask) — otherwise `brew list` misses it and `brew install` fails on
+ * the existing app. (#89) Otherwise `brew list <name>` exits 0 when yes,
+ * non-zero when no; cask vs formula lookup uses different flags.
  */
 export async function isPackageInstalled(pkg: PackageSpec): Promise<boolean> {
+  if (pkg.appPath && (await pathExists(pkg.appPath))) {
+    return true;
+  }
   const flag = pkg.kind === 'cask' ? '--cask' : '--formula';
   const res = await safeExeca('brew', ['list', flag, pkg.name]);
   return res !== null && res.exitCode === 0;
