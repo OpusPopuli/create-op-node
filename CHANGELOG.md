@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1](https://github.com/OpusPopuli/create-op-node/compare/v0.15.0...v0.15.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* **env-file:** write EMBEDDINGS_OLLAMA_MODEL — the key the backend reads ([#107](https://github.com/OpusPopuli/create-op-node/issues/107)) ([e4c2fb4](https://github.com/OpusPopuli/create-op-node/commit/e4c2fb41e3c6668a6ed0873fd8c2dab7203a3543))
+
 ## [0.15.0](https://github.com/OpusPopuli/create-op-node/compare/v0.14.0...v0.15.0) (2026-07-12)
 
 
