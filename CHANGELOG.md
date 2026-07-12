@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.4](https://github.com/OpusPopuli/create-op-node/compare/v0.12.3...v0.12.4) (2026-07-12)
+
+
+### Bug Fixes
+
+* **bootstrap:** idempotent key-file write + broaden cosign pin to prompt-service ([#95](https://github.com/OpusPopuli/create-op-node/issues/95)) ([8c6217f](https://github.com/OpusPopuli/create-op-node/commit/8c6217fbee9f56276911cd9d2f24ef6472d0a302)), closes [#93](https://github.com/OpusPopuli/create-op-node/issues/93) [#94](https://github.com/OpusPopuli/create-op-node/issues/94)
+
 ## [0.12.3](https://github.com/OpusPopuli/create-op-node/compare/v0.12.2...v0.12.3) (2026-07-12)
 
 
