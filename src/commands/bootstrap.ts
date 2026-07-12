@@ -60,12 +60,15 @@ import {
 import { cosignVerifyImage } from '../lib/cosign.js';
 import {
   DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_EMBEDDINGS_PROVIDER,
   DEFAULT_LLM_MODEL,
   checkOllamaHealth,
   probeHostDockerInternal,
   setupModels,
   startOllamaService,
+  type EmbeddingsProvider,
 } from '../lib/ollama.js';
+import { writeManagedEnv } from '../lib/env-file.js';
 import { locateOrCloneRepo, type LocateOutcome } from '../lib/noderepo.js';
 import { safeExeca } from '../lib/exec.js';
 import { unwrap } from '../lib/prompts.js';
@@ -114,6 +117,7 @@ interface BootstrapOptions {
   localOnly?: boolean;
   llmModel?: string;
   embeddingModel?: string;
+  embeddingsProvider?: EmbeddingsProvider;
   /** Public-facing Supabase URL. Defaults to `http://localhost:8000` in
    *  --local-only mode, otherwise `https://supabase.<domain>` — operator
    *  can override with --supabase-url. */
@@ -167,6 +171,12 @@ export const bootstrapCommand = new Command('bootstrap')
       '--embedding-model <model>',
       `Ollama embedding model. Default: ${DEFAULT_EMBEDDING_MODEL}. Only takes effect when the knowledge service runs with EMBEDDINGS_PROVIDER=ollama (otherwise embeddings are computed in-process via xenova).`,
     ),
+  )
+  .addOption(
+    new Option(
+      '--embeddings-provider <provider>',
+      `Where embeddings are computed. Default: ${DEFAULT_EMBEDDINGS_PROVIDER} (in-process). \`ollama\` uses the host daemon with the embedding model. Written to the node's .env as the single source of truth.`,
+    ).choices(['xenova', 'ollama']),
   )
   .addOption(
     new Option(
@@ -224,6 +234,7 @@ export const bootstrapCommand = new Command('bootstrap')
       llmModel: llmModelChoice,
       ...(opts.embeddingModel !== undefined ? { embeddingModel: opts.embeddingModel } : {}),
     });
+    const embeddingsProvider = opts.embeddingsProvider ?? DEFAULT_EMBEDDINGS_PROVIDER;
 
     // ---- Phases 1–4: system checks, Homebrew, auth, locate repo ----
     await runSystemChecksPhase();
@@ -236,11 +247,18 @@ export const bootstrapCommand = new Command('bootstrap')
     await unlockKeychainPhase();
 
     const secrets = await collectSecretsPhase({ region, nodeType, opts });
-    await runLaunchAgentPhase({ opts, secrets, llmModel, embeddingModel });
+    await runLaunchAgentPhase({ opts, secrets });
     await installWrapperPhase({ repoPath, region, promptServiceUrl: secrets.promptServiceUrl });
     await loginGhcrPhase();
     await runOllamaPhase({ opts, embeddingModel, llmModel });
-    await runStackPhase({ opts, repoPath, region, composeFile, secrets, llmModel, embeddingModel });
+    await runEnvFilePhase({
+      repoPath,
+      llmModel,
+      embeddingModel,
+      embeddingsProvider,
+      localOnly: Boolean(opts.localOnly),
+    });
+    await runStackPhase({ opts, repoPath, region, composeFile, secrets });
   });
 
 // ----------------------------------------------------------------------------
@@ -820,13 +838,16 @@ async function collectSecretsPhase(args: {
 }
 
 // ---- Phase 6: LaunchAgent ----
+// Note: model config (LLM_MODEL / EMBEDDINGS_MODEL / NODE_ENV) is deliberately
+// NOT exported here. Those are non-secret substitution vars that live in the
+// node's `.env` (see runEnvFilePhase) — a launchctl setenv value would shadow
+// `.env` at compose interpolation time (shell env > .env), defeating the
+// single-source-of-truth. Only Keychain secrets flow through the LaunchAgent.
 async function runLaunchAgentPhase(args: {
   opts: BootstrapOptions;
   secrets: CollectedSecrets;
-  llmModel: string;
-  embeddingModel: string;
 }): Promise<void> {
-  const { opts, secrets, llmModel, embeddingModel } = args;
+  const { opts, secrets } = args;
   if (opts.skipLaunchAgent) return;
 
   const laSpin = p.spinner();
@@ -834,8 +855,6 @@ async function runLaunchAgentPhase(args: {
   const la = await setupLaunchAgent({
     pgsodiumKey: secrets.pgsodiumKey,
     ...(secrets.tunnelToken !== undefined ? { tunnelToken: secrets.tunnelToken } : {}),
-    llmModel,
-    embeddingModel,
     postgresPassword: secrets.postgresPassword,
     jwtSecret: secrets.jwtSecret,
     supabaseAnonKey: secrets.supabaseAnonKey,
@@ -949,6 +968,53 @@ async function runOllamaPhase(args: {
   }
 }
 
+// ---- Phase 8c: write the single-source `.env` (model config) ----
+//
+// docker compose auto-loads `.env` from the compose file's directory, so the
+// resolved model config lands there as the single source of truth — every
+// service (and every future partial recreate) interpolates `${LLM_MODEL:-…}`
+// to the SAME value regardless of shell/launchd env. Only non-secret config
+// is written; secrets stay in Keychain (op-compose hydrates them).
+//
+// Runs even under --skip-stack so the operator's later `./bin/op-compose up`
+// reads it. `overwrite: true` because bootstrap IS an explicit model
+// (re)selection — the operator either passed --llm-model or picked one
+// interactively, so their choice is authoritative over a stale block. Operator
+// lines OUTSIDE the managed block are always preserved.
+async function runEnvFilePhase(args: {
+  repoPath: string;
+  llmModel: string;
+  embeddingModel: string;
+  embeddingsProvider: EmbeddingsProvider;
+  localOnly: boolean;
+}): Promise<void> {
+  const { repoPath, llmModel, embeddingModel, embeddingsProvider, localOnly } = args;
+  const envSpin = p.spinner();
+  envSpin.start('Writing model config to the node .env…');
+  const res = await writeManagedEnv(
+    repoPath,
+    {
+      llmModel,
+      embeddingModel,
+      embeddingsProvider,
+      // NODE_ENV=development only for local-dev nodes; production nodes leave
+      // it unset (the compose default / container images decide).
+      ...(localOnly ? { nodeEnv: 'development' } : {}),
+    },
+    { overwrite: true },
+  );
+  if (!res.ok) {
+    envSpin.stop(pc.red('✗ Failed to write the node .env.'));
+    p.cancel(res.reason ?? 'writing .env failed.');
+    process.exit(1);
+  }
+  envSpin.stop(
+    res.unchanged
+      ? pc.green(`✓ Model config already current in ${res.path}.`)
+      : pc.green(`✓ Wrote model config to ${res.path} (LLM_MODEL=${llmModel}).`),
+  );
+}
+
 // Hydrate every `${VAR:?…}`-enforced env var on the compose subprocess.
 // launchctl setenv doesn't reach pre-existing shells or sshd children, so
 // bootstrap's own compose calls would otherwise hard-fail even though every
@@ -956,10 +1022,8 @@ async function runOllamaPhase(args: {
 // separate so the env-hydration rule stays unit-testable.
 export function buildComposeEnv(args: {
   secrets: CollectedSecrets;
-  llmModel: string;
-  embeddingModel: string;
 }): NodeJS.ProcessEnv {
-  const { secrets, llmModel, embeddingModel } = args;
+  const { secrets } = args;
   return {
     PGSODIUM_ROOT_KEY: secrets.pgsodiumKey,
     POSTGRES_PASSWORD: secrets.postgresPassword,
@@ -996,8 +1060,11 @@ export function buildComposeEnv(args: {
     ...(secrets.promptServiceAdminApiKeys !== undefined
       ? { PROMPT_SERVICE_ADMIN_API_KEYS: secrets.promptServiceAdminApiKeys }
       : {}),
-    ...(llmModel ? { LLM_MODEL: llmModel } : {}),
-    ...(embeddingModel ? { EMBEDDINGS_MODEL: embeddingModel } : {}),
+    // Model config (LLM_MODEL / EMBEDDINGS_MODEL / NODE_ENV) is intentionally
+    // NOT injected here — it lives in the node's `.env` (runEnvFilePhase),
+    // which docker compose auto-loads. Injecting it into the subprocess env
+    // would shadow `.env` (shell env > .env) and reintroduce the drift the
+    // single-source `.env` exists to eliminate.
   };
 }
 
@@ -1165,10 +1232,8 @@ async function runStackPhase(args: {
   region: string;
   composeFile: string[];
   secrets: CollectedSecrets;
-  llmModel: string;
-  embeddingModel: string;
 }): Promise<void> {
-  const { opts, repoPath, region, composeFile, secrets, llmModel, embeddingModel } = args;
+  const { opts, repoPath, region, composeFile, secrets } = args;
 
   if (opts.skipStack) {
     const profileFlag = opts.localOnly ? '' : '--profile public ';
@@ -1181,7 +1246,7 @@ async function runStackPhase(args: {
   }
 
   const composeFiles = resolveComposeFiles(repoPath, composeFile);
-  const composeEnv = buildComposeEnv({ secrets, llmModel, embeddingModel });
+  const composeEnv = buildComposeEnv({ secrets });
   // In production mode, activate the `public` compose profile so cloudflared
   // starts. In --local-only mode pass no profiles — the template gates
   // cloudflared behind `public`, so an empty profiles array keeps it down.
@@ -1394,19 +1459,24 @@ export function resolveModels(opts: {
  *  Order = display order. */
 export const LLM_MODEL_CHOICES = [
   {
-    value: 'qwen2.5:72b',
-    label: 'qwen2.5:72b',
-    hint: '72B, ~50 GB Ollama RAM. Pre-selected on 96 GB+ Studios. Best Spanish + multilingual quality. Pull ~40 GB, 30–60 min.',
+    value: 'qwen3.6:35b-a3b',
+    label: 'qwen3.6:35b-a3b',
+    hint: '35B MoE, ~3B active — fast on Apple Silicon. ~24 GB footprint. Pre-selected on 64 GB+ nodes. Best Spanish + multilingual quality. Pull ~24 GB, 30–60 min.',
   },
   {
-    value: 'qwen2.5:32b',
-    label: 'qwen2.5:32b',
-    hint: '32B, ~22 GB Ollama RAM. Pre-selected on 48–95 GB Studios. Solid Spanish, faster than 72B. Pull ~20 GB, 15–30 min.',
+    value: 'qwen3:14b',
+    label: 'qwen3:14b',
+    hint: '14B, ~9 GB footprint. Pre-selected on 32–64 GB nodes. Solid Spanish, faster than the 35B MoE. Pull ~9 GB, 10–20 min.',
   },
   {
-    value: 'qwen3.5:9b',
-    label: 'qwen3.5:9b',
-    hint: '9B, ~8 GB Ollama RAM. Pre-selected on smaller Studios (< 48 GB); also the -y / scripted default. Pull ~5 GB, 3–5 min.',
+    value: 'qwen2.5:7b',
+    label: 'qwen2.5:7b',
+    hint: '7B, ~5 GB footprint. Pre-selected on 16–32 GB nodes; also the -y / scripted default. Pull ~5 GB, 3–5 min.',
+  },
+  {
+    value: 'qwen2.5:3b',
+    label: 'qwen2.5:3b',
+    hint: '3B, ~2–3 GB footprint. Pre-selected on ≤ 16 GB nodes (Mac Mini). Lightest option. Pull ~2 GB, 2–3 min.',
   },
 ] as const;
 
@@ -1424,9 +1494,13 @@ const OTHER_SENTINEL = '__OTHER__';
  */
 export function recommendLlmModel(ramGB: number | null): string | null {
   if (ramGB === null) return null;
-  if (ramGB >= 96) return 'qwen2.5:72b';
-  if (ramGB >= 48) return 'qwen2.5:32b';
-  return 'qwen3.5:9b';
+  // Tier on TOTAL model footprint, not param count: the LLM shares unified
+  // memory with ~22 Docker containers + Postgres, so each tier leaves headroom
+  // for the rest of the stack. Boundaries match the #98 sizing table.
+  if (ramGB >= 64) return 'qwen3.6:35b-a3b';
+  if (ramGB >= 32) return 'qwen3:14b';
+  if (ramGB >= 16) return 'qwen2.5:7b';
+  return 'qwen2.5:3b';
 }
 
 /**
@@ -1434,10 +1508,10 @@ export function recommendLlmModel(ramGB: number | null): string | null {
  * (returns the conservative default) or when `--llm-model` was passed
  * (caller short-circuits before this is reached).
  *
- * Pre-selects based on the Studio's detected unified memory — 128 GB
- * studios get qwen2.5:72b, 64 GB get qwen2.5:32b, smaller fall back to
- * qwen3.5:9b. When detection fails (non-macOS, sysctl missing), defaults
- * to qwen2.5:72b (the documented platform target).
+ * Pre-selects based on the node's detected unified memory — 64 GB+ gets the
+ * qwen3.6:35b-a3b MoE, 32–64 GB gets qwen3:14b, 16–32 GB gets qwen2.5:7b,
+ * ≤ 16 GB gets qwen2.5:3b. When detection fails (non-macOS, sysctl missing),
+ * defaults to DEFAULT_LLM_MODEL (the conservative scripted default).
  *
  * "Other..." branches to a text input validated against the same
  * MODEL_NAME_RE the LaunchAgent uses for setenv injection safety.
@@ -1446,7 +1520,7 @@ async function selectLlmModel(opts: { yes?: boolean }): Promise<string> {
   if (opts.yes) return DEFAULT_LLM_MODEL;
 
   const ramGB = await detectUnifiedMemoryGB();
-  const recommended = recommendLlmModel(ramGB) ?? 'qwen2.5:72b';
+  const recommended = recommendLlmModel(ramGB) ?? DEFAULT_LLM_MODEL;
   const ramNote = ramGB !== null
     ? `Detected ${ramGB} GB unified memory — pre-selecting ${recommended}.`
     : `Couldn't detect Studio memory — defaulting to ${recommended} (override if your config differs).`;

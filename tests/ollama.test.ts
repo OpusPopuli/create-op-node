@@ -9,6 +9,7 @@ vi.mock('execa', () => ({
 import {
   checkOllamaHealth,
   DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_EMBEDDINGS_PROVIDER,
   DEFAULT_LLM_MODEL,
   DEFAULT_MODELS,
   OLLAMA_URL,
@@ -49,17 +50,21 @@ function stubHangingFetch() {
 }
 
 describe('DEFAULT_MODELS + OLLAMA_URL', () => {
-  it('uses qwen3.5:9b + nomic-embed-text by default', () => {
-    expect(DEFAULT_MODELS).toEqual(['qwen3.5:9b', 'nomic-embed-text']);
+  it('uses qwen2.5:7b + nomic-embed-text by default', () => {
+    expect(DEFAULT_MODELS).toEqual(['qwen2.5:7b', 'nomic-embed-text']);
   });
 
   it('exports DEFAULT_LLM_MODEL + DEFAULT_EMBEDDING_MODEL scalars', () => {
-    expect(DEFAULT_LLM_MODEL).toBe('qwen3.5:9b');
+    expect(DEFAULT_LLM_MODEL).toBe('qwen2.5:7b');
     expect(DEFAULT_EMBEDDING_MODEL).toBe('nomic-embed-text');
   });
 
   it('DEFAULT_MODELS is composed from the two scalars (no drift)', () => {
     expect(DEFAULT_MODELS).toEqual([DEFAULT_LLM_MODEL, DEFAULT_EMBEDDING_MODEL]);
+  });
+
+  it('defaults the embeddings provider to in-process xenova', () => {
+    expect(DEFAULT_EMBEDDINGS_PROVIDER).toBe('xenova');
   });
 
   it('points at localhost:11434', () => {

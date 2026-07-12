@@ -28,18 +28,27 @@ const OLLAMA_HEALTH_TIMEOUT_MS = 5_000;
  *  still bounds a truly-wedged daemon. */
 const OLLAMA_WARM_TIMEOUT_MS = 120_000;
 
-/** Default LLM the platform ships against — small enough to pull on a fresh
- *  Studio in minutes, capable enough to validate the inference path
- *  end-to-end. Operators can override at bootstrap time with `--llm-model`,
- *  and we surface a sizing table in `docs/docker-resources.md` for the
- *  70B-class jump. */
-export const DEFAULT_LLM_MODEL = 'qwen3.5:9b';
+/** Conservative default LLM for the `--yes` / scripted path and the fallback
+ *  when unified-memory detection fails. Sized to fit a 16 GB machine once the
+ *  ~22-container stack + Postgres take their share — capable enough to
+ *  validate the inference path end-to-end. Interactive bootstrap tiers UP from
+ *  here based on detected RAM (see `recommendLlmModel`); operators can override
+ *  at bootstrap time with `--llm-model`. */
+export const DEFAULT_LLM_MODEL = 'qwen2.5:7b';
 
 /** Default embedding model used by the knowledge service when
  *  `EMBEDDINGS_PROVIDER=ollama`. With the default `xenova` (in-process)
  *  provider, this isn't pulled. Operators can override with
  *  `--embedding-model`. */
 export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
+
+/** Where embeddings are computed: `xenova` runs in-process (no Ollama pull
+ *  needed), `ollama` uses the host daemon with DEFAULT_EMBEDDING_MODEL. */
+export type EmbeddingsProvider = 'xenova' | 'ollama';
+
+/** Platform default — in-process embeddings, so a fresh node needs no
+ *  embedding-model pull unless the operator opts into the Ollama provider. */
+export const DEFAULT_EMBEDDINGS_PROVIDER: EmbeddingsProvider = 'xenova';
 
 /** Default model pull set for `bootstrap`. Kept as a `as const`-typed array
  *  so existing code can iterate without re-deriving from the two scalars. */
