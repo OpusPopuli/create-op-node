@@ -216,9 +216,10 @@ if [ -n "$TUNNEL_TOKEN_VAL" ]; then
   export TUNNEL_TOKEN="$TUNNEL_TOKEN_VAL"
 fi
 
-# SUPABASE_URL is not a secret — read from env if the operator set one,
-# default to localhost for --local-only.
-export SUPABASE_URL="\${SUPABASE_URL:-http://localhost:8000}"
+# SUPABASE_URL is NOT exported here — it's non-secret config that lives in the
+# node .env managed block (create-op-node writes it), which docker compose
+# auto-loads. Exporting it would override that .env value with a stale default
+# and silently break browser-facing auth URLs. See opuspopuli-node#43.
 
 ${promptServiceUrlExport}# prompt-service credentials. Always exported — harmless when the operator
 # is NOT colocating prompt-service (the main compose doesn't read these

@@ -257,6 +257,7 @@ export const bootstrapCommand = new Command('bootstrap')
       embeddingModel,
       embeddingsProvider,
       localOnly: Boolean(opts.localOnly),
+      supabaseUrl: secrets.supabaseUrl,
     });
     await runStackPhase({ opts, repoPath, region, composeFile, secrets });
   });
@@ -1013,8 +1014,9 @@ async function runEnvFilePhase(args: {
   embeddingModel: string;
   embeddingsProvider: EmbeddingsProvider;
   localOnly: boolean;
+  supabaseUrl: string;
 }): Promise<void> {
-  const { repoPath, llmModel, embeddingModel, embeddingsProvider, localOnly } = args;
+  const { repoPath, llmModel, embeddingModel, embeddingsProvider, localOnly, supabaseUrl } = args;
   const envSpin = p.spinner();
   envSpin.start('Writing model config to the node .env…');
   const res = await writeManagedEnv(
@@ -1026,6 +1028,9 @@ async function runEnvFilePhase(args: {
       // NODE_ENV=development only for local-dev nodes; production nodes leave
       // it unset (the compose default / container images decide).
       ...(localOnly ? { nodeEnv: 'development' } : {}),
+      // SUPABASE_URL lives in the managed block (not an op-compose export) so
+      // docker compose reads the node's real public URL from .env durably (#43).
+      supabaseUrl,
     },
     { overwrite: true },
   );

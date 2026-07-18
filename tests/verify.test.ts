@@ -161,17 +161,36 @@ describe('summarize', () => {
 });
 
 describe('runVerify orchestration', () => {
-  it('returns 6 phases on a clean run with no images', async () => {
+  it('returns 7 phases on a clean run with no images', async () => {
     const report = await runVerify(baseInput, depsFor());
     expect(report.phases.map((ph) => ph.name)).toEqual([
       'TLS handshake',
       'GET /health',
       'GraphQL { __typename }',
       'Ollama models',
+      'SUPABASE_URL',
       'Cloudflare Tunnel',
       'cosign verify',
     ]);
     expect(report.phases.every((ph) => ph.status === 'ok' || ph.status === 'skipped')).toBe(true);
+  });
+
+  it('warns when SUPABASE_URL is still localhost on a non-local node (#43)', async () => {
+    const report = await runVerify(
+      { ...baseInput, supabaseUrl: 'http://localhost:8000' },
+      depsFor(),
+    );
+    const supa = report.phases.find((ph) => ph.name === 'SUPABASE_URL');
+    expect(supa?.status).toBe('warn');
+  });
+
+  it('passes SUPABASE_URL when set to a real public URL', async () => {
+    const report = await runVerify(
+      { ...baseInput, supabaseUrl: 'https://supabase.us-ca.opuspopuli.org' },
+      depsFor(),
+    );
+    const supa = report.phases.find((ph) => ph.name === 'SUPABASE_URL');
+    expect(supa?.status).toBe('ok');
   });
 
   it('continues past a TLS failure (no short-circuit)', async () => {
