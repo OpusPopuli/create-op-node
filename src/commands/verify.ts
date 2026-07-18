@@ -99,6 +99,11 @@ export interface VerifyInput {
    *  rather than failing them, leaving the node-local checks (Ollama, cosign)
    *  to decide the outcome. See #104. */
   localOnly?: boolean;
+  /** SUPABASE_URL read from the node `.env` managed block. Absent → the check
+   *  is skipped (verify not run on the node). A non-local node still pinned to
+   *  `http://localhost:8000` warns — browser-facing auth URLs would be wrong
+   *  (opuspopuli-node#43). */
+  supabaseUrl?: string;
 }
 
 const DEFAULT_DEPS: VerifyDeps = {
@@ -127,6 +132,7 @@ export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_D
   await verifyHealthPhase(input, deps, push);
   await verifyGraphqlPhase(input, deps, push);
   await verifyOllamaModelsPhase(input, deps, push);
+  verifySupabaseUrlPhase(input, push);
   await verifyCloudflarePhase(input, deps, push);
   await verifyCosignPhase(input, deps, push);
 
@@ -230,6 +236,38 @@ async function verifyOllamaModelsPhase(input: VerifyInput, deps: VerifyDeps, pus
     return;
   }
   push({ name: 'Ollama models', status: 'ok', detail: `${required.join(', ')} present` });
+}
+
+// ---- Phase 4b: SUPABASE_URL sanity (node-local, optional) ---------
+//
+// The browser-facing auth URLs (API_EXTERNAL_URL, GOTRUE_JWT_ISSUER,
+// SUPABASE_PUBLIC_URL) all derive from SUPABASE_URL. A non-local node left at
+// the `http://localhost:8000` default silently ships magic-link / callback
+// URLs pointing at localhost. Skipped off-node (no .env to read) and on
+// --local-only nodes (localhost is correct there). See opuspopuli-node#43.
+function verifySupabaseUrlPhase(input: VerifyInput, push: PushVerifyPhase): void {
+  if (input.localOnly) {
+    return skipLocalOnly('SUPABASE_URL', 'local-only node — localhost:8000 is expected', push);
+  }
+  if (input.supabaseUrl === undefined) {
+    push({
+      name: 'SUPABASE_URL',
+      status: 'skipped',
+      detail: 'run on the node (or pass --repo-dir) so its .env is read',
+    });
+    return;
+  }
+  if (input.supabaseUrl === 'http://localhost:8000') {
+    push({
+      name: 'SUPABASE_URL',
+      status: 'warn',
+      detail:
+        'still http://localhost:8000 on a non-local node — browser-facing auth URLs ' +
+        'will point at localhost; set SUPABASE_URL in the node .env to the public URL',
+    });
+    return;
+  }
+  push({ name: 'SUPABASE_URL', status: 'ok', detail: input.supabaseUrl });
 }
 
 // ---- Phase 5: Cloudflare Tunnel status (optional) ------------------
@@ -386,9 +424,10 @@ export const verifyCommand = new Command('verify')
     const apiHost = localOnly ? '' : (opts.apiHost ?? `api.${domain}`);
     const images = opts.image ?? [];
     const ollama = await resolveOllamaVerifyInput(opts);
-    // Fixed phases: TLS, health, GraphQL, Ollama, Cloudflare (5) + cosign
-    // (one line when no --image, else one per image).
-    const totalPhases = 5 + (images.length === 0 ? 1 : images.length);
+    const supabaseUrl = await resolveSupabaseUrlVerifyInput(opts);
+    // Fixed phases: TLS, health, GraphQL, Ollama, SUPABASE_URL, Cloudflare (6)
+    // + cosign (one line when no --image, else one per image).
+    const totalPhases = 6 + (images.length === 0 ? 1 : images.length);
 
     const report = await runVerifyWithSpinner({
       apiHost,
@@ -399,6 +438,7 @@ export const verifyCommand = new Command('verify')
       totalPhases,
       localOnly,
       ...(ollama ? { ollama } : {}),
+      ...(supabaseUrl !== undefined ? { supabaseUrl } : {}),
     });
 
     renderVerifySummary(report, { opts, totalPhases });
@@ -534,6 +574,15 @@ async function resolveOllamaVerifyInput(opts: VerifyOptions): Promise<VerifyInpu
   }
 
   return mergeOllamaModelConfig(opts, envCfg);
+}
+
+// Read SUPABASE_URL from the node `.env` for the sanity check. Same node-repo
+// gating as the Ollama resolver so an unrelated cwd never trips a false warn.
+async function resolveSupabaseUrlVerifyInput(opts: VerifyOptions): Promise<string | undefined> {
+  const explicit = opts.repoDir !== undefined;
+  const dir = opts.repoDir ?? process.cwd();
+  if (!explicit && !(await looksLikeNodeRepo(dir))) return undefined;
+  return (await readEnvModelConfig(dir)).supabaseUrl;
 }
 
 // Run the checks behind a single spinner that advances per phase.

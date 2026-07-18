@@ -35,6 +35,7 @@ describe('buildManagedEnvContent — fresh file', () => {
       embeddingModel: 'nomic-embed-text',
       embeddingsProvider: 'ollama',
       nodeEnv: 'development',
+      supabaseUrl: 'https://supabase.us-ca.opuspopuli.org',
     });
     expect('content' in built).toBe(true);
     if (!('content' in built)) return;
@@ -43,8 +44,23 @@ describe('buildManagedEnvContent — fresh file', () => {
     expect(map.get('EMBEDDINGS_PROVIDER')).toBe('ollama');
     expect(map.get('EMBEDDINGS_OLLAMA_MODEL')).toBe('nomic-embed-text');
     expect(map.get('NODE_ENV')).toBe('development');
+    expect(map.get('SUPABASE_URL')).toBe('https://supabase.us-ca.opuspopuli.org');
     expect(built.content).toContain(MANAGED_BEGIN);
     expect(built.content).toContain(MANAGED_END);
+  });
+
+  it('preserves an operator SUPABASE_URL override on re-run (import, not clobber)', () => {
+    // Operator pinned a public URL outside the block; a later bootstrap without
+    // overwrite must not stomp it back to a bootstrap default.
+    const existing = 'SUPABASE_URL=https://supabase.custom.example.org\n';
+    const built = buildManagedEnvContent(existing, {
+      llmModel: 'qwen2.5:7b',
+      supabaseUrl: 'http://localhost:8000',
+    });
+    if (!('content' in built)) throw new Error('expected content');
+    expect(parseEnvContent(built.content).get('SUPABASE_URL')).toBe(
+      'https://supabase.custom.example.org',
+    );
   });
 
   it('omits NODE_ENV when nodeEnv is not supplied (production node)', () => {

@@ -23,7 +23,6 @@ describe('renderOpComposeScript', () => {
       'SUPABASE_SERVICE_ROLE_KEY',
       'DASHBOARD_PASSWORD',
       'AUTH_JWT_SECRET',
-      'SUPABASE_URL',
       'TUNNEL_TOKEN',
       'GATEWAY_HMAC_SECRET',
       'API_KEYS',
@@ -31,6 +30,13 @@ describe('renderOpComposeScript', () => {
     ]) {
       expect(s).toContain(v);
     }
+  });
+
+  it('does NOT export SUPABASE_URL — it lives in the .env managed block (#43)', () => {
+    // Exporting SUPABASE_URL from the wrapper would override the node .env value
+    // with a stale localhost default, silently breaking browser-facing auth URLs.
+    const s = renderOpComposeScript({ region: 'us-ca' });
+    expect(s).not.toMatch(/export SUPABASE_URL=/);
   });
 
   it('reads gateway-hmac-secret + grafana-admin-password as REQUIRED secrets', () => {
