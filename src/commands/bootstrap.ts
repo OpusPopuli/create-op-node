@@ -135,6 +135,17 @@ interface BootstrapOptions {
    *  `https://prompts.opuspopuli.org`. Ignored in `region-with-prompts`
    *  (the overlay pins it to the in-network hostname). */
   promptServiceUrl?: string;
+  /** Tri-state: `true`=--backup, `false`=--no-backup, `undefined`=neither →
+   *  interactive prompt (or hard error under --yes). Controls whether the
+   *  backup overlay is provisioned + scheduled (#111). */
+  backup?: boolean;
+  /** Host path for backup snapshots (BACKUPS_DIR_HOST). Required when backups
+   *  are enabled; prompted for when unset interactively. */
+  backupsDir?: string;
+  /** 5-field cron for the scheduled backup. Default `0 3 * * *`. */
+  backupSchedule?: string;
+  /** Days of snapshots to retain. Default 7. */
+  backupRetentionDays?: string;
   yes?: boolean;
 }
 
@@ -148,7 +159,7 @@ export const bootstrapCommand = new Command('bootstrap')
   .addOption(
     new Option(
       '--compose-file <path>',
-      'Repeatable. Compose file relative to repo root. Default: prod + backup (production), prod only (--local-only).',
+      'Repeatable. Compose file relative to repo root. Default: prod, plus the backup overlay when backups are enabled (see --backup).',
     ).argParser(collectComposeFile),
   )
   .addOption(new Option('--env-file <path>', 'Compose --env-file. Default: .env.production'))
@@ -196,6 +207,28 @@ export const bootstrapCommand = new Command('bootstrap')
       "Remote prompt-service URL. Only meaningful for --node-type=region (default: https://prompts.opuspopuli.org). Ignored for --node-type=region-with-prompts (the overlay pins it to http://opuspopuli-prompts:3210).",
     ),
   )
+  .addOption(
+    new Option(
+      '--backup',
+      'Provision + schedule the DB backup overlay. Omit both --backup/--no-backup to be prompted (required under --yes).',
+    ),
+  )
+  .addOption(new Option('--no-backup', 'Do NOT provision the backup overlay (node runs unprotected).'))
+  .addOption(
+    new Option(
+      '--backups-dir <path>',
+      'Host path for backup snapshots (BACKUPS_DIR_HOST). Required when backups are enabled; prompted for when unset. Prefer a separate external drive.',
+    ),
+  )
+  .addOption(
+    new Option(
+      '--backup-schedule <cron>',
+      'Cron (5 fields) for the scheduled backup. Default: `0 3 * * *` (daily 3 AM, node TZ).',
+    ),
+  )
+  .addOption(
+    new Option('--backup-retention-days <n>', 'Days of snapshots to keep. Default: 7.'),
+  )
   .addOption(new Option('--skip-stack', "Stop before `docker compose pull && up`").default(false))
   .addOption(
     new Option(
@@ -223,7 +256,8 @@ export const bootstrapCommand = new Command('bootstrap')
     const region = await resolveRegion(opts);
     const owner = opts.owner ?? 'OpusPopuli';
     const repoName = `opuspopuli-node-${region}`;
-    const composeFile = opts.composeFile ?? defaultComposeFiles(opts);
+    const backup = await resolveBackupConfig(opts);
+    const composeFile = opts.composeFile ?? defaultComposeFiles(backup.enabled);
 
     // Model selection: flags override > interactive prompt > defaults. The
     // resolved values flow to both Ollama (pull + warm) and the LaunchAgent
@@ -258,6 +292,7 @@ export const bootstrapCommand = new Command('bootstrap')
       embeddingsProvider,
       localOnly: Boolean(opts.localOnly),
       supabaseUrl: secrets.supabaseUrl,
+      backup,
     });
     await runStackPhase({ opts, repoPath, region, composeFile, secrets });
   });
@@ -304,10 +339,86 @@ interface CollectedSecrets {
 // skips it (don't burn dev-machine disk on backups; don't try to push
 // to an R2 bucket that may not exist). Operator can still override
 // with explicit --compose-file flags.
-function defaultComposeFiles(opts: BootstrapOptions): string[] {
-  return opts.localOnly
-    ? ['docker-compose-prod.yml']
-    : ['docker-compose-prod.yml', 'docker-compose-backup.yml'];
+// The backup overlay is included based on the operator's explicit backup
+// choice, NOT on --local-only. Coupling backups to tunnel-presence was the
+// #111 bug: a --local-only node holding the real corpus shipped unprotected.
+function defaultComposeFiles(backupEnabled: boolean): string[] {
+  const files = ['docker-compose-prod.yml'];
+  if (backupEnabled) files.push('docker-compose-backup.yml');
+  return files;
+}
+
+const DEFAULT_BACKUP_SCHEDULE = '0 3 * * *';
+const DEFAULT_RETENTION_DAYS = '7';
+/** 5-field cron (m h dom mon dow). */
+const CRON_RE = /^\S+ \S+ \S+ \S+ \S+$/;
+
+interface BackupConfig {
+  enabled: boolean;
+  backupsDirHost?: string;
+  schedule: string;
+  retentionDays: string;
+}
+
+/** Resolve the enable/disable decision: explicit flag wins; else prompt (no
+ *  safe default — the operator must choose); else hard-error under --yes. */
+async function resolveBackupEnabled(opts: BootstrapOptions): Promise<boolean> {
+  if (opts.backup === true) return true;
+  if (opts.backup === false) return false;
+  if (opts.yes) {
+    p.cancel(
+      'Backups require an explicit choice under --yes: pass --backup or --no-backup.',
+    );
+    process.exit(1);
+  }
+  const choice = unwrap(
+    await p.select({
+      message: 'Enable scheduled database backups? (protects your scraped data)',
+      options: [
+        { value: true, label: 'Yes — nightly backups (recommended)' },
+        { value: false, label: 'No — run this node without backups' },
+      ],
+    }),
+  );
+  return choice as boolean;
+}
+
+/** Backup snapshot destination — flag wins; else prompt (no silent default);
+ *  hard-error under --yes when unset. Warns (never blocks) if it looks like the
+ *  same disk as Docker's data. */
+async function resolveBackupsDir(opts: BootstrapOptions): Promise<string> {
+  if (opts.backupsDir) return opts.backupsDir;
+  if (opts.yes) {
+    p.cancel('Backups enabled but --backups-dir is unset (required under --yes).');
+    process.exit(1);
+  }
+  const dir = unwrap(
+    await p.text({
+      message:
+        'Backup destination (host path). Prefer a SEPARATE external drive — a path on the internal disk survives corruption/bad-migrations but NOT disk failure.',
+      placeholder: '/Volumes/T9/opuspopuli-backups',
+      validate: (v) =>
+        v && v.trim().startsWith('/') ? undefined : 'Enter an absolute host path (starts with /).',
+    }),
+  ) as string;
+  return dir.trim();
+}
+
+async function resolveBackupConfig(opts: BootstrapOptions): Promise<BackupConfig> {
+  const enabled = await resolveBackupEnabled(opts);
+  const schedule = opts.backupSchedule ?? DEFAULT_BACKUP_SCHEDULE;
+  if (!CRON_RE.test(schedule)) {
+    p.cancel(`--backup-schedule ${JSON.stringify(schedule)} is not a 5-field cron (m h dom mon dow).`);
+    process.exit(1);
+  }
+  const retentionDays = opts.backupRetentionDays ?? DEFAULT_RETENTION_DAYS;
+  if (!/^\d+$/.test(retentionDays)) {
+    p.cancel(`--backup-retention-days ${JSON.stringify(retentionDays)} must be a positive integer.`);
+    process.exit(1);
+  }
+  if (!enabled) return { enabled, schedule, retentionDays };
+  const backupsDirHost = await resolveBackupsDir(opts);
+  return { enabled, backupsDirHost, schedule, retentionDays };
 }
 
 // Node type selects which stack to provision. Default is `region` — the
@@ -1015,8 +1126,10 @@ async function runEnvFilePhase(args: {
   embeddingsProvider: EmbeddingsProvider;
   localOnly: boolean;
   supabaseUrl: string;
+  backup: BackupConfig;
 }): Promise<void> {
-  const { repoPath, llmModel, embeddingModel, embeddingsProvider, localOnly, supabaseUrl } = args;
+  const { repoPath, llmModel, embeddingModel, embeddingsProvider, localOnly, supabaseUrl, backup } =
+    args;
   const envSpin = p.spinner();
   envSpin.start('Writing model config to the node .env…');
   const res = await writeManagedEnv(
@@ -1031,6 +1144,16 @@ async function runEnvFilePhase(args: {
       // SUPABASE_URL lives in the managed block (not an op-compose export) so
       // docker compose reads the node's real public URL from .env durably (#43).
       supabaseUrl,
+      // Backup config in the managed block (#111). Only emit the location when
+      // backups are enabled; schedule/retention are harmless if the overlay is
+      // absent, but we keep them together for a coherent block.
+      ...(backup.enabled && backup.backupsDirHost
+        ? {
+            backupsDirHost: backup.backupsDirHost,
+            retentionDays: backup.retentionDays,
+            backupSchedule: backup.schedule,
+          }
+        : {}),
     },
     { overwrite: true },
   );

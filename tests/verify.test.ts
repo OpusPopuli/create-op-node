@@ -161,7 +161,7 @@ describe('summarize', () => {
 });
 
 describe('runVerify orchestration', () => {
-  it('returns 7 phases on a clean run with no images', async () => {
+  it('returns 8 phases on a clean run with no images', async () => {
     const report = await runVerify(baseInput, depsFor());
     expect(report.phases.map((ph) => ph.name)).toEqual([
       'TLS handshake',
@@ -169,6 +169,7 @@ describe('runVerify orchestration', () => {
       'GraphQL { __typename }',
       'Ollama models',
       'SUPABASE_URL',
+      'Backups configured',
       'Cloudflare Tunnel',
       'cosign verify',
     ]);
@@ -191,6 +192,27 @@ describe('runVerify orchestration', () => {
     );
     const supa = report.phases.find((ph) => ph.name === 'SUPABASE_URL');
     expect(supa?.status).toBe('ok');
+  });
+
+  it('warns when the node .env has no BACKUPS_DIR_HOST (backups unconfigured) (#111)', async () => {
+    const report = await runVerify({ ...baseInput, envRead: true }, depsFor());
+    const bk = report.phases.find((ph) => ph.name === 'Backups configured');
+    expect(bk?.status).toBe('warn');
+  });
+
+  it('passes the backups check when BACKUPS_DIR_HOST is set', async () => {
+    const report = await runVerify(
+      { ...baseInput, envRead: true, backupsDirHost: '/Volumes/T9/opuspopuli-backups' },
+      depsFor(),
+    );
+    const bk = report.phases.find((ph) => ph.name === 'Backups configured');
+    expect(bk?.status).toBe('ok');
+  });
+
+  it('skips the backups check off-node (env not read)', async () => {
+    const report = await runVerify(baseInput, depsFor());
+    const bk = report.phases.find((ph) => ph.name === 'Backups configured');
+    expect(bk?.status).toBe('skipped');
   });
 
   it('continues past a TLS failure (no short-circuit)', async () => {

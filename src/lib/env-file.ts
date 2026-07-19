@@ -49,8 +49,31 @@ export const MANAGED_KEYS = [
   'EMBEDDINGS_OLLAMA_MODEL',
   'NODE_ENV',
   'SUPABASE_URL',
+  'BACKUPS_DIR_HOST',
+  'RETENTION_DAYS',
+  'BACKUP_SCHEDULE',
 ] as const;
 export type ManagedKey = (typeof MANAGED_KEYS)[number];
+
+/** Managed keys whose value is a 5-field cron expression (spaces, `*`) rather
+ *  than a simple token — validated by CRON_RE instead of ENV_VALUE_RE. docker
+ *  compose reads the whole line after `=`, so the value is emitted unquoted and
+ *  round-trips through parseEnvContent unchanged. */
+const CRON_KEYS = new Set<ManagedKey>(['BACKUP_SCHEDULE']);
+/** 5 whitespace-separated cron fields (m h dom mon dow). */
+const CRON_RE = /^\S+ \S+ \S+ \S+ \S+$/;
+/** Managed keys holding an absolute host path (leading `/`, which ENV_VALUE_RE's
+ *  alphanumeric-first anchor rejects). Spaces allowed for volume names. */
+const PATH_KEYS = new Set<ManagedKey>(['BACKUPS_DIR_HOST']);
+const PATH_RE = /^\/[A-Za-z0-9 ._/-]*$/;
+
+/** Per-key `.env`-safety check: cron keys allow the 5-field form, path keys an
+ *  absolute path, everything else the strict simple-token rule. */
+function valueOkForKey(key: ManagedKey, value: string): boolean {
+  if (CRON_KEYS.has(key)) return CRON_RE.test(value);
+  if (PATH_KEYS.has(key)) return PATH_RE.test(value);
+  return ENV_VALUE_RE.test(value);
+}
 
 /** `.env` value safety: model names + provider/NODE_ENV enums never contain
  *  whitespace, `#`, quotes, `$`, or newlines. Rejecting them keeps a value
@@ -78,6 +101,14 @@ export interface ManagedEnvSelection {
    *  the managed block so `docker compose` resolves `${SUPABASE_URL:-…}` from
    *  `.env` durably — the op-compose wrapper no longer exports it (#43). */
   supabaseUrl?: string;
+  /** Host path the backup overlay bind-mounts to /backups. Only set when the
+   *  operator enabled backups (#111). Omitted → backups disabled / unset. */
+  backupsDirHost?: string;
+  /** Days of backup snapshots to retain. */
+  retentionDays?: string;
+  /** 5-field cron for the scheduled backup (rendered into the crontab by the
+   *  backup container's entrypoint — opuspopuli-node#45). */
+  backupSchedule?: string;
 }
 
 /** The managed keys mapped from the caller's selection. */
@@ -88,6 +119,9 @@ function selectionToPairs(sel: ManagedEnvSelection): ReadonlyArray<[ManagedKey, 
     ['EMBEDDINGS_OLLAMA_MODEL', sel.embeddingModel],
     ['NODE_ENV', sel.nodeEnv],
     ['SUPABASE_URL', sel.supabaseUrl],
+    ['BACKUPS_DIR_HOST', sel.backupsDirHost],
+    ['RETENTION_DAYS', sel.retentionDays],
+    ['BACKUP_SCHEDULE', sel.backupSchedule],
   ];
 }
 
@@ -221,7 +255,7 @@ export function buildManagedEnvContent(
       split.blockValues.get(key) ?? importedBefore.get(key) ?? importedAfter.get(key);
     const final = opts.overwrite ? (selected ?? existingVal) : (existingVal ?? selected);
     if (final === undefined) continue;
-    if (!ENV_VALUE_RE.test(final)) {
+    if (!valueOkForKey(key, final)) {
       return { error: `${key} value ${JSON.stringify(final)} is not safe for a .env line` };
     }
     resolved.push([key, final]);
@@ -273,6 +307,9 @@ export interface NodeEnvModelConfig {
   /** Effective SUPABASE_URL — read so `verify` can flag a non-local node still
    *  pinned to the localhost default (opuspopuli-node#43). */
   supabaseUrl?: string;
+  /** Effective BACKUPS_DIR_HOST — read so `verify` can flag a node with no
+   *  scheduled backups configured (#111). */
+  backupsDirHost?: string;
 }
 
 /**
@@ -295,11 +332,13 @@ export async function readEnvModelConfig(repoDir: string): Promise<NodeEnvModelC
   const prov = map.get('EMBEDDINGS_PROVIDER');
   const node = map.get('NODE_ENV');
   const supa = map.get('SUPABASE_URL');
+  const backupsDir = map.get('BACKUPS_DIR_HOST');
   if (llm !== undefined) cfg.llmModel = llm;
   if (emb !== undefined) cfg.embeddingModel = emb;
   if (prov !== undefined) cfg.embeddingsProvider = prov;
   if (node !== undefined) cfg.nodeEnv = node;
   if (supa !== undefined) cfg.supabaseUrl = supa;
+  if (backupsDir !== undefined) cfg.backupsDirHost = backupsDir;
   return cfg;
 }
 

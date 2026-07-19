@@ -49,6 +49,30 @@ describe('buildManagedEnvContent — fresh file', () => {
     expect(built.content).toContain(MANAGED_END);
   });
 
+  it('emits backup config incl. a space-bearing BACKUP_SCHEDULE cron (#111)', () => {
+    const built = buildManagedEnvContent('', {
+      llmModel: 'qwen2.5:7b',
+      backupsDirHost: '/Volumes/T9/opuspopuli-backups',
+      retentionDays: '14',
+      backupSchedule: '30 2 * * *',
+    });
+    if (!('content' in built)) throw new Error('expected content');
+    const map = parseEnvContent(built.content);
+    expect(map.get('BACKUPS_DIR_HOST')).toBe('/Volumes/T9/opuspopuli-backups');
+    expect(map.get('RETENTION_DAYS')).toBe('14');
+    // Cron round-trips unquoted (docker compose reads the whole line after `=`).
+    expect(map.get('BACKUP_SCHEDULE')).toBe('30 2 * * *');
+    expect(built.content).toContain('BACKUP_SCHEDULE=30 2 * * *');
+  });
+
+  it('rejects a non-cron BACKUP_SCHEDULE (wrong field count)', () => {
+    const built = buildManagedEnvContent('', {
+      llmModel: 'qwen2.5:7b',
+      backupSchedule: 'not-a-cron',
+    });
+    expect('error' in built).toBe(true);
+  });
+
   it('preserves an operator SUPABASE_URL override on re-run (import, not clobber)', () => {
     // Operator pinned a public URL outside the block; a later bootstrap without
     // overwrite must not stomp it back to a bootstrap default.
