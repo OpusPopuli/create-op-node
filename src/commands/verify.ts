@@ -104,6 +104,12 @@ export interface VerifyInput {
    *  `http://localhost:8000` warns — browser-facing auth URLs would be wrong
    *  (opuspopuli-node#43). */
   supabaseUrl?: string;
+  /** Whether the node `.env` was read (verify running on the node). Gates the
+   *  backups check so an off-node run skips rather than false-warns. */
+  envRead?: boolean;
+  /** BACKUPS_DIR_HOST from the node `.env`. Absent while `envRead` → no
+   *  scheduled backups configured → warn (#111). */
+  backupsDirHost?: string;
 }
 
 const DEFAULT_DEPS: VerifyDeps = {
@@ -133,6 +139,7 @@ export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_D
   await verifyGraphqlPhase(input, deps, push);
   await verifyOllamaModelsPhase(input, deps, push);
   verifySupabaseUrlPhase(input, push);
+  verifyBackupsPhase(input, push);
   await verifyCloudflarePhase(input, deps, push);
   await verifyCosignPhase(input, deps, push);
 
@@ -268,6 +275,33 @@ function verifySupabaseUrlPhase(input: VerifyInput, push: PushVerifyPhase): void
     return;
   }
   push({ name: 'SUPABASE_URL', status: 'ok', detail: input.supabaseUrl });
+}
+
+// ---- Phase 4c: backups configured (node-local, optional) ----------
+//
+// A node with no BACKUPS_DIR_HOST in its .env has no scheduled backups — the
+// exact #111 failure mode where a data node ran unprotected. Config-level check
+// only (doesn't inspect the container / snapshot freshness). Skipped off-node.
+function verifyBackupsPhase(input: VerifyInput, push: PushVerifyPhase): void {
+  if (!input.envRead) {
+    push({
+      name: 'Backups configured',
+      status: 'skipped',
+      detail: 'run on the node (or pass --repo-dir) so its .env is read',
+    });
+    return;
+  }
+  if (!input.backupsDirHost) {
+    push({
+      name: 'Backups configured',
+      status: 'warn',
+      detail:
+        'no BACKUPS_DIR_HOST in .env — this node has no scheduled DB backups; scraped ' +
+        'data is unprotected. Enable with `create-op-node bootstrap --backup`.',
+    });
+    return;
+  }
+  push({ name: 'Backups configured', status: 'ok', detail: input.backupsDirHost });
 }
 
 // ---- Phase 5: Cloudflare Tunnel status (optional) ------------------
@@ -424,10 +458,10 @@ export const verifyCommand = new Command('verify')
     const apiHost = localOnly ? '' : (opts.apiHost ?? `api.${domain}`);
     const images = opts.image ?? [];
     const ollama = await resolveOllamaVerifyInput(opts);
-    const supabaseUrl = await resolveSupabaseUrlVerifyInput(opts);
-    // Fixed phases: TLS, health, GraphQL, Ollama, SUPABASE_URL, Cloudflare (6)
-    // + cosign (one line when no --image, else one per image).
-    const totalPhases = 6 + (images.length === 0 ? 1 : images.length);
+    const nodeEnv = await resolveNodeEnvVerifyInput(opts);
+    // Fixed phases: TLS, health, GraphQL, Ollama, SUPABASE_URL, Backups,
+    // Cloudflare (7) + cosign (one line when no --image, else one per image).
+    const totalPhases = 7 + (images.length === 0 ? 1 : images.length);
 
     const report = await runVerifyWithSpinner({
       apiHost,
@@ -437,8 +471,10 @@ export const verifyCommand = new Command('verify')
       images,
       totalPhases,
       localOnly,
+      envRead: nodeEnv.envRead,
       ...(ollama ? { ollama } : {}),
-      ...(supabaseUrl !== undefined ? { supabaseUrl } : {}),
+      ...(nodeEnv.supabaseUrl !== undefined ? { supabaseUrl: nodeEnv.supabaseUrl } : {}),
+      ...(nodeEnv.backupsDirHost !== undefined ? { backupsDirHost: nodeEnv.backupsDirHost } : {}),
     });
 
     renderVerifySummary(report, { opts, totalPhases });
@@ -576,13 +612,21 @@ async function resolveOllamaVerifyInput(opts: VerifyOptions): Promise<VerifyInpu
   return mergeOllamaModelConfig(opts, envCfg);
 }
 
-// Read SUPABASE_URL from the node `.env` for the sanity check. Same node-repo
-// gating as the Ollama resolver so an unrelated cwd never trips a false warn.
-async function resolveSupabaseUrlVerifyInput(opts: VerifyOptions): Promise<string | undefined> {
+// Read node `.env`-derived verify inputs (SUPABASE_URL + BACKUPS_DIR_HOST) in a
+// single pass. Same node-repo gating as the Ollama resolver so an unrelated cwd
+// never trips a false warn; `envRead` tells the phases whether the .env was seen.
+async function resolveNodeEnvVerifyInput(
+  opts: VerifyOptions,
+): Promise<{ envRead: boolean; supabaseUrl?: string; backupsDirHost?: string }> {
   const explicit = opts.repoDir !== undefined;
   const dir = opts.repoDir ?? process.cwd();
-  if (!explicit && !(await looksLikeNodeRepo(dir))) return undefined;
-  return (await readEnvModelConfig(dir)).supabaseUrl;
+  if (!explicit && !(await looksLikeNodeRepo(dir))) return { envRead: false };
+  const cfg = await readEnvModelConfig(dir);
+  return {
+    envRead: true,
+    ...(cfg.supabaseUrl !== undefined ? { supabaseUrl: cfg.supabaseUrl } : {}),
+    ...(cfg.backupsDirHost !== undefined ? { backupsDirHost: cfg.backupsDirHost } : {}),
+  };
 }
 
 // Run the checks behind a single spinner that advances per phase.
@@ -595,8 +639,23 @@ async function runVerifyWithSpinner(args: {
   totalPhases: number;
   localOnly: boolean;
   ollama?: VerifyInput['ollama'];
+  envRead?: boolean;
+  supabaseUrl?: string;
+  backupsDirHost?: string;
 }): Promise<VerifyReport> {
-  const { apiHost, certWarnDays, cfToken, opts, images, totalPhases, localOnly, ollama } = args;
+  const {
+    apiHost,
+    certWarnDays,
+    cfToken,
+    opts,
+    images,
+    totalPhases,
+    localOnly,
+    ollama,
+    envRead,
+    supabaseUrl,
+    backupsDirHost,
+  } = args;
 
   let phaseIndex = 0;
   let activeSpin: ReturnType<typeof p.spinner> | null = null;
@@ -623,7 +682,10 @@ async function runVerifyWithSpinner(args: {
       },
       images,
       localOnly,
+      ...(envRead !== undefined ? { envRead } : {}),
       ...(ollama ? { ollama } : {}),
+      ...(supabaseUrl !== undefined ? { supabaseUrl } : {}),
+      ...(backupsDirHost !== undefined ? { backupsDirHost } : {}),
     },
     deps,
   );
