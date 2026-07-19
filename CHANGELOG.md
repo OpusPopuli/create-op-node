@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0](https://github.com/OpusPopuli/create-op-node/compare/v0.15.2...v0.16.0) (2026-07-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **bootstrap:** non-interactive `bootstrap --yes` now requires --backup or --no-backup (and --backups-dir when enabled); previously backups were silently off for --local-only nodes.
+
+### Features
+
+* **bootstrap:** operator-configurable backups — on/off, schedule, location ([#111](https://github.com/OpusPopuli/create-op-node/issues/111)) ([#112](https://github.com/OpusPopuli/create-op-node/issues/112)) ([baca2e8](https://github.com/OpusPopuli/create-op-node/commit/baca2e819d773d39de5f013ffb40949ff1113155))
+
 ## [0.15.2](https://github.com/OpusPopuli/create-op-node/compare/v0.15.1...v0.15.2) (2026-07-18)
 
 
