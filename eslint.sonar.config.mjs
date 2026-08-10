@@ -41,6 +41,16 @@ export default tseslint.config(
     },
   },
   {
+    // Test fixtures invent addresses as data — a tailnet IP in an assertion is
+    // the thing under test, not a finding. S1313 targets hardcoded IPs in
+    // shipped code: config that should have been externalized, or an internal
+    // address baked into a binary. Neither applies to a fixture, and the
+    // alternative (composing the literal from parts to dodge the matcher) makes
+    // the test harder to read for no safety gained.
+    files: ['tests/**'],
+    rules: { 'sonarjs/no-hardcoded-ip': 'off' },
+  },
+  {
     ignores: ['dist/', 'node_modules/', 'coverage/'],
   },
 );
