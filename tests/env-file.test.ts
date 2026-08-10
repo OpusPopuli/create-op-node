@@ -65,6 +65,23 @@ describe('buildManagedEnvContent — fresh file', () => {
     expect(built.content).toContain('BACKUP_SCHEDULE=30 2 * * *');
   });
 
+  it('emits GRAFANA_BIND_ADDR when the operator opts into tailnet exposure', () => {
+    const built = buildManagedEnvContent('', {
+      llmModel: 'qwen2.5:7b',
+      grafanaBindAddr: '100.87.52.26',
+    });
+    if (!('content' in built)) throw new Error('expected content');
+    expect(parseEnvContent(built.content).get('GRAFANA_BIND_ADDR')).toBe('100.87.52.26');
+  });
+
+  it('omits GRAFANA_BIND_ADDR entirely when not opted in', () => {
+    const built = buildManagedEnvContent('', { llmModel: 'qwen2.5:7b' });
+    if (!('content' in built)) throw new Error('expected content');
+    // Absent, not empty: the compose default (127.0.0.1) must stay in force, and
+    // `GRAFANA_BIND_ADDR=` would bind Grafana to every interface instead.
+    expect(built.content).not.toContain('GRAFANA_BIND_ADDR');
+  });
+
   it('rejects a non-cron BACKUP_SCHEDULE (wrong field count)', () => {
     const built = buildManagedEnvContent('', {
       llmModel: 'qwen2.5:7b',
