@@ -52,6 +52,7 @@ export const MANAGED_KEYS = [
   'BACKUPS_DIR_HOST',
   'RETENTION_DAYS',
   'BACKUP_SCHEDULE',
+  'GRAFANA_BIND_ADDR',
 ] as const;
 export type ManagedKey = (typeof MANAGED_KEYS)[number];
 
@@ -109,6 +110,11 @@ export interface ManagedEnvSelection {
   /** 5-field cron for the scheduled backup (rendered into the crontab by the
    *  backup container's entrypoint — opuspopuli-node#45). */
   backupSchedule?: string;
+  /** Host address Grafana's port binds to. Absent (or `127.0.0.1`) keeps the
+   *  dashboard loopback-only, which is the shipped default — an operator opts
+   *  into tailnet exposure explicitly at bootstrap. Emitted so the node's
+   *  compose can bind without hard-coding a per-node IP. */
+  grafanaBindAddr?: string;
 }
 
 /** The managed keys mapped from the caller's selection. */
@@ -122,6 +128,7 @@ function selectionToPairs(sel: ManagedEnvSelection): ReadonlyArray<[ManagedKey, 
     ['BACKUPS_DIR_HOST', sel.backupsDirHost],
     ['RETENTION_DAYS', sel.retentionDays],
     ['BACKUP_SCHEDULE', sel.backupSchedule],
+    ['GRAFANA_BIND_ADDR', sel.grafanaBindAddr],
   ];
 }
 

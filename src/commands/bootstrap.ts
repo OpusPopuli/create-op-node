@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 import { Command, Option } from 'commander';
 import * as p from '@clack/prompts';
@@ -146,6 +147,10 @@ interface BootstrapOptions {
   backupSchedule?: string;
   /** Days of snapshots to retain. Default 7. */
   backupRetentionDays?: string;
+  /** Tri-state, mirroring `backup`: `true`=--grafana-tailnet,
+   *  `false`=--no-grafana-tailnet, `undefined`=neither → interactive prompt
+   *  (or the safe loopback default under --yes). */
+  grafanaTailnet?: boolean;
   yes?: boolean;
 }
 
@@ -229,6 +234,15 @@ export const bootstrapCommand = new Command('bootstrap')
   .addOption(
     new Option('--backup-retention-days <n>', 'Days of snapshots to keep. Default: 7.'),
   )
+  .addOption(
+    new Option(
+      '--grafana-tailnet',
+      "Bind Grafana to this node's Tailscale IP so the dashboard is reachable from the tailnet. Default is loopback-only.",
+    ),
+  )
+  .addOption(
+    new Option('--no-grafana-tailnet', 'Keep Grafana loopback-only (the default).'),
+  )
   .addOption(new Option('--skip-stack', "Stop before `docker compose pull && up`").default(false))
   .addOption(
     new Option(
@@ -257,6 +271,7 @@ export const bootstrapCommand = new Command('bootstrap')
     const owner = opts.owner ?? 'OpusPopuli';
     const repoName = `opuspopuli-node-${region}`;
     const backup = await resolveBackupConfig(opts);
+    const grafanaBindAddr = await resolveGrafanaBindAddr(opts);
     const composeFile = opts.composeFile ?? defaultComposeFiles(backup.enabled);
 
     // Model selection: flags override > interactive prompt > defaults. The
@@ -293,6 +308,7 @@ export const bootstrapCommand = new Command('bootstrap')
       localOnly: Boolean(opts.localOnly),
       supabaseUrl: secrets.supabaseUrl,
       backup,
+      ...(grafanaBindAddr ? { grafanaBindAddr } : {}),
     });
     await runStackPhase({ opts, repoPath, region, composeFile, secrets });
   });
@@ -402,6 +418,59 @@ async function resolveBackupsDir(opts: BootstrapOptions): Promise<string> {
     }),
   ) as string;
   return dir.trim();
+}
+
+/** Tailscale's IPv4 for this node, or undefined when Tailscale isn't present.
+ *  The macOS app ships the CLI inside the bundle, so check both locations. */
+function detectTailscaleIp(): string | undefined {
+  const candidates = ['tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale'];
+  for (const bin of candidates) {
+    try {
+      const out = execFileSync(bin, ['ip', '-4'], {
+        encoding: 'utf8',
+        timeout: 5000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      const ip = out.split('\n')[0]?.trim();
+      if (ip && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return ip;
+    } catch {
+      // Not installed at this path, or not logged in — try the next candidate.
+    }
+  }
+  return undefined;
+}
+
+/** Decide what Grafana's port binds to.
+ *
+ *  Loopback is the default and stays the default: an observability dashboard
+ *  reachable from other machines is a deliberate choice, not something a
+ *  bootstrap should switch on because it happened to find Tailscale. Returns
+ *  undefined to leave the key unset, so the compose default applies. */
+async function resolveGrafanaBindAddr(opts: BootstrapOptions): Promise<string | undefined> {
+  if (opts.grafanaTailnet === false) return undefined;
+
+  const ip = detectTailscaleIp();
+  if (!ip) {
+    if (opts.grafanaTailnet === true) {
+      p.cancel('--grafana-tailnet was passed but no Tailscale IPv4 was found (is Tailscale running and logged in?).');
+      process.exit(1);
+    }
+    return undefined;
+  }
+
+  if (opts.grafanaTailnet === true) return ip;
+  // --yes must not silently widen exposure, so it takes the safe branch.
+  if (opts.yes) return undefined;
+
+  const expose = unwrap(
+    await p.confirm({
+      message:
+        `Expose Grafana on the tailnet at ${ip}:3101? Otherwise it stays loopback-only ` +
+        '(reachable from this machine, or through an SSH tunnel).',
+      initialValue: false,
+    }),
+  ) as boolean;
+  return expose ? ip : undefined;
 }
 
 async function resolveBackupConfig(opts: BootstrapOptions): Promise<BackupConfig> {
@@ -1127,9 +1196,20 @@ async function runEnvFilePhase(args: {
   localOnly: boolean;
   supabaseUrl: string;
   backup: BackupConfig;
+  /** Undefined leaves GRAFANA_BIND_ADDR unset, so the compose default
+   *  (127.0.0.1) keeps the dashboard loopback-only. */
+  grafanaBindAddr?: string;
 }): Promise<void> {
-  const { repoPath, llmModel, embeddingModel, embeddingsProvider, localOnly, supabaseUrl, backup } =
-    args;
+  const {
+    repoPath,
+    llmModel,
+    embeddingModel,
+    embeddingsProvider,
+    localOnly,
+    supabaseUrl,
+    backup,
+    grafanaBindAddr,
+  } = args;
   const envSpin = p.spinner();
   envSpin.start('Writing model config to the node .env…');
   const res = await writeManagedEnv(
@@ -1154,6 +1234,9 @@ async function runEnvFilePhase(args: {
             backupSchedule: backup.schedule,
           }
         : {}),
+      // Only emitted when the operator opted into tailnet exposure; absent
+      // leaves the compose default (127.0.0.1) in force.
+      ...(grafanaBindAddr ? { grafanaBindAddr } : {}),
     },
     { overwrite: true },
   );
