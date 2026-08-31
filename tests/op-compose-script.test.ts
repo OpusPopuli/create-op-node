@@ -46,6 +46,13 @@ describe('renderOpComposeScript', () => {
     const s = renderOpComposeScript({ region: 'us-ca' });
     expect(s).toMatch(/GATEWAY_HMAC_SECRET="\$\(require_secret gateway-hmac-secret\)"/);
     expect(s).toMatch(/GRAFANA_ADMIN_PASSWORD="\$\(require_secret grafana-admin-password\)"/);
+
+    // optional_secret is load-bearing here: with require_secret, a node that
+    // has not created the grafana_ro role yet would fail to start every
+    // service rather than merely showing an unconnected dashboard.
+    expect(s).toMatch(
+      /GRAFANA_DB_PASSWORD="\$\(optional_secret grafana-db-password\)"/,
+    );
   });
 
   it('renders API_KEYS as JSON derived from GATEWAY_HMAC_SECRET (api-gateway key = the secret)', () => {
