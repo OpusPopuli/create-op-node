@@ -206,6 +206,13 @@ export API_KEYS="{\\"api-gateway\\":\\"\${GATEWAY_HMAC_SECRET}\\"}"
 # Grafana admin password — overrides the compose \`admin\`/\`admin\` default.
 export GRAFANA_ADMIN_PASSWORD="$(require_secret grafana-admin-password)"
 
+# Read-only Postgres login behind the Users dashboard (signup + activation).
+# optional_secret, NOT require_secret: a node that has not created the
+# grafana_ro role yet should get a disconnected dashboard, not a wrapper that
+# exits 1 and refuses to start every service on the box. The grant is in
+# docs/guides/user-dashboard.md in the opuspopuli repo.
+export GRAFANA_DB_PASSWORD="$(optional_secret grafana-db-password)"
+
 # AUTH_JWT_SECRET historically equals JWT_SECRET in dev/UAT — supply that
 # default if the operator hasn't set one independently.
 export AUTH_JWT_SECRET="\${AUTH_JWT_SECRET:-$JWT_SECRET}"
