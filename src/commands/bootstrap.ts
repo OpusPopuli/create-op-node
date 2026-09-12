@@ -185,13 +185,13 @@ export const bootstrapCommand = new Command('bootstrap')
   .addOption(
     new Option(
       '--embedding-model <model>',
-      `Ollama embedding model. Default: ${DEFAULT_EMBEDDING_MODEL}. Only takes effect when the knowledge service runs with EMBEDDINGS_PROVIDER=ollama (otherwise embeddings are computed in-process via xenova).`,
+      `Ollama embedding model. Default: ${DEFAULT_EMBEDDING_MODEL}. Used by the knowledge, region and documents services; only takes effect with EMBEDDINGS_PROVIDER=ollama (otherwise embeddings are computed in-process via xenova). Must produce 768-dimension vectors — a mismatch with the pgvector columns refuses to boot.`,
     ),
   )
   .addOption(
     new Option(
       '--embeddings-provider <provider>',
-      `Where embeddings are computed. Default: ${DEFAULT_EMBEDDINGS_PROVIDER} (in-process). \`ollama\` uses the host daemon with the embedding model. Written to the node's .env as the single source of truth.`,
+      `Where embeddings are computed. Default: ${DEFAULT_EMBEDDINGS_PROVIDER} (host daemon, using the embedding model above — the model the platform's Spanish retrieval was calibrated on). \`xenova\` computes them in-process instead, needing no model pull, but is English-first. Written to the node's .env as the single source of truth.`,
     ).choices(['xenova', 'ollama']),
   )
   .addOption(
@@ -1096,12 +1096,12 @@ async function loginGhcrPhase(): Promise<void> {
 
 /**
  * The models bootstrap pulls into Ollama, in pull order. The LLM is always
- * pulled. The embedding model is pulled ONLY when the knowledge service will
- * use the Ollama daemon for embeddings (`EMBEDDINGS_PROVIDER=ollama`); under
- * the default `xenova` (in-process) provider it's never loaded, so pulling
- * nomic-embed-text would just waste a download on a fresh node. When present,
- * the embedding pulls first — it's small, giving fast "✓ pulled" feedback
- * before the LLM's multi-GB download dominates the spinner. Pure helper.
+ * pulled. The embedding model is pulled ONLY when the services will use the
+ * Ollama daemon for embeddings (`EMBEDDINGS_PROVIDER=ollama`, now the
+ * default); under `xenova` embeddings run in-process and it is never loaded,
+ * so pulling it would waste a download. When present, the embedding pulls
+ * first — at 957 MB it is still well under the LLM's multi-gigabyte download,
+ * so it gives a "✓ pulled" well before the spinner is dominated. Pure helper.
  */
 export function modelsToPull(args: {
   provider: EmbeddingsProvider;

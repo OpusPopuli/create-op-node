@@ -51,31 +51,39 @@ function stubHangingFetch() {
 }
 
 describe('DEFAULT_MODELS + OLLAMA_URL', () => {
-  it('uses qwen2.5:7b + nomic-embed-text by default', () => {
-    expect(DEFAULT_MODELS).toEqual(['qwen2.5:7b', 'nomic-embed-text']);
+  it('uses qwen2.5:7b + nomic v2-moe by default', () => {
+    expect(DEFAULT_MODELS).toEqual(['qwen2.5:7b', 'nomic-embed-text-v2-moe:latest']);
   });
 
   it('exports DEFAULT_LLM_MODEL + DEFAULT_EMBEDDING_MODEL scalars', () => {
     expect(DEFAULT_LLM_MODEL).toBe('qwen2.5:7b');
-    expect(DEFAULT_EMBEDDING_MODEL).toBe('nomic-embed-text');
+    // v2-moe, not the bare name. `nomic-embed-text` is v1.5 — a different
+    // model that scores 0/14 on the real ballot-measure corpus and fails
+    // silently, so a revert to it must break a test rather than a node.
+    expect(DEFAULT_EMBEDDING_MODEL).toBe('nomic-embed-text-v2-moe:latest');
   });
 
   it('DEFAULT_MODELS is composed from the two scalars (no drift)', () => {
     expect(DEFAULT_MODELS).toEqual([DEFAULT_LLM_MODEL, DEFAULT_EMBEDDING_MODEL]);
   });
 
-  it('defaults the embeddings provider to in-process xenova', () => {
-    expect(DEFAULT_EMBEDDINGS_PROVIDER).toBe('xenova');
+  it('defaults the embeddings provider to the host ollama daemon', () => {
+    // A node already runs Ollama for the LLM, and the in-process provider is
+    // English-first: nomic answers 8/8 Spanish queries clearing by 0.223 where
+    // xenova's model clears by 0.061. Spanish parity should not be opt-in.
+    expect(DEFAULT_EMBEDDINGS_PROVIDER).toBe('ollama');
   });
 });
 
 describe('modelPresent', () => {
   it('matches an exact tag', () => {
-    expect(modelPresent('qwen2.5:7b', ['qwen2.5:7b', 'nomic-embed-text:latest'])).toBe(true);
+    expect(modelPresent('qwen2.5:7b', ['qwen2.5:7b', 'nomic-embed-text-v2-moe:latest'])).toBe(true);
   });
 
   it('normalizes a bare configured name to :latest', () => {
-    expect(modelPresent('nomic-embed-text', ['nomic-embed-text:latest'])).toBe(true);
+    expect(modelPresent('nomic-embed-text-v2-moe', ['nomic-embed-text-v2-moe:latest'])).toBe(
+      true,
+    );
   });
 
   it('normalizes a bare installed name to :latest', () => {
@@ -83,7 +91,7 @@ describe('modelPresent', () => {
   });
 
   it('returns false on a tag mismatch (the incident: qwen3.5:35b vs qwen2.5:72b)', () => {
-    expect(modelPresent('qwen3.5:35b', ['qwen2.5:72b', 'nomic-embed-text:latest'])).toBe(false);
+    expect(modelPresent('qwen3.5:35b', ['qwen2.5:72b', 'nomic-embed-text-v2-moe:latest'])).toBe(false);
   });
 
   it('returns false for an empty installed list', () => {

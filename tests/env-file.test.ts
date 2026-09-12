@@ -32,7 +32,7 @@ describe('buildManagedEnvContent — fresh file', () => {
   it('emits a managed block with the selected model config', () => {
     const built = buildManagedEnvContent('', {
       llmModel: 'qwen3.6:35b-a3b',
-      embeddingModel: 'nomic-embed-text',
+      embeddingModel: 'nomic-embed-text-v2-moe:latest',
       embeddingsProvider: 'ollama',
       nodeEnv: 'development',
       supabaseUrl: 'https://supabase.us-ca.opuspopuli.org',
@@ -42,7 +42,7 @@ describe('buildManagedEnvContent — fresh file', () => {
     const map = parseEnvContent(built.content);
     expect(map.get('LLM_MODEL')).toBe('qwen3.6:35b-a3b');
     expect(map.get('EMBEDDINGS_PROVIDER')).toBe('ollama');
-    expect(map.get('EMBEDDINGS_OLLAMA_MODEL')).toBe('nomic-embed-text');
+    expect(map.get('EMBEDDINGS_OLLAMA_MODEL')).toBe('nomic-embed-text-v2-moe:latest');
     expect(map.get('NODE_ENV')).toBe('development');
     expect(map.get('SUPABASE_URL')).toBe('https://supabase.us-ca.opuspopuli.org');
     expect(built.content).toContain(MANAGED_BEGIN);
@@ -184,7 +184,7 @@ describe('writeManagedEnv + readEnvModelConfig (round-trip)', () => {
   it('writes .env and reads the config back', async () => {
     const res = await writeManagedEnv(
       dir,
-      { llmModel: 'qwen3.6:35b-a3b', embeddingModel: 'nomic-embed-text', embeddingsProvider: 'ollama' },
+      { llmModel: 'qwen3.6:35b-a3b', embeddingModel: 'nomic-embed-text-v2-moe:latest', embeddingsProvider: 'ollama' },
       { overwrite: true },
     );
     expect(res.ok).toBe(true);
@@ -192,7 +192,7 @@ describe('writeManagedEnv + readEnvModelConfig (round-trip)', () => {
 
     const cfg = await readEnvModelConfig(dir);
     expect(cfg.llmModel).toBe('qwen3.6:35b-a3b');
-    expect(cfg.embeddingModel).toBe('nomic-embed-text');
+    expect(cfg.embeddingModel).toBe('nomic-embed-text-v2-moe:latest');
     expect(cfg.embeddingsProvider).toBe('ollama');
   });
 

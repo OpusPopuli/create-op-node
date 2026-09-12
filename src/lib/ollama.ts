@@ -36,19 +36,42 @@ const OLLAMA_WARM_TIMEOUT_MS = 120_000;
  *  at bootstrap time with `--llm-model`. */
 export const DEFAULT_LLM_MODEL = 'qwen2.5:7b';
 
-/** Default embedding model used by the knowledge service when
- *  `EMBEDDINGS_PROVIDER=ollama`. With the default `xenova` (in-process)
- *  provider, this isn't pulled. Operators can override with
- *  `--embedding-model`. */
-export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text';
+/** Default embedding model, used by `knowledge`, `region` and `documents`
+ *  when `EMBEDDINGS_PROVIDER=ollama`. Operators can override with
+ *  `--embedding-model`.
+ *
+ *  v2-moe (957 MB), NOT the bare `nomic-embed-text` this used to be. Those are
+ *  different models, not two tags of one: the bare name is v1.5, which scores
+ *  0/14 top-1 on the real ballot-measure corpus because every Attorney General
+ *  title carries the same boilerplate and v1.5's similarity space saturates on
+ *  it (corpus pairwise cosine mean 0.942 — every measure looks like every
+ *  other). It fails silently; retrieval simply stops being right.
+ *
+ *  Whatever replaces this must produce 768-dimension vectors — that is the
+ *  width of the pgvector columns (EMBEDDING_DIMENSIONS in @opuspopuli/common,
+ *  opuspopuli#1156) and a mismatch refuses to boot. */
+export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text-v2-moe:latest';
 
 /** Where embeddings are computed: `xenova` runs in-process (no Ollama pull
  *  needed), `ollama` uses the host daemon with DEFAULT_EMBEDDING_MODEL. */
 export type EmbeddingsProvider = 'xenova' | 'ollama';
 
-/** Platform default — in-process embeddings, so a fresh node needs no
- *  embedding-model pull unless the operator opts into the Ollama provider. */
-export const DEFAULT_EMBEDDINGS_PROVIDER: EmbeddingsProvider = 'xenova';
+/** Platform default — the host Ollama daemon.
+ *
+ *  Was `xenova`, to spare a fresh node an embedding-model download. That
+ *  reasoning belongs to a developer cloning the monorepo, not to a node: a
+ *  node already requires Ollama and already pulls a multi-gigabyte LLM, so the
+ *  957 MB embedding model is not what makes bootstrap expensive.
+ *
+ *  What it buys is the model the platform was actually calibrated on. The
+ *  in-process provider is English-first; nomic v2-moe answers 8 of 8 Spanish
+ *  queries against the real corpus and clears the next-best answer by 0.223,
+ *  where the in-process model clears by 0.061. Spanish parity is a platform
+ *  non-negotiable, so a node should not have to opt into it.
+ *
+ *  Changed while us-ca was the only live node, i.e. with no installed base to
+ *  migrate. `--embeddings-provider xenova` still selects in-process. */
+export const DEFAULT_EMBEDDINGS_PROVIDER: EmbeddingsProvider = 'ollama';
 
 /** Default model pull set for `bootstrap`. Kept as a `as const`-typed array
  *  so existing code can iterate without re-deriving from the two scalars. */
