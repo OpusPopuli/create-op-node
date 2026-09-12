@@ -71,7 +71,9 @@ The chosen models flow two places:
 
 1. **Ollama**: bootstrap pulls + warms them so the daemon has them
    resident before the stack comes up. The embedding model pulls first
-   (small, fast feedback); the LLM pulls second (can be tens of GB).
+   (957 MB — fast feedback relative to the LLM); the LLM pulls second
+   (can be tens of GB). The embedding model is pulled only when
+   `--embeddings-provider ollama` is in effect, which is the default.
 2. **The node `.env`**: bootstrap writes `LLM_MODEL`, `EMBEDDINGS_OLLAMA_MODEL`,
    and `EMBEDDINGS_PROVIDER` into a managed block of the region repo's
    `.env`, which docker compose auto-loads. This is the **single source of
@@ -90,11 +92,19 @@ The chosen models flow two places:
 > in the macOS Keychain and are hydrated by `bin/op-compose`.
 
 > **`--embeddings-provider` picks where embeddings run.** The default is
-> `xenova` (in-process), which bundles its own embedding model and ignores
-> `EMBEDDINGS_OLLAMA_MODEL`. Pass `--embeddings-provider ollama` to use the host
-> daemon with `--embedding-model` — the value is written to `.env` (as
-> `EMBEDDINGS_OLLAMA_MODEL`, the key the backend reads) as the single source of
-> truth. See `docs/provider-pattern.md`.
+> `ollama` — the host daemon, with `--embedding-model`
+> (`nomic-embed-text-v2-moe`, 957 MB). The value is written to `.env` as
+> `EMBEDDINGS_OLLAMA_MODEL`, the key the backend reads, as the single source of
+> truth. Pass `--embeddings-provider xenova` to compute embeddings in-process
+> instead: no model pull, but English-first — nomic answers 8 of 8 Spanish
+> queries against the real ballot-measure corpus clearing the next-best answer
+> by 0.223, where the in-process model clears by 0.061.
+>
+> Use `nomic-embed-text-v2-moe`, never the bare `nomic-embed-text`: that name is
+> v1.5, a different model that scores 0/14 on the same corpus and fails
+> silently. Whatever you pick must produce **768-dimension** vectors, the width
+> of the pgvector columns; a mismatch refuses to boot. See
+> `docs/provider-pattern.md`.
 
 > **Template contract**: for `LLM_MODEL` to actually change the running
 > model, the region repo's `docker-compose-prod.yml` must use

@@ -225,14 +225,14 @@ describe('resolveModels', () => {
 describe('modelsToPull', () => {
   it('pulls the LLM only under the xenova (in-process) provider', () => {
     expect(
-      modelsToPull({ provider: 'xenova', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text' }),
+      modelsToPull({ provider: 'xenova', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text-v2-moe:latest' }),
     ).toEqual(['qwen2.5:7b']);
   });
 
   it('pulls embedding first then LLM under the ollama provider', () => {
     expect(
-      modelsToPull({ provider: 'ollama', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text' }),
-    ).toEqual(['nomic-embed-text', 'qwen2.5:7b']);
+      modelsToPull({ provider: 'ollama', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text-v2-moe:latest' }),
+    ).toEqual(['nomic-embed-text-v2-moe:latest', 'qwen2.5:7b']);
   });
 });
 
