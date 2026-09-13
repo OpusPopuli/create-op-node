@@ -73,9 +73,34 @@ export type EmbeddingsProvider = 'xenova' | 'ollama';
  *  migrate. `--embeddings-provider xenova` still selects in-process. */
 export const DEFAULT_EMBEDDINGS_PROVIDER: EmbeddingsProvider = 'ollama';
 
+/** Vision model used for petition OCR when `OCR_PROVIDER=vision`
+ *  (opuspopuli#1050).
+ *
+ *  Pinned SEPARATELY from DEFAULT_LLM_MODEL, and it must stay that way.
+ *  Inference is moving to a US-provenance model (OLMo) which has no vision
+ *  capability at all; deriving the OCR model from the LLM would mean petition
+ *  scanning silently breaking on the day that switch lands. Keeping it its own
+ *  constant also confines the Qwen-derived model to one declared job.
+ *
+ *  Why a vision model at all: Tesseract cannot read a phone photograph of a
+ *  dense legal page well enough for the product to work. Measured on the
+ *  us-ca node against the live corpus, same petition — Tesseract matched 0 of
+ *  5 real scans (page confidence 27-42, four rejected outright as
+ *  `unreadable`); qwen2.5vl:7b retrieved the correct measure at rank 1 on
+ *  every run, margin ~0.155.
+ *
+ *  6.0 GB, and it is the largest single addition to the pull set. On a 16 GB
+ *  machine that is real; `--ocr-provider tesseract` skips it for operators who
+ *  would rather have the disk and the 4-7s scan than a scan that works. */
+export const DEFAULT_VISION_MODEL = 'qwen2.5vl:7b';
+
 /** Default model pull set for `bootstrap`. Kept as a `as const`-typed array
- *  so existing code can iterate without re-deriving from the two scalars. */
-export const DEFAULT_MODELS = [DEFAULT_LLM_MODEL, DEFAULT_EMBEDDING_MODEL] as const;
+ *  so existing code can iterate without re-deriving from the scalars. */
+export const DEFAULT_MODELS = [
+  DEFAULT_LLM_MODEL,
+  DEFAULT_EMBEDDING_MODEL,
+  DEFAULT_VISION_MODEL,
+] as const;
 
 /** Pinned alpine tag for the host.docker.internal probe. Latest is fine in
  *  practice (the image only runs `curl`) but pinning keeps the probe
