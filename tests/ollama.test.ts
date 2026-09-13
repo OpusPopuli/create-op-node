@@ -12,6 +12,7 @@ import {
   DEFAULT_EMBEDDINGS_PROVIDER,
   DEFAULT_LLM_MODEL,
   DEFAULT_MODELS,
+  DEFAULT_VISION_MODEL,
   modelPresent,
   OLLAMA_URL,
   PROBE_ALPINE_TAG,
@@ -51,8 +52,12 @@ function stubHangingFetch() {
 }
 
 describe('DEFAULT_MODELS + OLLAMA_URL', () => {
-  it('uses qwen2.5:7b + nomic v2-moe by default', () => {
-    expect(DEFAULT_MODELS).toEqual(['qwen2.5:7b', 'nomic-embed-text-v2-moe:latest']);
+  it('uses qwen2.5:7b + nomic v2-moe + qwen2.5vl by default', () => {
+    expect(DEFAULT_MODELS).toEqual([
+      'qwen2.5:7b',
+      'nomic-embed-text-v2-moe:latest',
+      'qwen2.5vl:7b',
+    ]);
   });
 
   it('exports DEFAULT_LLM_MODEL + DEFAULT_EMBEDDING_MODEL scalars', () => {
@@ -63,8 +68,25 @@ describe('DEFAULT_MODELS + OLLAMA_URL', () => {
     expect(DEFAULT_EMBEDDING_MODEL).toBe('nomic-embed-text-v2-moe:latest');
   });
 
-  it('DEFAULT_MODELS is composed from the two scalars (no drift)', () => {
-    expect(DEFAULT_MODELS).toEqual([DEFAULT_LLM_MODEL, DEFAULT_EMBEDDING_MODEL]);
+  it('DEFAULT_MODELS is composed from the scalars (no drift)', () => {
+    expect(DEFAULT_MODELS).toEqual([
+      DEFAULT_LLM_MODEL,
+      DEFAULT_EMBEDDING_MODEL,
+      DEFAULT_VISION_MODEL,
+    ]);
+  });
+
+  /**
+   * The OCR model must NOT be derived from the LLM model (opuspopuli#1050).
+   *
+   * Inference is moving to a US-provenance model (OLMo) with no vision
+   * capability. If a future edit collapses these into one constant, petition
+   * scanning breaks silently on the day that switch lands — nothing errors,
+   * scans just stop being readable. Fail here instead.
+   */
+  it('pins the vision model independently of the LLM model', () => {
+    expect(DEFAULT_VISION_MODEL).toBe('qwen2.5vl:7b');
+    expect(DEFAULT_VISION_MODEL).not.toBe(DEFAULT_LLM_MODEL);
   });
 
   it('defaults the embeddings provider to the host ollama daemon', () => {
