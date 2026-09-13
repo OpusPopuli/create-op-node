@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1](https://github.com/OpusPopuli/create-op-node/compare/v0.18.0...v0.18.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **bootstrap:** default to nomic v2-moe on the host daemon, not v1.5 in-process ([#120](https://github.com/OpusPopuli/create-op-node/issues/120)) ([aa667c2](https://github.com/OpusPopuli/create-op-node/commit/aa667c2f7a34b77a2b9e2d9937d2d498200aadfb))
+
 ## [0.18.0](https://github.com/OpusPopuli/create-op-node/compare/v0.17.0...v0.18.0) (2026-08-31)
 
 
