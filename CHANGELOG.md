@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0](https://github.com/OpusPopuli/create-op-node/compare/v0.18.1...v0.19.0) (2026-09-13)
+
+
+### Features
+
+* **ollama:** pull the petition-OCR vision model at bootstrap ([#122](https://github.com/OpusPopuli/create-op-node/issues/122)) ([593cf1a](https://github.com/OpusPopuli/create-op-node/commit/593cf1a7de909a835f7e9134125510d4d7b75566))
+
 ## [0.18.1](https://github.com/OpusPopuli/create-op-node/compare/v0.18.0...v0.18.1) (2026-09-12)
 
 
