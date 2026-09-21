@@ -30,7 +30,7 @@ Configures macOS power settings, installs Homebrew + the CLI tool list, sets up 
 
 ### Choosing the LLM model
 
-When you run `bootstrap` interactively (no `-y`, no `--llm-model` flag),
+When you run `bootstrap` interactively (no `-y`, no `--analysis-model` flag),
 you'll get a curated picker that **pre-selects** a model based on the
 node's detected unified memory. Tiers are conservative — the LLM shares
 memory with ~22 containers + Postgres, so they size on _total_ footprint,
@@ -54,16 +54,20 @@ broader multilingual) capability of the open-weight models in this
 size class. Pick "Other…" for non-Qwen models.
 
 For non-interactive runs (`-y`) or scripted invocations, the LLM
-defaults to `qwen2.5:7b` (small, fast) — pass `--llm-model` to override:
+defaults to `qwen2.5:7b` (small, fast) — pass `--analysis-model` to override.
+The flag is named for its lane, like every other model flag; it writes
+`LLM_ANALYSIS_MODEL` to the node's `.env`. Nodes bootstrapped before this
+carry `LLM_MODEL`, which the backend still reads and `verify` still
+understands.
 
 ```bash
 # Just swap the LLM, keep the default embedding model:
-npx create-op-node bootstrap --region us-ca --llm-model llama3.3:70b
+npx create-op-node bootstrap --region us-ca --analysis-model llama3.3:70b
 
 # Override both:
 npx create-op-node bootstrap \
   --region us-ca \
-  --llm-model llama3.3:70b \
+  --analysis-model llama3.3:70b \
   --embedding-model mxbai-embed-large
 ```
 
@@ -86,7 +90,7 @@ where it buys nothing.
 ```bash
 npx create-op-node bootstrap \
   --region us-ca \
-  --llm-model olmo-3.1:32b-instruct \
+  --analysis-model olmo-3.1:32b-instruct \
   --ingestion-model olmo-3:7b-instruct
 ```
 
@@ -158,7 +162,7 @@ has a tier table: a 7B-class model needs ~5 GB, the 35B-a3b MoE ~24 GB.
 Allocate Docker the remainder of unified memory.
 
 To switch models post-bootstrap, either re-run bootstrap with the new
-`--llm-model` (rewrites the managed block) or edit `LLM_MODEL` in the
+`--analysis-model` (rewrites the managed block) or edit `LLM_MODEL` in the
 managed block of your `.env` directly, then `./bin/op-compose -f
 docker-compose-prod.yml up -d` to pick up the change.
 
@@ -304,7 +308,7 @@ access. Six phases:
    `LLM_MODEL` is actually pulled into the local Ollama, failing loudly with
    the exact `ollama pull <model>` remedy if not. This catches the
    config↔runtime drift that otherwise 404s at inference time (a node set to
-   a model that was never downloaded). The model is read from `--llm-model`
+   a model that was never downloaded). The model is read from `--analysis-model`
    or, when omitted, the node's `.env` (`--repo-dir`, default cwd) — so
    running `verify` **on the node** needs no flags. **Skipped** when no model
    resolves, which keeps an off-LAN `verify --domain …` from tripping it. The
@@ -351,7 +355,7 @@ drift with zero extra flags — the Ollama phase reads `LLM_MODEL` from the
 cd ~/Development/opuspopuli-node-us-ca
 npx create-op-node verify --domain yournode.example.org
 # or pin the model explicitly from anywhere:
-npx create-op-node verify --domain yournode.example.org --llm-model qwen3.6:35b-a3b
+npx create-op-node verify --domain yournode.example.org --analysis-model qwen3.6:35b-a3b
 ```
 
 ## Bootstrapping a region config

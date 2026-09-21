@@ -31,7 +31,7 @@ describe('parseEnvContent', () => {
 describe('buildManagedEnvContent — fresh file', () => {
   it('emits a managed block with the selected model config', () => {
     const built = buildManagedEnvContent('', {
-      llmModel: 'qwen3.6:35b-a3b',
+      analysisModel: 'qwen3.6:35b-a3b',
       embeddingModel: 'nomic-embed-text-v2-moe:latest',
       embeddingsProvider: 'ollama',
       nodeEnv: 'development',
@@ -40,7 +40,7 @@ describe('buildManagedEnvContent — fresh file', () => {
     expect('content' in built).toBe(true);
     if (!('content' in built)) return;
     const map = parseEnvContent(built.content);
-    expect(map.get('LLM_MODEL')).toBe('qwen3.6:35b-a3b');
+    expect(map.get('LLM_ANALYSIS_MODEL')).toBe('qwen3.6:35b-a3b');
     expect(map.get('EMBEDDINGS_PROVIDER')).toBe('ollama');
     expect(map.get('EMBEDDINGS_OLLAMA_MODEL')).toBe('nomic-embed-text-v2-moe:latest');
     expect(map.get('NODE_ENV')).toBe('development');
@@ -51,7 +51,7 @@ describe('buildManagedEnvContent — fresh file', () => {
 
   it('emits backup config incl. a space-bearing BACKUP_SCHEDULE cron (#111)', () => {
     const built = buildManagedEnvContent('', {
-      llmModel: 'qwen2.5:7b',
+      analysisModel: 'qwen2.5:7b',
       backupsDirHost: '/Volumes/T9/opuspopuli-backups',
       retentionDays: '14',
       backupSchedule: '30 2 * * *',
@@ -67,7 +67,7 @@ describe('buildManagedEnvContent — fresh file', () => {
 
   it('emits GRAFANA_BIND_ADDR when the operator opts into tailnet exposure', () => {
     const built = buildManagedEnvContent('', {
-      llmModel: 'qwen2.5:7b',
+      analysisModel: 'qwen2.5:7b',
       grafanaBindAddr: '100.87.52.26',
     });
     if (!('content' in built)) throw new Error('expected content');
@@ -75,7 +75,7 @@ describe('buildManagedEnvContent — fresh file', () => {
   });
 
   it('omits GRAFANA_BIND_ADDR entirely when not opted in', () => {
-    const built = buildManagedEnvContent('', { llmModel: 'qwen2.5:7b' });
+    const built = buildManagedEnvContent('', { analysisModel: 'qwen2.5:7b' });
     if (!('content' in built)) throw new Error('expected content');
     // Absent, not empty: the compose default (127.0.0.1) must stay in force, and
     // `GRAFANA_BIND_ADDR=` would bind Grafana to every interface instead.
@@ -84,7 +84,7 @@ describe('buildManagedEnvContent — fresh file', () => {
 
   it('rejects a non-cron BACKUP_SCHEDULE (wrong field count)', () => {
     const built = buildManagedEnvContent('', {
-      llmModel: 'qwen2.5:7b',
+      analysisModel: 'qwen2.5:7b',
       backupSchedule: 'not-a-cron',
     });
     expect('error' in built).toBe(true);
@@ -95,7 +95,7 @@ describe('buildManagedEnvContent — fresh file', () => {
     // overwrite must not stomp it back to a bootstrap default.
     const existing = 'SUPABASE_URL=https://supabase.custom.example.org\n';
     const built = buildManagedEnvContent(existing, {
-      llmModel: 'qwen2.5:7b',
+      analysisModel: 'qwen2.5:7b',
       supabaseUrl: 'http://localhost:8000',
     });
     if (!('content' in built)) throw new Error('expected content');
@@ -105,7 +105,7 @@ describe('buildManagedEnvContent — fresh file', () => {
   });
 
   it('omits NODE_ENV when nodeEnv is not supplied (production node)', () => {
-    const built = buildManagedEnvContent('', { llmModel: 'qwen2.5:7b', embeddingsProvider: 'xenova' });
+    const built = buildManagedEnvContent('', { analysisModel: 'qwen2.5:7b', embeddingsProvider: 'xenova' });
     if (!('content' in built)) throw new Error('expected content');
     expect(built.content).not.toContain('NODE_ENV');
   });
@@ -114,50 +114,50 @@ describe('buildManagedEnvContent — fresh file', () => {
 describe('buildManagedEnvContent — preserves operator content', () => {
   it('keeps operator lines outside the managed block verbatim', () => {
     const existing = 'FOO=bar\n# operator note\nBAZ=qux\n';
-    const built = buildManagedEnvContent(existing, { llmModel: 'qwen2.5:7b' }, { overwrite: true });
+    const built = buildManagedEnvContent(existing, { analysisModel: 'qwen2.5:7b' }, { overwrite: true });
     if (!('content' in built)) throw new Error('expected content');
     expect(built.content).toContain('FOO=bar');
     expect(built.content).toContain('# operator note');
     expect(built.content).toContain('BAZ=qux');
-    expect(parseEnvContent(built.content).get('LLM_MODEL')).toBe('qwen2.5:7b');
+    expect(parseEnvContent(built.content).get('LLM_ANALYSIS_MODEL')).toBe('qwen2.5:7b');
   });
 });
 
 describe('buildManagedEnvContent — import-don\'t-clobber', () => {
-  const existing = 'NODE_ENV=development\nLLM_MODEL=qwen3.6:35b-a3b\nUNRELATED=keepme\n';
+  const existing = 'NODE_ENV=development\nLLM_ANALYSIS_MODEL=qwen3.6:35b-a3b\nUNRELATED=keepme\n';
 
   it('adopts a pre-existing bare value into the block instead of overwriting (default)', () => {
     // Simulates the us-ca node: a hand-written .env whose LLM_MODEL must survive
     // a re-run that would otherwise apply a stale default.
-    const built = buildManagedEnvContent(existing, { llmModel: 'qwen2.5:7b' });
+    const built = buildManagedEnvContent(existing, { analysisModel: 'qwen2.5:7b' });
     if (!('content' in built)) throw new Error('expected content');
     const map = parseEnvContent(built.content);
-    expect(map.get('LLM_MODEL')).toBe('qwen3.6:35b-a3b'); // operator's value, not the default
+    expect(map.get('LLM_ANALYSIS_MODEL')).toBe('qwen3.6:35b-a3b'); // operator's value, not the default
     expect(map.get('NODE_ENV')).toBe('development'); // imported too
     expect(built.content).toContain('UNRELATED=keepme');
   });
 
   it('consolidates the imported bare key into the block (no duplicate assignment)', () => {
-    const built = buildManagedEnvContent(existing, { llmModel: 'qwen2.5:7b' });
+    const built = buildManagedEnvContent(existing, { analysisModel: 'qwen2.5:7b' });
     if (!('content' in built)) throw new Error('expected content');
-    expect(countAssignments(built.content, 'LLM_MODEL')).toBe(1);
+    expect(countAssignments(built.content, 'LLM_ANALYSIS_MODEL')).toBe(1);
     // and the surviving assignment sits inside the managed block
     const split = splitManaged(built.content);
-    expect(split.blockValues.get('LLM_MODEL')).toBe('qwen3.6:35b-a3b');
+    expect(split.blockValues.get('LLM_ANALYSIS_MODEL')).toBe('qwen3.6:35b-a3b');
   });
 
   it('overwrite:true (explicit re-selection) replaces the operator value', () => {
-    const built = buildManagedEnvContent(existing, { llmModel: 'qwen2.5:7b' }, { overwrite: true });
+    const built = buildManagedEnvContent(existing, { analysisModel: 'qwen2.5:7b' }, { overwrite: true });
     if (!('content' in built)) throw new Error('expected content');
-    expect(parseEnvContent(built.content).get('LLM_MODEL')).toBe('qwen2.5:7b');
+    expect(parseEnvContent(built.content).get('LLM_ANALYSIS_MODEL')).toBe('qwen2.5:7b');
   });
 });
 
 describe('buildManagedEnvContent — idempotent', () => {
   it('re-running with the same selection yields byte-identical content', () => {
-    const first = buildManagedEnvContent('FOO=bar\n', { llmModel: 'qwen2.5:7b', embeddingsProvider: 'xenova' }, { overwrite: true });
+    const first = buildManagedEnvContent('FOO=bar\n', { analysisModel: 'qwen2.5:7b', embeddingsProvider: 'xenova' }, { overwrite: true });
     if (!('content' in first)) throw new Error('expected content');
-    const second = buildManagedEnvContent(first.content, { llmModel: 'qwen2.5:7b', embeddingsProvider: 'xenova' }, { overwrite: true });
+    const second = buildManagedEnvContent(first.content, { analysisModel: 'qwen2.5:7b', embeddingsProvider: 'xenova' }, { overwrite: true });
     if (!('content' in second)) throw new Error('expected content');
     expect(second.content).toBe(first.content);
   });
@@ -166,7 +166,7 @@ describe('buildManagedEnvContent — idempotent', () => {
 describe('buildManagedEnvContent — validation', () => {
   it('rejects a value that would break a .env line', () => {
     for (const evil of ['evil;rm -rf', 'has space', 'a\nb', 'q$(x)', 'quote"d']) {
-      const built = buildManagedEnvContent('', { llmModel: evil });
+      const built = buildManagedEnvContent('', { analysisModel: evil });
       expect('error' in built).toBe(true);
     }
   });
@@ -184,20 +184,20 @@ describe('writeManagedEnv + readEnvModelConfig (round-trip)', () => {
   it('writes .env and reads the config back', async () => {
     const res = await writeManagedEnv(
       dir,
-      { llmModel: 'qwen3.6:35b-a3b', embeddingModel: 'nomic-embed-text-v2-moe:latest', embeddingsProvider: 'ollama' },
+      { analysisModel: 'qwen3.6:35b-a3b', embeddingModel: 'nomic-embed-text-v2-moe:latest', embeddingsProvider: 'ollama' },
       { overwrite: true },
     );
     expect(res.ok).toBe(true);
     expect(res.path).toBe(join(dir, '.env'));
 
     const cfg = await readEnvModelConfig(dir);
-    expect(cfg.llmModel).toBe('qwen3.6:35b-a3b');
+    expect(cfg.analysisModel).toBe('qwen3.6:35b-a3b');
     expect(cfg.embeddingModel).toBe('nomic-embed-text-v2-moe:latest');
     expect(cfg.embeddingsProvider).toBe('ollama');
   });
 
   it('reports unchanged (no rewrite) when content is already current', async () => {
-    const sel = { llmModel: 'qwen2.5:7b', embeddingsProvider: 'xenova' as const };
+    const sel = { analysisModel: 'qwen2.5:7b', embeddingsProvider: 'xenova' as const };
     const first = await writeManagedEnv(dir, sel, { overwrite: true });
     expect(first.unchanged).not.toBe(true);
     const second = await writeManagedEnv(dir, sel, { overwrite: true });
@@ -206,13 +206,13 @@ describe('writeManagedEnv + readEnvModelConfig (round-trip)', () => {
   });
 
   it('preserves an operator-authored line already present in .env', async () => {
-    await writeFile(join(dir, '.env'), 'CUSTOM=keepme\nLLM_MODEL=qwen3.6:35b-a3b\n');
+    await writeFile(join(dir, '.env'), 'CUSTOM=keepme\nLLM_ANALYSIS_MODEL=qwen3.6:35b-a3b\n');
     // Non-overwrite run (e.g. a re-bootstrap that didn't re-select): operator
     // value is imported, custom line preserved.
-    await writeManagedEnv(dir, { llmModel: 'qwen2.5:7b' });
+    await writeManagedEnv(dir, { analysisModel: 'qwen2.5:7b' });
     const raw = await readFile(join(dir, '.env'), 'utf8');
     expect(raw).toContain('CUSTOM=keepme');
-    expect(parseEnvContent(raw).get('LLM_MODEL')).toBe('qwen3.6:35b-a3b');
+    expect(parseEnvContent(raw).get('LLM_ANALYSIS_MODEL')).toBe('qwen3.6:35b-a3b');
   });
 
   it('returns empty config when no .env exists', async () => {
@@ -224,7 +224,7 @@ describe('writeManagedEnv + readEnvModelConfig (round-trip)', () => {
 describe('ingestion lane (opuspopuli roadmap §6.4)', () => {
   it('omits LLM_INGESTION_MODEL entirely when no ingestion model was chosen', () => {
     const built = buildManagedEnvContent('', {
-      llmModel: 'olmo-3.1:32b-instruct',
+      analysisModel: 'olmo-3.1:32b-instruct',
       embeddingModel: 'nomic-embed-text-v2-moe:latest',
       embeddingsProvider: 'ollama',
     });
@@ -241,7 +241,7 @@ describe('ingestion lane (opuspopuli roadmap §6.4)', () => {
 
   it('writes LLM_INGESTION_MODEL when the operator split the lanes', () => {
     const built = buildManagedEnvContent('', {
-      llmModel: 'olmo-3.1:32b-instruct',
+      analysisModel: 'olmo-3.1:32b-instruct',
       ingestionModel: 'olmo-3:7b-instruct',
       embeddingModel: 'nomic-embed-text-v2-moe:latest',
       embeddingsProvider: 'ollama',
@@ -250,7 +250,7 @@ describe('ingestion lane (opuspopuli roadmap §6.4)', () => {
     if (!('content' in built)) return;
 
     const map = parseEnvContent(built.content);
-    expect(map.get('LLM_MODEL')).toBe('olmo-3.1:32b-instruct');
+    expect(map.get('LLM_ANALYSIS_MODEL')).toBe('olmo-3.1:32b-instruct');
     expect(map.get('LLM_INGESTION_MODEL')).toBe('olmo-3:7b-instruct');
   });
 
@@ -259,7 +259,7 @@ describe('ingestion lane (opuspopuli roadmap §6.4)', () => {
     // operator who tuned the lane by hand keeps their value.
     const existing = 'LLM_INGESTION_MODEL=olmo-3:7b-instruct\nUNRELATED=keepme\n';
     const built = buildManagedEnvContent(existing, {
-      llmModel: 'olmo-3.1:32b-instruct',
+      analysisModel: 'olmo-3.1:32b-instruct',
       embeddingModel: 'nomic-embed-text-v2-moe:latest',
       embeddingsProvider: 'ollama',
     });
@@ -269,5 +269,40 @@ describe('ingestion lane (opuspopuli roadmap §6.4)', () => {
     const map = parseEnvContent(built.content);
     expect(map.get('LLM_INGESTION_MODEL')).toBe('olmo-3:7b-instruct');
     expect(map.get('UNRELATED')).toBe('keepme');
+  });
+});
+
+describe('analysis lane naming', () => {
+  it('reads LLM_ANALYSIS_MODEL in preference to the legacy key', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'env-lane-'));
+    try {
+      await writeFile(
+        join(dir, '.env'),
+        'LLM_MODEL=legacy-model\nLLM_ANALYSIS_MODEL=olmo-3.1:32b-instruct\n',
+      );
+
+      const cfg = await readEnvModelConfig(dir);
+
+      // Same order the backend resolves in, so `verify` reports what the
+      // services will actually use rather than whichever key it saw first.
+      expect(cfg.analysisModel).toBe('olmo-3.1:32b-instruct');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still reads a node that only has the legacy LLM_MODEL', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'env-lane-'));
+    try {
+      await writeFile(join(dir, '.env'), 'LLM_MODEL=qwen2.5:7b\n');
+
+      const cfg = await readEnvModelConfig(dir);
+
+      // Every node bootstrapped before the lane naming has exactly this, and
+      // `verify` must keep working on it rather than reporting no model.
+      expect(cfg.analysisModel).toBe('qwen2.5:7b');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

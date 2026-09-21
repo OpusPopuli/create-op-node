@@ -23,7 +23,7 @@ interface VerifyOptions {
   image?: string[];
   certWarnDays?: string;
   showSkipped?: boolean;
-  llmModel?: string;
+  analysisModel?: string;
   embeddingModel?: string;
   embeddingsProvider?: EmbeddingsProvider;
   repoDir?: string;
@@ -87,10 +87,10 @@ export interface VerifyInput {
   };
   images: ReadonlyArray<string>;
   /** Configured model(s) to assert are present in the LOCAL Ollama. Resolved
-   *  from `--llm-model` or the node `.env` (readEnvModelConfig). Absent →
+   *  from `--analysis-model` or the node `.env` (readEnvModelConfig). Absent →
    *  the Ollama phase is skipped (preserves off-LAN "run from anywhere"). */
   ollama?: {
-    llmModel: string;
+    analysisModel: string;
     embeddingModel?: string;
     provider?: EmbeddingsProvider;
   };
@@ -206,11 +206,11 @@ async function verifyGraphqlPhase(input: VerifyInput, deps: VerifyDeps, push: Pu
 // keeps an off-LAN `verify --domain …` from tripping it.
 async function verifyOllamaModelsPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   const cfg = input.ollama;
-  if (!cfg?.llmModel) {
+  if (!cfg?.analysisModel) {
     push({
       name: 'Ollama models',
       status: 'skipped',
-      detail: 'pass --llm-model (or run on the node so its .env is read) to enable',
+      detail: 'pass --analysis-model (or run on the node so its .env is read) to enable',
     });
     return;
   }
@@ -229,7 +229,7 @@ async function verifyOllamaModelsPhase(input: VerifyInput, deps: VerifyDeps, pus
 
   // Assert the LLM always; assert the embedding model only when the knowledge
   // service actually uses the Ollama provider for it (xenova is in-process).
-  const required = [cfg.llmModel];
+  const required = [cfg.analysisModel];
   if (cfg.provider === 'ollama' && cfg.embeddingModel) required.push(cfg.embeddingModel);
 
   const missing = required.filter((m) => !modelPresent(m, health.models));
@@ -423,7 +423,7 @@ export const verifyCommand = new Command('verify')
   )
   .addOption(
     new Option(
-      '--llm-model <model>',
+      '--analysis-model <model>',
       'Assert this model is present in the local Ollama (catches config↔runtime drift). Defaults to LLM_MODEL from the node .env when run on the node.',
     ),
   )
@@ -570,15 +570,15 @@ function normalizeProvider(v: string | undefined): EmbeddingsProvider | undefine
  * phase then skips). Pure — unit-tested independently of the filesystem.
  */
 export function mergeOllamaModelConfig(
-  opts: Pick<VerifyOptions, 'llmModel' | 'embeddingModel' | 'embeddingsProvider'>,
+  opts: Pick<VerifyOptions, 'analysisModel' | 'embeddingModel' | 'embeddingsProvider'>,
   envCfg: NodeEnvModelConfig,
 ): VerifyInput['ollama'] {
-  const llmModel = opts.llmModel ?? envCfg.llmModel;
-  if (!llmModel) return undefined;
+  const analysisModel = opts.analysisModel ?? envCfg.analysisModel;
+  if (!analysisModel) return undefined;
   const embeddingModel = opts.embeddingModel ?? envCfg.embeddingModel;
   const provider = normalizeProvider(opts.embeddingsProvider ?? envCfg.embeddingsProvider);
   return {
-    llmModel,
+    analysisModel,
     ...(embeddingModel ? { embeddingModel } : {}),
     ...(provider ? { provider } : {}),
   };
