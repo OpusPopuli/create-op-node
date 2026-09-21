@@ -234,6 +234,41 @@ describe('modelsToPull', () => {
       modelsToPull({ provider: 'ollama', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text-v2-moe:latest' }),
     ).toEqual(['nomic-embed-text-v2-moe:latest', 'qwen2.5:7b']);
   });
+
+  // Ingestion lane, opuspopuli roadmap §6.4.
+  it('pulls nothing extra when no ingestion model is named', () => {
+    // Opt-in, unlike the vision model: ingestion works fine on the analysis
+    // model, so a node that did not ask for the split must not have a second
+    // multi-gigabyte download added to its bootstrap.
+    expect(
+      modelsToPull({ provider: 'xenova', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text-v2-moe:latest' }),
+    ).toEqual(['qwen2.5:7b']);
+  });
+
+  it('pulls the ingestion model alongside the LLM when named', () => {
+    expect(
+      modelsToPull({
+        provider: 'xenova',
+        llmModel: 'olmo-3.1:32b-instruct',
+        embeddingModel: 'nomic-embed-text-v2-moe:latest',
+        ingestionModel: 'olmo-3:7b-instruct',
+      }),
+    ).toEqual(['olmo-3.1:32b-instruct', 'olmo-3:7b-instruct']);
+  });
+
+  it('does not pull the same model twice when both lanes share one', () => {
+    // A legitimate configuration — the split is about being ABLE to differ,
+    // not about having to. Pulling twice would double a multi-gigabyte
+    // download and warm the same weights again.
+    expect(
+      modelsToPull({
+        provider: 'ollama',
+        llmModel: 'qwen2.5:7b',
+        embeddingModel: 'nomic-embed-text-v2-moe:latest',
+        ingestionModel: 'qwen2.5:7b',
+      }),
+    ).toEqual(['nomic-embed-text-v2-moe:latest', 'qwen2.5:7b']);
+  });
 });
 
 describe('LLM_MODEL_CHOICES', () => {

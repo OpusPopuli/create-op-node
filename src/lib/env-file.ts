@@ -12,7 +12,8 @@
  * regardless of recreate order or how the operator's shell was started.
  *
  * This file deliberately carries ONLY non-secret substitution config
- * (`LLM_MODEL`, `EMBEDDINGS_PROVIDER`, `EMBEDDINGS_OLLAMA_MODEL`, `NODE_ENV`).
+ * (`LLM_MODEL`, `LLM_INGESTION_MODEL`, `EMBEDDINGS_PROVIDER`,
+ * `EMBEDDINGS_OLLAMA_MODEL`, `NODE_ENV`).
  * Bootstrap-critical SECRETS stay in the macOS Keychain and are hydrated into
  * the compose subprocess by `bin/op-compose` (see `op-compose-script.ts`) —
  * they never touch a plaintext `.env`, preserving the vault-first principle.
@@ -45,6 +46,7 @@ export const MANAGED_END = '# <<< op-node managed <<<';
  *  across re-runs only show real value changes. */
 export const MANAGED_KEYS = [
   'LLM_MODEL',
+  'LLM_INGESTION_MODEL',
   'EMBEDDINGS_PROVIDER',
   'EMBEDDINGS_OLLAMA_MODEL',
   'NODE_ENV',
@@ -88,6 +90,16 @@ export interface ManagedEnvSelection {
   /** Resolved LLM model id (e.g. `qwen3.6:35b-a3b`). Always present — bootstrap
    *  always resolves one via flag/prompt/default. */
   llmModel: string;
+  /**
+   * Ingestion-lane model, written as `LLM_INGESTION_MODEL` (opuspopuli
+   * roadmap §6.4).
+   *
+   * Omitted unless the operator asked for it. The backend falls back through
+   * `LLM_OLLAMA_MODEL` to `LLM_MODEL`, so an absent key means the lane runs on
+   * the analysis model exactly as it did before the split — writing an empty
+   * value instead would be a change of behaviour dressed as a default.
+   */
+  ingestionModel?: string;
   /** Resolved embeddings model id. Written as `EMBEDDINGS_OLLAMA_MODEL` — the
    *  exact key the backend's embeddings config reads
    *  (packages/config-provider/src/configs/embeddings.config.ts). Emitted even
@@ -121,6 +133,7 @@ export interface ManagedEnvSelection {
 function selectionToPairs(sel: ManagedEnvSelection): ReadonlyArray<[ManagedKey, string | undefined]> {
   return [
     ['LLM_MODEL', sel.llmModel],
+    ['LLM_INGESTION_MODEL', sel.ingestionModel],
     ['EMBEDDINGS_PROVIDER', sel.embeddingsProvider],
     ['EMBEDDINGS_OLLAMA_MODEL', sel.embeddingModel],
     ['NODE_ENV', sel.nodeEnv],

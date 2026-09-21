@@ -50,6 +50,31 @@ export const DEFAULT_LLM_MODEL = 'qwen2.5:7b';
  *  Whatever replaces this must produce 768-dimension vectors — that is the
  *  width of the pgvector columns (EMBEDDING_DIMENSIONS in @opuspopuli/common,
  *  opuspopuli#1156) and a mismatch refuses to boot. */
+/**
+ * Recommended model for the INGESTION lane — deliberately NOT a default.
+ *
+ * Inference splits into two jobs (opuspopuli roadmap §6.4). Analysis is
+ * accuracy-bound: `olmo-3.1:32b-instruct` anchors claims at 57% against the
+ * 7B's 28% and abstains correctly where the 7B fabricated a fiscal impact, at
+ * ~550 s/measure and 21.4 GB. Ingestion — structural analysis, civics
+ * extraction, detail crawling, PDF extraction — is throughput-bound
+ * structured extraction over far more documents, where reliable JSON matters
+ * and verbatim fidelity does not: the 7B returned 10/10 valid JSON with zero
+ * fabricated figures at ~52 s and ~4.5 GB.
+ *
+ * Why this is not a DEFAULT, unlike `DEFAULT_VISION_MODEL`: OCR genuinely
+ * cannot use `LLM_MODEL` — inference is moving to a model with no vision
+ * capability, so a separate pin is mandatory. Ingestion works perfectly well
+ * on the analysis model; the lane simply costs more than it needs to. So the
+ * provisioner mirrors the runtime and stays INERT unless asked, rather than
+ * pulling a second multi-gigabyte model onto every new node.
+ *
+ * Caveat worth carrying: every number above was measured on the ANALYSIS
+ * prompt. `getStructuralAnalysisPrompt` and `getCivicsExtractionPrompt` have
+ * no eval leg, so this is a grounded inference rather than a measurement.
+ */
+export const RECOMMENDED_INGESTION_MODEL = 'olmo-3:7b-instruct';
+
 export const DEFAULT_EMBEDDING_MODEL = 'nomic-embed-text-v2-moe:latest';
 
 /** Where embeddings are computed: `xenova` runs in-process (no Ollama pull

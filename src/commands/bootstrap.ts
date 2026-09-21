@@ -63,6 +63,7 @@ import {
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_EMBEDDINGS_PROVIDER,
   DEFAULT_LLM_MODEL,
+  RECOMMENDED_INGESTION_MODEL,
   checkOllamaHealth,
   probeHostDockerInternal,
   setupModels,
@@ -117,6 +118,8 @@ interface BootstrapOptions {
   skipStack?: boolean;
   localOnly?: boolean;
   llmModel?: string;
+  /** Ingestion-lane model. Absent = the lane runs on `llmModel` (§6.4). */
+  ingestionModel?: string;
   embeddingModel?: string;
   embeddingsProvider?: EmbeddingsProvider;
   /** Public-facing Supabase URL. Defaults to `http://localhost:8000` in
@@ -180,6 +183,12 @@ export const bootstrapCommand = new Command('bootstrap')
     new Option(
       '--llm-model <model>',
       `Ollama LLM model to pull and warm. Default: ${DEFAULT_LLM_MODEL}. Examples: \`llama3.3:70b\`, \`qwen2.5:72b\`. Memory sizing table: docs/docker-resources.md in the opuspopuli-node template (or your region repo's checkout).`,
+    ),
+  )
+  .addOption(
+    new Option(
+      '--ingestion-model <model>',
+      `Ollama model for the INGESTION lane: structural analysis, civics extraction, detail crawling, PDF extraction (opuspopuli roadmap §6.4). Omit and those run on --llm-model exactly as before — this is opt-in, unlike the vision model, because ingestion works fine on the analysis model and simply costs more than it needs to. Recommended: ${RECOMMENDED_INGESTION_MODEL}. Ingestion is throughput-bound structured extraction across far more documents than analysis, where reliable JSON matters and verbatim fidelity does not, so a smaller model does the same job roughly 10x cheaper. Pulls and warms a SECOND model; both resident on one host is what degrades throughput under memory pressure.`,
     ),
   )
   .addOption(
@@ -299,10 +308,17 @@ export const bootstrapCommand = new Command('bootstrap')
     await runLaunchAgentPhase({ opts, secrets });
     await installWrapperPhase({ repoPath, region, promptServiceUrl: secrets.promptServiceUrl });
     await loginGhcrPhase();
-    await runOllamaPhase({ opts, embeddingModel, llmModel, embeddingsProvider });
+    await runOllamaPhase({
+      opts,
+      embeddingModel,
+      llmModel,
+      ...(opts.ingestionModel ? { ingestionModel: opts.ingestionModel } : {}),
+      embeddingsProvider,
+    });
     await runEnvFilePhase({
       repoPath,
       llmModel,
+      ...(opts.ingestionModel ? { ingestionModel: opts.ingestionModel } : {}),
       embeddingModel,
       embeddingsProvider,
       localOnly: Boolean(opts.localOnly),
@@ -1107,9 +1123,18 @@ export function modelsToPull(args: {
   provider: EmbeddingsProvider;
   llmModel: string;
   embeddingModel: string;
+  /** Ingestion lane (opuspopuli roadmap §6.4). Absent = the lane runs on
+   *  `llmModel`, so there is nothing extra to pull. */
+  ingestionModel?: string;
 }): string[] {
-  const { provider, llmModel, embeddingModel } = args;
-  return provider === 'ollama' ? [embeddingModel, llmModel] : [llmModel];
+  const { provider, llmModel, embeddingModel, ingestionModel } = args;
+  const models = provider === 'ollama' ? [embeddingModel, llmModel] : [llmModel];
+
+  // Deduped: pointing the ingestion lane at the model already being pulled is
+  // a legitimate configuration, and pulling it twice would double a
+  // multi-gigabyte download and warm the same weights twice.
+  if (ingestionModel) models.push(ingestionModel);
+  return [...new Set(models)];
 }
 
 // ---- Phase 8: Ollama ----
@@ -1117,9 +1142,11 @@ async function runOllamaPhase(args: {
   opts: BootstrapOptions;
   embeddingModel: string;
   llmModel: string;
+  ingestionModel?: string;
   embeddingsProvider: EmbeddingsProvider;
 }): Promise<void> {
-  const { opts, embeddingModel, llmModel, embeddingsProvider } = args;
+  const { opts, embeddingModel, llmModel, ingestionModel, embeddingsProvider } =
+    args;
   if (opts.skipOllama) return;
 
   const olSpin = p.spinner();
@@ -1152,7 +1179,12 @@ async function runOllamaPhase(args: {
       process.exit(1);
     }
   }
-  const toPull = modelsToPull({ provider: embeddingsProvider, llmModel, embeddingModel });
+  const toPull = modelsToPull({
+    provider: embeddingsProvider,
+    llmModel,
+    embeddingModel,
+    ...(ingestionModel ? { ingestionModel } : {}),
+  });
   const modelReport = await setupModels(toPull, (model, status) => {
     olSpin.message(`${status}: ${model}`);
   });
@@ -1191,6 +1223,8 @@ async function runOllamaPhase(args: {
 async function runEnvFilePhase(args: {
   repoPath: string;
   llmModel: string;
+  /** Ingestion-lane model, when the operator asked for one (§6.4). */
+  ingestionModel?: string;
   embeddingModel: string;
   embeddingsProvider: EmbeddingsProvider;
   localOnly: boolean;
@@ -1203,6 +1237,7 @@ async function runEnvFilePhase(args: {
   const {
     repoPath,
     llmModel,
+    ingestionModel,
     embeddingModel,
     embeddingsProvider,
     localOnly,
@@ -1216,6 +1251,11 @@ async function runEnvFilePhase(args: {
     repoPath,
     {
       llmModel,
+      // Only when the operator asked for it: an absent key means the
+      // ingestion lane runs on LLM_MODEL, which is what the backend already
+      // falls back to. Emitting an empty value would be a behaviour change
+      // dressed as a default.
+      ...(ingestionModel ? { ingestionModel } : {}),
       embeddingModel,
       embeddingsProvider,
       // NODE_ENV=development only for local-dev nodes; production nodes leave

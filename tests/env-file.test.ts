@@ -220,3 +220,54 @@ describe('writeManagedEnv + readEnvModelConfig (round-trip)', () => {
     expect(cfg).toEqual({});
   });
 });
+
+describe('ingestion lane (opuspopuli roadmap §6.4)', () => {
+  it('omits LLM_INGESTION_MODEL entirely when no ingestion model was chosen', () => {
+    const built = buildManagedEnvContent('', {
+      llmModel: 'olmo-3.1:32b-instruct',
+      embeddingModel: 'nomic-embed-text-v2-moe:latest',
+      embeddingsProvider: 'ollama',
+    });
+    expect('content' in built).toBe(true);
+    if (!('content' in built)) return;
+
+    // The backend falls back through LLM_OLLAMA_MODEL to LLM_MODEL, so an
+    // ABSENT key means the lane runs on the analysis model exactly as before.
+    // Emitting an empty value would be a behaviour change dressed as a
+    // default — and `${LLM_INGESTION_MODEL:-}` in compose would then resolve
+    // to the empty string rather than falling through.
+    expect(built.content).not.toContain('LLM_INGESTION_MODEL');
+  });
+
+  it('writes LLM_INGESTION_MODEL when the operator split the lanes', () => {
+    const built = buildManagedEnvContent('', {
+      llmModel: 'olmo-3.1:32b-instruct',
+      ingestionModel: 'olmo-3:7b-instruct',
+      embeddingModel: 'nomic-embed-text-v2-moe:latest',
+      embeddingsProvider: 'ollama',
+    });
+    expect('content' in built).toBe(true);
+    if (!('content' in built)) return;
+
+    const map = parseEnvContent(built.content);
+    expect(map.get('LLM_MODEL')).toBe('olmo-3.1:32b-instruct');
+    expect(map.get('LLM_INGESTION_MODEL')).toBe('olmo-3:7b-instruct');
+  });
+
+  it('adopts a hand-set LLM_INGESTION_MODEL rather than clobbering it', () => {
+    // Same import-don't-clobber rule the rest of the block follows: an
+    // operator who tuned the lane by hand keeps their value.
+    const existing = 'LLM_INGESTION_MODEL=olmo-3:7b-instruct\nUNRELATED=keepme\n';
+    const built = buildManagedEnvContent(existing, {
+      llmModel: 'olmo-3.1:32b-instruct',
+      embeddingModel: 'nomic-embed-text-v2-moe:latest',
+      embeddingsProvider: 'ollama',
+    });
+    expect('content' in built).toBe(true);
+    if (!('content' in built)) return;
+
+    const map = parseEnvContent(built.content);
+    expect(map.get('LLM_INGESTION_MODEL')).toBe('olmo-3:7b-instruct');
+    expect(map.get('UNRELATED')).toBe('keepme');
+  });
+});
