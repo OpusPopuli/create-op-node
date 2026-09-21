@@ -30,10 +30,10 @@ Configures macOS power settings, installs Homebrew + the CLI tool list, sets up 
 
 ### Choosing the LLM model
 
-When you run `bootstrap` interactively (no `-y`, no `--llm-model` flag),
+When you run `bootstrap` interactively (no `-y`, no `--analysis-model` flag),
 you'll get a curated picker that **pre-selects** a model based on the
 node's detected unified memory. Tiers are conservative — the LLM shares
-memory with ~22 containers + Postgres, so they size on *total* footprint,
+memory with ~22 containers + Postgres, so they size on _total_ footprint,
 not param count:
 
 - `qwen3.6:35b-a3b` — 35B MoE (~3B active, fast on Apple Silicon),
@@ -54,18 +54,63 @@ broader multilingual) capability of the open-weight models in this
 size class. Pick "Other…" for non-Qwen models.
 
 For non-interactive runs (`-y`) or scripted invocations, the LLM
-defaults to `qwen2.5:7b` (small, fast) — pass `--llm-model` to override:
+defaults to `qwen2.5:7b` (small, fast) — pass `--analysis-model` to override.
+The flag is named for its lane, like every other model flag; it writes
+`LLM_ANALYSIS_MODEL` to the node's `.env`. Nodes bootstrapped before this
+carry `LLM_MODEL`, which the backend still reads and `verify` still
+understands.
 
 ```bash
 # Just swap the LLM, keep the default embedding model:
-npx create-op-node bootstrap --region us-ca --llm-model llama3.3:70b
+npx create-op-node bootstrap --region us-ca --analysis-model llama3.3:70b
 
 # Override both:
 npx create-op-node bootstrap \
   --region us-ca \
-  --llm-model llama3.3:70b \
+  --analysis-model llama3.3:70b \
   --embedding-model mxbai-embed-large
 ```
+
+### Splitting the ingestion lane
+
+Inference is two jobs. **Analysis** — proposition analysis, minutes
+summaries, bios, RAG — is accuracy-bound: the task is copying a passage
+verbatim and declining when the source does not support a claim.
+**Ingestion** — structural analysis, civics extraction, detail crawling, PDF
+extraction — is throughput-bound structured extraction across far more
+documents, where reliable JSON matters and verbatim fidelity does not.
+
+Measured (opuspopuli roadmap §6.4): `olmo-3.1:32b-instruct` anchors claims at
+57% against a 7B's 28% and abstains correctly where the 7B fabricated a fiscal
+impact — at ~550 s/measure and 21.4 GB. `olmo-3:7b-instruct` returned 10/10
+valid JSON with zero fabricated figures at ~52 s and ~4.5 GB. Pinning both
+jobs to one model spends the large model's wall clock over the larger corpus,
+where it buys nothing.
+
+```bash
+npx create-op-node bootstrap \
+  --region us-ca \
+  --analysis-model olmo-3.1:32b-instruct \
+  --ingestion-model olmo-3:7b-instruct
+```
+
+`--ingestion-model` is **opt-in**, unlike `--vision-model`. OCR genuinely
+cannot use `LLM_MODEL`, so a separate pin is mandatory there; ingestion works
+perfectly well on the analysis model and simply costs more than it needs to.
+Omit the flag and nothing changes: no second model is pulled, no
+`LLM_INGESTION_MODEL` is written, and the backend falls back to `LLM_MODEL`
+exactly as before.
+
+Two things to know before splitting:
+
+- It pulls and warms a **second** model. Both resident on one host is what
+  degrades throughput under memory pressure — 21.4 GB + 4.5 GB together is the
+  condition that produced the 550 s figure, where throughput fell from 2m17s
+  to 11m46s per measure _within a single run_. `OLLAMA_MAX_LOADED_MODELS` and
+  keep-alive matter more than the pins do while the two share a machine.
+- The ingestion figures above were measured on the **analysis** prompt.
+  `getStructuralAnalysisPrompt` and `getCivicsExtractionPrompt` have no eval
+  leg yet, so the choice is a grounded inference rather than a measurement.
 
 The chosen models flow two places:
 
@@ -79,7 +124,7 @@ The chosen models flow two places:
    `.env`, which docker compose auto-loads. This is the **single source of
    truth** — every service (and every future partial recreate) resolves
    `${LLM_MODEL:-…}` to the same value, regardless of shell/launchd env.
-   Model config is deliberately *not* exported via the LaunchAgent: a
+   Model config is deliberately _not_ exported via the LaunchAgent: a
    `launchctl setenv` value would shadow `.env` at interpolation time
    (shell env > `.env`), reintroducing the exact drift the `.env` prevents.
 
@@ -117,7 +162,7 @@ has a tier table: a 7B-class model needs ~5 GB, the 35B-a3b MoE ~24 GB.
 Allocate Docker the remainder of unified memory.
 
 To switch models post-bootstrap, either re-run bootstrap with the new
-`--llm-model` (rewrites the managed block) or edit `LLM_MODEL` in the
+`--analysis-model` (rewrites the managed block) or edit `LLM_MODEL` in the
 managed block of your `.env` directly, then `./bin/op-compose -f
 docker-compose-prod.yml up -d` to pick up the change.
 
@@ -263,7 +308,7 @@ access. Six phases:
    `LLM_MODEL` is actually pulled into the local Ollama, failing loudly with
    the exact `ollama pull <model>` remedy if not. This catches the
    config↔runtime drift that otherwise 404s at inference time (a node set to
-   a model that was never downloaded). The model is read from `--llm-model`
+   a model that was never downloaded). The model is read from `--analysis-model`
    or, when omitted, the node's `.env` (`--repo-dir`, default cwd) — so
    running `verify` **on the node** needs no flags. **Skipped** when no model
    resolves, which keeps an off-LAN `verify --domain …` from tripping it. The
@@ -310,7 +355,7 @@ drift with zero extra flags — the Ollama phase reads `LLM_MODEL` from the
 cd ~/Development/opuspopuli-node-us-ca
 npx create-op-node verify --domain yournode.example.org
 # or pin the model explicitly from anywhere:
-npx create-op-node verify --domain yournode.example.org --llm-model qwen3.6:35b-a3b
+npx create-op-node verify --domain yournode.example.org --analysis-model qwen3.6:35b-a3b
 ```
 
 ## Bootstrapping a region config
@@ -451,7 +496,7 @@ available for scripting; run `create-op-node region --help` for the list.
 
 ### Caveats
 
-A couple of honest sharp edges, since this command lives in the *node* CLI
+A couple of honest sharp edges, since this command lives in the _node_ CLI
 rather than in the regions repo itself:
 
 - **Run it from a `opuspopuli-regions` checkout.** The file is written relative
@@ -478,10 +523,10 @@ Two items per region, both generic-password class
 (`/System/Applications/Utilities/Keychain Access.app`) — **not** in the
 new Passwords.app, which is filtered to website-login items only.
 
-| # | Service | Account | Label (GUI display)                                              | Value format               | Written by                       | Read by                  |
-|---|---|---|---|---|---|---|
-| 1 | `org.opuspopuli.<region>` | `pgsodium-root-key` | `Opus Populi (<region>) — pgsodium root key`             | 64 lowercase hex chars     | `init` on laptop                 | `bootstrap` on Studio    |
-| 2 | `org.opuspopuli.<region>` | `tunnel-token`      | `Opus Populi (<region>) — Cloudflare Tunnel token`       | JWT-style base64url string | `init` on laptop (after TFC apply) | `bootstrap` on Studio    |
+| #   | Service                   | Account             | Label (GUI display)                                | Value format               | Written by                         | Read by               |
+| --- | ------------------------- | ------------------- | -------------------------------------------------- | -------------------------- | ---------------------------------- | --------------------- |
+| 1   | `org.opuspopuli.<region>` | `pgsodium-root-key` | `Opus Populi (<region>) — pgsodium root key`       | 64 lowercase hex chars     | `init` on laptop                   | `bootstrap` on Studio |
+| 2   | `org.opuspopuli.<region>` | `tunnel-token`      | `Opus Populi (<region>) — Cloudflare Tunnel token` | JWT-style base64url string | `init` on laptop (after TFC apply) | `bootstrap` on Studio |
 
 Both items also carry `-D 'Opus Populi secret'` (the "Kind" column in
 Keychain Access) so you can filter for them at a glance.
@@ -501,15 +546,15 @@ security find-generic-password -s org.opuspopuli.us-ca -a pgsodium-root-key -w
 Everything else flows through transiently or lives in its destination
 system's own credential store.
 
-| Secret                              | Where it lives                                                                          | Why not in Keychain                                                                                                              |
-|---|---|---|
-| Cloudflare API token                | Pasted into `init` prompt → forwarded to **GitHub Secrets** + **Terraform Cloud** vars  | One-shot during init. Re-runs prompt again. We could store it; adds risk vs benefit.                                             |
-| Cloudflare account ID, zone ID      | Same as above                                                                            | Not really a "secret" but flow alongside the token                                                                              |
-| Terraform Cloud token               | Pasted, used to verify + poll runs                                                       | Same one-shot pattern                                                                                                            |
-| GitHub PAT                          | Read from `gh auth token` if available, else pasted                                      | `gh` already manages it                                                                                                          |
-| pgsodium key (Studio runtime form)  | `~/.config/opuspopuli/pgsodium_root_key` (mode `0400`)                                  | LaunchAgent reads it at every login → interpolates into the `PGSODIUM_ROOT_KEY` env var. Same value as in Keychain; file is runtime form. |
-| Cloudflare Tunnel token (Studio runtime form) | Baked into `~/Library/LaunchAgents/org.opuspopuli.envloader.plist` (mode `0600`) | launchd's `launchctl setenv TUNNEL_TOKEN` injects it into the session at every boot. Same value as in Keychain; plist is runtime form. |
-| ghcr.io credentials                 | `~/.docker/config.json` or `docker-credential-osxkeychain`                              | Docker manages its own credential store — it actually saves the ghcr token to a separate Keychain item under service `ghcr.io`. We just call `docker login`. |
+| Secret                                        | Where it lives                                                                         | Why not in Keychain                                                                                                                                          |
+| --------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Cloudflare API token                          | Pasted into `init` prompt → forwarded to **GitHub Secrets** + **Terraform Cloud** vars | One-shot during init. Re-runs prompt again. We could store it; adds risk vs benefit.                                                                         |
+| Cloudflare account ID, zone ID                | Same as above                                                                          | Not really a "secret" but flow alongside the token                                                                                                           |
+| Terraform Cloud token                         | Pasted, used to verify + poll runs                                                     | Same one-shot pattern                                                                                                                                        |
+| GitHub PAT                                    | Read from `gh auth token` if available, else pasted                                    | `gh` already manages it                                                                                                                                      |
+| pgsodium key (Studio runtime form)            | `~/.config/opuspopuli/pgsodium_root_key` (mode `0400`)                                 | LaunchAgent reads it at every login → interpolates into the `PGSODIUM_ROOT_KEY` env var. Same value as in Keychain; file is runtime form.                    |
+| Cloudflare Tunnel token (Studio runtime form) | Baked into `~/Library/LaunchAgents/org.opuspopuli.envloader.plist` (mode `0600`)       | launchd's `launchctl setenv TUNNEL_TOKEN` injects it into the session at every boot. Same value as in Keychain; plist is runtime form.                       |
+| ghcr.io credentials                           | `~/.docker/config.json` or `docker-credential-osxkeychain`                             | Docker manages its own credential store — it actually saves the ghcr token to a separate Keychain item under service `ghcr.io`. We just call `docker login`. |
 
 Per region, the **only** persistent secrets `create-op-node` owns are
 the two Keychain items above. Everything else is either transient
@@ -618,7 +663,7 @@ GitHub deliberately doesn't fire workflows on branches or tags pushed by
 `GITHUB_TOKEN`. Without a PAT, two things bite every release:
 
 - The release PR opens but its CI run never starts (sits in
-  *Expected — Waiting for status to be reported*). You can't merge.
+  _Expected — Waiting for status to be reported_). You can't merge.
 - After you eventually merge, `publish.yml`'s tag-push trigger doesn't
   fire either, so npm never gets the new version.
 
@@ -626,18 +671,18 @@ Both go away when release-please uses a PAT instead. One-time setup:
 
 1. **Create a fine-grained PAT** at
    [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new):
-   - *Resource owner*: **OpusPopuli** (not your personal account —
+   - _Resource owner_: **OpusPopuli** (not your personal account —
      fine-grained PATs are scoped at creation and can't be moved)
-   - *Expiration*: your call (90 days for safety; you'll be reminded
+   - _Expiration_: your call (90 days for safety; you'll be reminded
      when it's near expiry)
-   - *Repository access*: **Only select repositories** →
+   - _Repository access_: **Only select repositories** →
      `create-op-node`
-   - *Repository permissions*:
+   - _Repository permissions_:
      - **Contents**: Read and write
      - **Pull requests**: Read and write
-     - **Workflows**: Read and write *(release-please updates the
+     - **Workflows**: Read and write _(release-please updates the
        version line in `release-please.yml`'s manifest output;
-       without this permission the action fails to write)*
+       without this permission the action fails to write)_
 2. **Add it as a repo secret**: repo → Settings → Secrets and
    variables → Actions → New repository secret →
    `RELEASE_PLEASE_TOKEN`, paste the PAT value.

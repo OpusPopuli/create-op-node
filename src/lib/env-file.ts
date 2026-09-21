@@ -2,7 +2,7 @@
  * Manages the model-config block inside the operator's region-node `.env`.
  *
  * **Why a `.env` file (and why only for THIS config):**
- * docker compose resolves `${LLM_MODEL:-…}` interpolation with the precedence
+ * docker compose resolves `${LLM_ANALYSIS_MODEL:-…}` interpolation with the precedence
  * shell/launchd env > `.env` > compose default. Model identifiers used to be
  * pushed into the launchd session via `launchctl setenv` — but that shadows
  * `.env` and, worse, only reaches launchd-spawned processes (never SSH shells
@@ -12,7 +12,8 @@
  * regardless of recreate order or how the operator's shell was started.
  *
  * This file deliberately carries ONLY non-secret substitution config
- * (`LLM_MODEL`, `EMBEDDINGS_PROVIDER`, `EMBEDDINGS_OLLAMA_MODEL`, `NODE_ENV`).
+ * (`LLM_ANALYSIS_MODEL`, `LLM_INGESTION_MODEL`, `EMBEDDINGS_PROVIDER`,
+ * `EMBEDDINGS_OLLAMA_MODEL`, `NODE_ENV`).
  * Bootstrap-critical SECRETS stay in the macOS Keychain and are hydrated into
  * the compose subprocess by `bin/op-compose` (see `op-compose-script.ts`) —
  * they never touch a plaintext `.env`, preserving the vault-first principle.
@@ -22,7 +23,7 @@
  * operators hand-edit it. So we own only a delimited region:
  *
  *     # >>> op-node managed >>>
- *     LLM_MODEL=…
+ *     LLM_ANALYSIS_MODEL=…
  *     # <<< op-node managed <<<
  *
  * Everything outside the markers is preserved verbatim. On first encounter
@@ -44,7 +45,8 @@ export const MANAGED_END = '# <<< op-node managed <<<';
 /** Keys create-op-node manages inside the block, in stable emit order so diffs
  *  across re-runs only show real value changes. */
 export const MANAGED_KEYS = [
-  'LLM_MODEL',
+  'LLM_ANALYSIS_MODEL',
+  'LLM_INGESTION_MODEL',
   'EMBEDDINGS_PROVIDER',
   'EMBEDDINGS_OLLAMA_MODEL',
   'NODE_ENV',
@@ -85,9 +87,27 @@ function valueOkForKey(key: ManagedKey, value: string): boolean {
 const ENV_VALUE_RE = /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/;
 
 export interface ManagedEnvSelection {
-  /** Resolved LLM model id (e.g. `qwen3.6:35b-a3b`). Always present — bootstrap
-   *  always resolves one via flag/prompt/default. */
-  llmModel: string;
+  /**
+   * Resolved ANALYSIS model id (e.g. `olmo-3.1:32b-instruct`). Always present
+   * — bootstrap always resolves one via flag/prompt/default.
+   *
+   * Written as `LLM_ANALYSIS_MODEL`. Named for its job like every other model
+   * setting the node carries — `OCR_VISION_MODEL`, `EMBEDDINGS_OLLAMA_MODEL`,
+   * `LLM_INGESTION_MODEL`. `LLM_MODEL` remains readable by the backend, last
+   * in its chain, so a node that predates this keeps working; new nodes get
+   * the name that says what it is for.
+   */
+  analysisModel: string;
+  /**
+   * Ingestion-lane model, written as `LLM_INGESTION_MODEL` (opuspopuli
+   * roadmap §6.4).
+   *
+   * Omitted unless the operator asked for it. The backend falls back through
+   * `LLM_OLLAMA_MODEL` to `LLM_MODEL`, so an absent key means the lane runs on
+   * the analysis model exactly as it did before the split — writing an empty
+   * value instead would be a change of behaviour dressed as a default.
+   */
+  ingestionModel?: string;
   /** Resolved embeddings model id. Written as `EMBEDDINGS_OLLAMA_MODEL` — the
    *  exact key the backend's embeddings config reads
    *  (packages/config-provider/src/configs/embeddings.config.ts). Emitted even
@@ -120,7 +140,8 @@ export interface ManagedEnvSelection {
 /** The managed keys mapped from the caller's selection. */
 function selectionToPairs(sel: ManagedEnvSelection): ReadonlyArray<[ManagedKey, string | undefined]> {
   return [
-    ['LLM_MODEL', sel.llmModel],
+    ['LLM_ANALYSIS_MODEL', sel.analysisModel],
+    ['LLM_INGESTION_MODEL', sel.ingestionModel],
     ['EMBEDDINGS_PROVIDER', sel.embeddingsProvider],
     ['EMBEDDINGS_OLLAMA_MODEL', sel.embeddingModel],
     ['NODE_ENV', sel.nodeEnv],
@@ -307,7 +328,11 @@ function joinTrimmed(region: string[]): string {
 // ----------------------------------------------------------------------------
 
 export interface NodeEnvModelConfig {
-  llmModel?: string;
+  /** Effective ANALYSIS model — `LLM_ANALYSIS_MODEL`, or the legacy
+   *  `LLM_MODEL` on a node that predates the lane naming. */
+  analysisModel?: string;
+  /** Effective INGESTION model, when the lanes are split (§6.4). */
+  ingestionModel?: string;
   embeddingModel?: string;
   embeddingsProvider?: string;
   nodeEnv?: string;
@@ -334,13 +359,18 @@ export async function readEnvModelConfig(repoDir: string): Promise<NodeEnvModelC
   }
   const map = parseEnvContent(content);
   const cfg: NodeEnvModelConfig = {};
-  const llm = map.get('LLM_MODEL');
+  // Lane-named first, legacy second — the same order the backend resolves in,
+  // so `verify` reports what the services will actually use rather than what
+  // the newer key happens to say.
+  const analysis = map.get('LLM_ANALYSIS_MODEL') ?? map.get('LLM_MODEL');
+  const ingestion = map.get('LLM_INGESTION_MODEL');
   const emb = map.get('EMBEDDINGS_OLLAMA_MODEL');
   const prov = map.get('EMBEDDINGS_PROVIDER');
   const node = map.get('NODE_ENV');
   const supa = map.get('SUPABASE_URL');
   const backupsDir = map.get('BACKUPS_DIR_HOST');
-  if (llm !== undefined) cfg.llmModel = llm;
+  if (analysis !== undefined) cfg.analysisModel = analysis;
+  if (ingestion !== undefined) cfg.ingestionModel = ingestion;
   if (emb !== undefined) cfg.embeddingModel = emb;
   if (prov !== undefined) cfg.embeddingsProvider = prov;
   if (node !== undefined) cfg.nodeEnv = node;

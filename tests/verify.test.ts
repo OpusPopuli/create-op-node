@@ -71,7 +71,7 @@ describe('runVerify --local-only (#104)', () => {
       {
         ...baseInput,
         localOnly: true,
-        ollama: { llmModel: 'qwen2.5:7b' },
+        ollama: { analysisModel: 'qwen2.5:7b' },
         images: ['ghcr.io/opuspopuli/api:latest'],
       },
       deps,
@@ -106,7 +106,7 @@ describe('runVerify --local-only (#104)', () => {
       ollama: () => Promise.resolve({ reachable: true, models: ['some-other-model'] }),
     });
     const report = await runVerify(
-      { ...baseInput, localOnly: true, ollama: { llmModel: 'qwen2.5:7b' } },
+      { ...baseInput, localOnly: true, ollama: { analysisModel: 'qwen2.5:7b' } },
       deps,
     );
     expect(report.phases.find((ph) => ph.name === 'Ollama models')?.status).toBe('fail');
@@ -342,12 +342,12 @@ describe('mergeOllamaModelConfig (flags over .env, per field)', () => {
   });
 
   it('takes the model from --llm-model when .env is empty', () => {
-    expect(mergeOllamaModelConfig({ llmModel: 'qwen2.5:7b' }, {})).toEqual({ llmModel: 'qwen2.5:7b' });
+    expect(mergeOllamaModelConfig({ analysisModel: 'qwen2.5:7b' }, {})).toEqual({ analysisModel: 'qwen2.5:7b' });
   });
 
   it('falls back to the .env model when the flag is absent', () => {
-    expect(mergeOllamaModelConfig({}, { llmModel: 'qwen3.6:35b-a3b' })).toEqual({
-      llmModel: 'qwen3.6:35b-a3b',
+    expect(mergeOllamaModelConfig({}, { analysisModel: 'qwen3.6:35b-a3b' })).toEqual({
+      analysisModel: 'qwen3.6:35b-a3b',
     });
   });
 
@@ -355,22 +355,22 @@ describe('mergeOllamaModelConfig (flags over .env, per field)', () => {
     // --llm-model pinned on the node, but provider + embedding come from .env.
     expect(
       mergeOllamaModelConfig(
-        { llmModel: 'qwen2.5:7b' },
-        { llmModel: 'ignored', embeddingModel: 'nomic-embed-text', embeddingsProvider: 'ollama' },
+        { analysisModel: 'qwen2.5:7b' },
+        { analysisModel: 'ignored', embeddingModel: 'nomic-embed-text', embeddingsProvider: 'ollama' },
       ),
-    ).toEqual({ llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text', provider: 'ollama' });
+    ).toEqual({ analysisModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text', provider: 'ollama' });
   });
 
   it('drops an unrecognized provider value from .env', () => {
-    const merged = mergeOllamaModelConfig({ llmModel: 'm' }, { embeddingsProvider: 'olama' });
-    expect(merged).toEqual({ llmModel: 'm' });
+    const merged = mergeOllamaModelConfig({ analysisModel: 'm' }, { embeddingsProvider: 'olama' });
+    expect(merged).toEqual({ analysisModel: 'm' });
     expect(merged?.provider).toBeUndefined();
   });
 
   it('the provider flag overrides the .env provider', () => {
     expect(
       mergeOllamaModelConfig(
-        { llmModel: 'm', embeddingsProvider: 'ollama' },
+        { analysisModel: 'm', embeddingsProvider: 'ollama' },
         { embeddingsProvider: 'xenova' },
       )?.provider,
     ).toBe('ollama');
@@ -390,7 +390,7 @@ describe('Ollama model-presence phase', () => {
 
   it('passes when the configured LLM is installed', async () => {
     const report = await runVerify(
-      { ...baseInput, ollama: { llmModel: 'qwen2.5:7b' } },
+      { ...baseInput, ollama: { analysisModel: 'qwen2.5:7b' } },
       depsFor({ ollama: vi.fn(() => Promise.resolve(okOllama(['qwen2.5:7b']))) }),
     );
     const ph = ollamaPhase(report);
@@ -400,7 +400,7 @@ describe('Ollama model-presence phase', () => {
 
   it('fails with the exact ollama pull remedy when the LLM is missing (the drift)', async () => {
     const report = await runVerify(
-      { ...baseInput, ollama: { llmModel: 'qwen3.5:35b' } },
+      { ...baseInput, ollama: { analysisModel: 'qwen3.5:35b' } },
       depsFor({ ollama: vi.fn(() => Promise.resolve(okOllama(['qwen2.5:72b']))) }),
     );
     const ph = ollamaPhase(report);
@@ -410,7 +410,7 @@ describe('Ollama model-presence phase', () => {
 
   it('fails when the local daemon is unreachable', async () => {
     const report = await runVerify(
-      { ...baseInput, ollama: { llmModel: 'qwen2.5:7b' } },
+      { ...baseInput, ollama: { analysisModel: 'qwen2.5:7b' } },
       depsFor({ ollama: vi.fn(() => Promise.resolve({ reachable: false, models: [] })) }),
     );
     const ph = ollamaPhase(report);
@@ -424,7 +424,7 @@ describe('Ollama model-presence phase', () => {
     const report = await runVerify(
       {
         ...baseInput,
-        ollama: { llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text', provider: 'xenova' },
+        ollama: { analysisModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text', provider: 'xenova' },
       },
       depsFor({ ollama: vi.fn(() => Promise.resolve(okOllama(['qwen2.5:7b']))) }),
     );
@@ -435,7 +435,7 @@ describe('Ollama model-presence phase', () => {
     const report = await runVerify(
       {
         ...baseInput,
-        ollama: { llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text', provider: 'ollama' },
+        ollama: { analysisModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text', provider: 'ollama' },
       },
       depsFor({ ollama: vi.fn(() => Promise.resolve(okOllama(['qwen2.5:7b']))) }),
     );

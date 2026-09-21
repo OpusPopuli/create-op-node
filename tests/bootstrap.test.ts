@@ -194,7 +194,7 @@ describe('resolveModels', () => {
   });
 
   it('overrides only the LLM when --llm-model is passed', () => {
-    expect(resolveModels({ llmModel: 'llama3.3:70b' })).toEqual([
+    expect(resolveModels({ analysisModel: 'llama3.3:70b' })).toEqual([
       DEFAULT_EMBEDDING_MODEL,
       'llama3.3:70b',
     ]);
@@ -209,7 +209,7 @@ describe('resolveModels', () => {
 
   it('overrides both when both flags are passed', () => {
     expect(
-      resolveModels({ llmModel: 'qwen2.5:72b', embeddingModel: 'mxbai-embed-large' }),
+      resolveModels({ analysisModel: 'qwen2.5:72b', embeddingModel: 'mxbai-embed-large' }),
     ).toEqual(['mxbai-embed-large', 'qwen2.5:72b']);
   });
 
@@ -225,13 +225,48 @@ describe('resolveModels', () => {
 describe('modelsToPull', () => {
   it('pulls the LLM only under the xenova (in-process) provider', () => {
     expect(
-      modelsToPull({ provider: 'xenova', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text-v2-moe:latest' }),
+      modelsToPull({ provider: 'xenova', analysisModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text-v2-moe:latest' }),
     ).toEqual(['qwen2.5:7b']);
   });
 
   it('pulls embedding first then LLM under the ollama provider', () => {
     expect(
-      modelsToPull({ provider: 'ollama', llmModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text-v2-moe:latest' }),
+      modelsToPull({ provider: 'ollama', analysisModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text-v2-moe:latest' }),
+    ).toEqual(['nomic-embed-text-v2-moe:latest', 'qwen2.5:7b']);
+  });
+
+  // Ingestion lane, opuspopuli roadmap §6.4.
+  it('pulls nothing extra when no ingestion model is named', () => {
+    // Opt-in, unlike the vision model: ingestion works fine on the analysis
+    // model, so a node that did not ask for the split must not have a second
+    // multi-gigabyte download added to its bootstrap.
+    expect(
+      modelsToPull({ provider: 'xenova', analysisModel: 'qwen2.5:7b', embeddingModel: 'nomic-embed-text-v2-moe:latest' }),
+    ).toEqual(['qwen2.5:7b']);
+  });
+
+  it('pulls the ingestion model alongside the LLM when named', () => {
+    expect(
+      modelsToPull({
+        provider: 'xenova',
+        analysisModel: 'olmo-3.1:32b-instruct',
+        embeddingModel: 'nomic-embed-text-v2-moe:latest',
+        ingestionModel: 'olmo-3:7b-instruct',
+      }),
+    ).toEqual(['olmo-3.1:32b-instruct', 'olmo-3:7b-instruct']);
+  });
+
+  it('does not pull the same model twice when both lanes share one', () => {
+    // A legitimate configuration — the split is about being ABLE to differ,
+    // not about having to. Pulling twice would double a multi-gigabyte
+    // download and warm the same weights again.
+    expect(
+      modelsToPull({
+        provider: 'ollama',
+        analysisModel: 'qwen2.5:7b',
+        embeddingModel: 'nomic-embed-text-v2-moe:latest',
+        ingestionModel: 'qwen2.5:7b',
+      }),
     ).toEqual(['nomic-embed-text-v2-moe:latest', 'qwen2.5:7b']);
   });
 });
