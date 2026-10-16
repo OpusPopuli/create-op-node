@@ -12,6 +12,7 @@ import { tlsHandshake, type TlsProbeInput, type TlsHandshakeResult } from '../li
 import { checkOllamaHealth, modelPresent, type EmbeddingsProvider, type OllamaHealth } from '../lib/ollama.js';
 import { readEnvModelConfig, type NodeEnvModelConfig } from '../lib/env-file.js';
 import { looksLikeNodeRepo } from '../lib/noderepo.js';
+import { checkDiskSpace, formatGb, type DiskSpace } from '../lib/disk.js';
 
 interface VerifyOptions {
   domain?: string;
@@ -71,6 +72,9 @@ export interface VerifyDeps {
   /** Local Ollama health probe (`/api/tags`). Defaults to checkOllamaHealth
    *  against localhost — meaningful only when verify runs ON the node. */
   ollama: (url?: string) => Promise<OllamaHealth>;
+  /** Free space on the filesystem holding the node repo. Injected so the
+   *  thresholds can be tested without a full disk. */
+  disk: (path: string) => Promise<DiskSpace>;
   /** Called once per phase as it resolves — lets the CLI render spinners.
    *  Pass a no-op for tests that just want the report. */
   onPhase?: (phase: VerifyPhase) => void;
@@ -110,6 +114,12 @@ export interface VerifyInput {
   /** BACKUPS_DIR_HOST from the node `.env`. Absent while `envRead` → no
    *  scheduled backups configured → warn (#111). */
   backupsDirHost?: string;
+  /** Node repo directory, used to pick the filesystem the disk check reads.
+   *  Absent → the check is skipped (verify not running on the node). */
+  repoDir?: string;
+  /** How many civic regions this node syncs. Each one archives its own bulk
+   *  exports, so the disk requirement scales with it. Defaults to 1. */
+  regionCount?: number;
 }
 
 const DEFAULT_DEPS: VerifyDeps = {
@@ -119,6 +129,7 @@ const DEFAULT_DEPS: VerifyDeps = {
   tunnel: tunnelStatus,
   cosign: cosignVerifyImage,
   ollama: checkOllamaHealth,
+  disk: checkDiskSpace,
 };
 
 type PushVerifyPhase = (ph: VerifyPhase) => void;
@@ -140,6 +151,7 @@ export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_D
   await verifyOllamaModelsPhase(input, deps, push);
   verifySupabaseUrlPhase(input, push);
   verifyBackupsPhase(input, push);
+  await verifyDiskPhase(input, deps, push);
   await verifyCloudflarePhase(input, deps, push);
   await verifyCosignPhase(input, deps, push);
 
@@ -304,6 +316,88 @@ function verifyBackupsPhase(input: VerifyInput, push: PushVerifyPhase): void {
   push({ name: 'Backups configured', status: 'ok', detail: input.backupsDirHost });
 }
 
+/* ---- Disk headroom for retained bulk archives ---------------------- *
+ *
+ * Bulk civic exports are retained so a published figure can be traced to the
+ * bytes it came from. Until opuspopuli#1363 that retention silently stored
+ * NOTHING — the bucket and grants existed in no environment — so every
+ * existing node has been using zero disk for archives and will now start
+ * growing. This check exists because an operator can otherwise finish setup
+ * cleanly and fill the disk weeks later with no warning.
+ *
+ * Sizing comes from the tiered schedule (opuspopuli#1374): newest always, one
+ * per month for 12 months, then one per year. At the measured 1.52 GB per
+ * CAL-ACCESS export that is ~20 GB in year one and ~26 GB by year five, per
+ * region. The floor and target below add headroom for the database, which on
+ * a synced California node is itself tens of GB.
+ */
+
+/** Per region: the tiered archive schedule's steady state, plus DB headroom. */
+const DISK_TARGET_GB_PER_REGION = 50;
+/** Per region: below this, archive retention will fail during a sync. */
+const DISK_FLOOR_GB_PER_REGION = 25;
+
+async function verifyDiskPhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
+  const name = 'Disk headroom';
+
+  if (!input.repoDir) {
+    push({
+      name,
+      status: 'skipped',
+      detail: 'run on the node (or pass --repo-dir) to measure its filesystem',
+    });
+    return;
+  }
+
+  const regions = Math.max(1, input.regionCount ?? 1);
+  const targetGb = DISK_TARGET_GB_PER_REGION * regions;
+  const floorGb = DISK_FLOOR_GB_PER_REGION * regions;
+
+  let space: DiskSpace;
+  try {
+    space = await deps.disk(input.repoDir);
+  } catch (err) {
+    // Unreadable filesystem is not evidence of a full one.
+    push({
+      name,
+      status: 'warn',
+      detail: `could not read free space for ${input.repoDir}: ${(err as Error).message}`,
+    });
+    return;
+  }
+
+  const freeGb = space.freeBytes / 1_000_000_000;
+  const free = formatGb(space.freeBytes);
+  const scope = regions > 1 ? ` for ${regions} regions` : '';
+
+  if (freeGb < floorGb) {
+    push({
+      name,
+      status: 'fail',
+      detail:
+        `${free} free — below the ${floorGb} GB floor${scope}. Retained bulk ` +
+        `archives need ~20 GB per region in the first year (~26 GB by year ` +
+        `five) and the database needs more. A sync will fail to archive, and ` +
+        `the source does not serve history, so those exports are gone for good.`,
+    });
+    return;
+  }
+
+  if (freeGb < targetGb) {
+    push({
+      name,
+      status: 'warn',
+      detail:
+        `${free} free — under the ${targetGb} GB recommended${scope}. Enough ` +
+        `to run now, but archive retention grows ~1.5 GB per month per region ` +
+        `and will reach the floor.`,
+    });
+    return;
+  }
+
+  push({ name, status: 'ok', detail: `${free} free of ${formatGb(space.totalBytes)}` });
+}
+
 // ---- Phase 5: Cloudflare Tunnel status (optional) ------------------
 async function verifyCloudflarePhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   if (input.localOnly) return skipLocalOnly('Cloudflare Tunnel', 'local-only node — no tunnel', push);
@@ -460,8 +554,10 @@ export const verifyCommand = new Command('verify')
     const ollama = await resolveOllamaVerifyInput(opts);
     const nodeEnv = await resolveNodeEnvVerifyInput(opts);
     // Fixed phases: TLS, health, GraphQL, Ollama, SUPABASE_URL, Backups,
-    // Cloudflare (7) + cosign (one line when no --image, else one per image).
-    const totalPhases = 7 + (images.length === 0 ? 1 : images.length);
+    // Disk, Cloudflare (8) + cosign (one line when no --image, else one per
+    // image). Keep in step with runVerify — the renderer numbers phases
+    // against this, so a missed bump prints "[9/8]".
+    const totalPhases = 8 + (images.length === 0 ? 1 : images.length);
 
     const report = await runVerifyWithSpinner({
       apiHost,
@@ -472,6 +568,10 @@ export const verifyCommand = new Command('verify')
       totalPhases,
       localOnly,
       envRead: nodeEnv.envRead,
+      // Same trust gate as `envRead`: only measure a directory we have
+      // established is a node repo, so an unrelated cwd reports `skipped`
+      // rather than the free space of some other filesystem.
+      ...(nodeEnv.repoDir !== undefined ? { repoDir: nodeEnv.repoDir } : {}),
       ...(ollama ? { ollama } : {}),
       ...(nodeEnv.supabaseUrl !== undefined ? { supabaseUrl: nodeEnv.supabaseUrl } : {}),
       ...(nodeEnv.backupsDirHost !== undefined ? { backupsDirHost: nodeEnv.backupsDirHost } : {}),
@@ -617,12 +717,18 @@ async function resolveOllamaVerifyInput(opts: VerifyOptions): Promise<VerifyInpu
 // never trips a false warn; `envRead` tells the phases whether the .env was seen.
 async function resolveNodeEnvVerifyInput(
   opts: VerifyOptions,
-): Promise<{ envRead: boolean; supabaseUrl?: string; backupsDirHost?: string }> {
+): Promise<{
+  envRead: boolean;
+  supabaseUrl?: string;
+  backupsDirHost?: string;
+  repoDir?: string;
+}> {
   const explicit = opts.repoDir !== undefined;
   const dir = opts.repoDir ?? process.cwd();
   if (!explicit && !(await looksLikeNodeRepo(dir))) return { envRead: false };
   const cfg = await readEnvModelConfig(dir);
   return {
+    repoDir: dir,
     envRead: true,
     ...(cfg.supabaseUrl !== undefined ? { supabaseUrl: cfg.supabaseUrl } : {}),
     ...(cfg.backupsDirHost !== undefined ? { backupsDirHost: cfg.backupsDirHost } : {}),

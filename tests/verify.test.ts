@@ -40,6 +40,9 @@ function depsFor(overrides: Partial<VerifyDeps> = {}): VerifyDeps {
     tunnel: vi.fn(() => Promise.resolve({ ok: true, connections: 4, status: 'healthy' })),
     cosign: vi.fn(() => Promise.resolve({ ok: true, output: 'Verified OK' })),
     ollama: vi.fn(() => Promise.resolve(okOllama())),
+    // Ample by default so existing expectations are unaffected; the disk
+    // tests override it.
+    disk: vi.fn(() => Promise.resolve({ freeBytes: 500e9, totalBytes: 1000e9 })),
     ...overrides,
   };
 }
@@ -161,8 +164,11 @@ describe('summarize', () => {
 });
 
 describe('runVerify orchestration', () => {
-  it('returns 8 phases on a clean run with no images', async () => {
+  it('returns 9 phases on a clean run with no images', async () => {
     const report = await runVerify(baseInput, depsFor());
+    // Order and count are pinned deliberately: the renderer numbers phases
+    // against `totalPhases`, so adding one here without bumping that constant
+    // prints "[9/8]".
     expect(report.phases.map((ph) => ph.name)).toEqual([
       'TLS handshake',
       'GET /health',
@@ -170,6 +176,7 @@ describe('runVerify orchestration', () => {
       'Ollama models',
       'SUPABASE_URL',
       'Backups configured',
+      'Disk headroom',
       'Cloudflare Tunnel',
       'cosign verify',
     ]);
@@ -442,5 +449,80 @@ describe('Ollama model-presence phase', () => {
     const ph = ollamaPhase(report);
     expect(ph?.status).toBe('fail');
     expect(ph?.detail).toContain('ollama pull nomic-embed-text');
+  });
+});
+
+/**
+ * Disk headroom for retained bulk archives.
+ *
+ * Retention silently stored NOTHING until opuspopuli#1363 — the bucket and
+ * grants existed in no environment — so every node has used zero disk for
+ * archives and will now start growing ~1.5 GB per month per region. Without
+ * this phase an operator finishes setup cleanly and fills the disk weeks
+ * later with no warning, which is the failure this check exists to prevent.
+ */
+describe('runVerify — disk headroom', () => {
+  const onNode = { ...baseInput, repoDir: '/opt/node', envRead: true };
+  const phase = (report: Awaited<ReturnType<typeof runVerify>>) =>
+    report.phases.find((ph) => ph.name === 'Disk headroom');
+
+  it('skips when not running on the node', async () => {
+    const report = await runVerify({ ...baseInput }, depsFor());
+    expect(phase(report)?.status).toBe('skipped');
+  });
+
+  it('passes with ample free space', async () => {
+    const report = await runVerify(onNode, depsFor());
+    expect(phase(report)?.status).toBe('ok');
+    expect(phase(report)?.detail).toContain('500.0 GB free');
+  });
+
+  it('warns below the recommended target', async () => {
+    const report = await runVerify(
+      onNode,
+      depsFor({ disk: () => Promise.resolve({ freeBytes: 40e9, totalBytes: 500e9 }) }),
+    );
+    expect(phase(report)?.status).toBe('warn');
+    expect(phase(report)?.detail).toContain('1.5 GB per month');
+  });
+
+  it('fails below the floor', async () => {
+    const report = await runVerify(
+      onNode,
+      depsFor({ disk: () => Promise.resolve({ freeBytes: 10e9, totalBytes: 500e9 }) }),
+    );
+    expect(phase(report)?.status).toBe('fail');
+    // The consequence is permanent, and the message has to say so: the source
+    // overwrites its export daily, so a sync that cannot archive loses those
+    // bytes for good.
+    expect(phase(report)?.detail).toContain('does not serve history');
+  });
+
+  it('scales the thresholds with region count', async () => {
+    // 60 GB is comfortable for one region and under the floor for three.
+    const free = { freeBytes: 60e9, totalBytes: 500e9 };
+
+    const one = await runVerify(
+      { ...onNode, regionCount: 1 },
+      depsFor({ disk: () => Promise.resolve(free) }),
+    );
+    const three = await runVerify(
+      { ...onNode, regionCount: 3 },
+      depsFor({ disk: () => Promise.resolve(free) }),
+    );
+
+    expect(phase(one)?.status).toBe('ok');
+    expect(phase(three)?.status).toBe('fail');
+  });
+
+  it('warns rather than fails when the filesystem cannot be read', async () => {
+    // An unreadable filesystem is not evidence of a full one — the same
+    // reasoning as treating a storage outage as "unknown" rather than loss.
+    const report = await runVerify(
+      onNode,
+      depsFor({ disk: () => Promise.reject(new Error('EACCES')) }),
+    );
+    expect(phase(report)?.status).toBe('warn');
+    expect(phase(report)?.detail).toContain('EACCES');
   });
 });
