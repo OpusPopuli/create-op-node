@@ -26,7 +26,7 @@ Then on the Mac Studio itself:
 npx create-op-node bootstrap
 ```
 
-Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, reads the pgsodium key + Tunnel token from the Studio's Keychain (or prompts you to paste them once, then persists for re-runs), writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, **verifies the cosign signature of every `ghcr.io/opuspopuli/*` image before pulling** (fail-closed — `--skip-signature-check` to bypass), and finally `docker compose --profile public pull && up -d` brings the whole stack online. Health-check loop waits until all containers are `(healthy)`.
+Configures macOS power settings, installs Homebrew + the CLI tool list, sets up Docker Desktop + Tailscale + Ollama, clones the node repo you created, reads the pgsodium key + Tunnel token from the Studio's Keychain (or prompts you to paste them once, then persists for re-runs), writes the LaunchAgent plist, logs into ghcr.io, pulls + warms the LLM model, installs the [host memory probe](#host-memory-probe), **verifies the cosign signature of every `ghcr.io/opuspopuli/*` image before pulling** (fail-closed — `--skip-signature-check` to bypass), and finally `docker compose --profile public pull && up -d` brings the whole stack online. Health-check loop waits until all containers are `(healthy)`.
 
 ### Choosing the LLM model
 
@@ -166,6 +166,34 @@ To switch models post-bootstrap, either re-run bootstrap with the new
 managed block of your `.env` directly, then `./bin/op-compose -f
 docker-compose-prod.yml up -d` to pick up the change.
 
+### Host memory probe
+
+The backend refuses to **load** an Ollama model the host has no room for
+(opuspopuli#1435): on unified memory, a model Ollama thinks fits in the Metal
+budget can still push macOS into swap until the machine freezes. Containers
+cannot see host memory, so a small probe runs on the host as a per-user
+launchd agent (`org.opuspopuli.host-memory-probe`) and answers
+`GET http://127.0.0.1:11500/memory`; containers reach it at
+`host.docker.internal`.
+
+After the Ollama phase and before the stack comes up, bootstrap runs the node
+repo's `scripts/host-memory-probe/install.sh` with
+`HOST_MEMORY_PROBE_NODE` set to the Node binary running the CLI (launchd does
+not read your PATH or nvm). The stack must not start without it: with
+`LLM_HOST_MEMORY_URL` set and nothing answering, the backend fails **closed**
+and no model loads. A node repo cloned before the probe existed has no
+installer, and bootstrap stops and asks you to pull it.
+
+Bootstrap also reads the host Ollama's effective `OLLAMA_MAX_LOADED_MODELS`
+— from the brew-services plist (`~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`
+or `sh.brew.ollama.plist`), then `launchctl getenv`, else Ollama's default of
+3 — and writes it to the managed `.env` block as `LLM_HOST_MAX_LOADED_MODELS`.
+The gate counts the memory Ollama frees by evicting a resident model once that
+many are loaded, so the two must agree. Bootstrap never changes Ollama's own
+configuration; if you change `OLLAMA_MAX_LOADED_MODELS`, re-run bootstrap (or
+edit the managed block) so they match. A value that is set but is not a
+positive integer stops bootstrap.
+
 ### Local-only mode (no Cloudflare)
 
 For local dev / testing — frontend on your laptop, backend on the Studio
@@ -234,7 +262,7 @@ region, or after a misconfiguration), reverse the Studio-side state:
 npx create-op-node reset --region us-ca
 ```
 
-Three phases run in reverse-bootstrap order. By default volumes are
+Four phases run in reverse-bootstrap order. By default volumes are
 preserved — the database survives so you can bring the stack back up
 with `bootstrap` without losing data.
 
@@ -243,10 +271,13 @@ with `bootstrap` without losing data.
    mode requires retyping the region label as confirmation — and the
    prompt deliberately doesn't pre-fill the answer, so you have to type
    it from memory. `y` won't do it.
-2. **Unload + remove the LaunchAgent** — `launchctl unload` then `rm`
+2. **Remove the host memory probe** — runs the node repo's
+   `scripts/host-memory-probe/install.sh --uninstall`. Best-effort: skipped
+   when the repo has no installer, a warning (not a failure) if it errors.
+3. **Unload + remove the LaunchAgent** — `launchctl unload` then `rm`
    the plist and the pgsodium key file. `--keep-key-file` leaves the
    key in place as a belt-and-suspenders backup before a wipe-data run.
-3. **`docker logout`** — clears the registry-credentials store entry
+4. **`docker logout`** — clears the registry-credentials store entry
    for `ghcr.io` (or override with `--registry`). This only clears the
    store entry; if your credential helper caches the token elsewhere
    (or `~/.docker/config.json` has stale entries from another host),
@@ -294,7 +325,8 @@ npx create-op-node verify --domain your-domain.example
 ```
 
 Off-LAN health probe of a live node, runnable from anywhere with internet
-access. Six phases:
+access. The main phases (alongside the node-local `.env` checks for
+`SUPABASE_URL`, backups and disk headroom):
 
 1. **TLS handshake** to `api.<domain>:443` — surfaces cert subject, issuer,
    and days-to-expiry. Warns when the cert is within `--cert-warn-days`
@@ -314,12 +346,24 @@ access. Six phases:
    resolves, which keeps an off-LAN `verify --domain …` from tripping it. The
    embedding model is asserted only under `--embeddings-provider ollama`
    (xenova computes embeddings in-process).
-5. **Cloudflare Tunnel status** (optional) — looks up `connections` via
+5. **Host memory probe** (node-local) — `GET http://127.0.0.1:11500/memory`
+   must return 200 with a numeric `reclaimableBytes`; the detail reports the
+   reclaimable GiB. Fails with the `scripts/host-memory-probe/install.sh`
+   remedy otherwise, because without it no model loads. **Skipped** off the
+   node, and when `LLM_HOST_MEMORY_URL` is set empty in `.env` (gate off).
+6. **Model limit (gate ↔ Ollama)** (node-local) — compares the `.env`'s
+   `LLM_HOST_MAX_LOADED_MODELS` with the host Ollama's effective
+   `OLLAMA_MAX_LOADED_MODELS` (same detection as bootstrap). Fails on a
+   mismatch, naming both values and where Ollama's came from: the gate would
+   count evictions that never happen, or miss ones that do. Warns when the key
+   is absent from `.env` (older bootstrap; compose defaults to 3) and Ollama
+   is not at 3. Skipped off the node and when the gate is off.
+7. **Cloudflare Tunnel status** (optional) — looks up `connections` via
    the CF API. Zero connectors registered → warning that cloudflared on
    the Studio is offline. Requires all three of `--cf-token` (or
    `--cf-token-file`), `--cf-account-id`, `--tunnel-id`; partial
    configuration warns + names the missing flag.
-6. **`cosign verify`** (optional, repeatable `--image`) — keyless
+8. **`cosign verify`** (optional, repeatable `--image`) — keyless
    verification against the GitHub Actions OIDC issuer + Fulcio +
    the Rekor transparency log. Silently skipped when `cosign` isn't on
    `PATH` (install with `brew install cosign` to enable).

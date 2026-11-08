@@ -7,7 +7,11 @@ vi.mock('execa', () => ({
 }));
 
 import {
+  brewOllamaPlists,
   checkOllamaHealth,
+  detectOllamaMaxLoadedModels,
+  OLLAMA_DEFAULT_MAX_LOADED_MODELS,
+  parseMaxLoadedModels,
   DEFAULT_EMBEDDING_MODEL,
   DEFAULT_EMBEDDINGS_PROVIDER,
   DEFAULT_LLM_MODEL,
@@ -357,5 +361,85 @@ describe('setupModels', () => {
       ['qwen3.5:9b', 'warming'],
       ['qwen3.5:9b', 'warmed'],
     ]);
+  });
+});
+
+describe('detectOllamaMaxLoadedModels', () => {
+  const HOME = '/Users/op';
+  const MXCL = '/Users/op/Library/LaunchAgents/homebrew.mxcl.ollama.plist';
+  const SH = '/Users/op/Library/LaunchAgents/sh.brew.ollama.plist';
+
+  /** Answer plutil per plist and launchctl getenv; anything unlisted is unset. */
+  function hostWith(values: { [MXCL]?: string; [SH]?: string; launchctl?: string }) {
+    execaMock.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === 'launchctl') {
+        return Promise.resolve({ exitCode: 0, stdout: values.launchctl ?? '', stderr: '' });
+      }
+      const plist = args.at(-1) as keyof typeof values;
+      const v = values[plist];
+      return Promise.resolve(
+        v === undefined
+          ? { exitCode: 1, stdout: '', stderr: 'Could not extract value' }
+          : { exitCode: 0, stdout: `${v}\n`, stderr: '' },
+      );
+    });
+  }
+
+  it('lists both brew-services plist names', () => {
+    expect(brewOllamaPlists(HOME)).toEqual([MXCL, SH]);
+  });
+
+  it('falls back to Ollama’s default of 3 when unset everywhere', async () => {
+    hostWith({});
+    expect(await detectOllamaMaxLoadedModels(HOME)).toEqual({
+      ok: true,
+      value: OLLAMA_DEFAULT_MAX_LOADED_MODELS,
+      source: 'Ollama default',
+    });
+    expect(OLLAMA_DEFAULT_MAX_LOADED_MODELS).toBe(3);
+  });
+
+  it('reads launchctl getenv', async () => {
+    hostWith({ launchctl: '2' });
+    expect(await detectOllamaMaxLoadedModels(HOME)).toEqual({
+      ok: true,
+      value: 2,
+      source: 'launchctl getenv',
+    });
+  });
+
+  it('reads the brew-services plist, which overrides launchctl', async () => {
+    hostWith({ [SH]: '1', launchctl: '4' });
+    expect(await detectOllamaMaxLoadedModels(HOME)).toEqual({ ok: true, value: 1, source: SH });
+    expect(execaMock).toHaveBeenCalledWith(
+      'plutil',
+      ['-extract', 'EnvironmentVariables.OLLAMA_MAX_LOADED_MODELS', 'raw', '-o', '-', SH],
+      expect.anything(),
+    );
+  });
+
+  it('treats a missing plutil/launchctl as unset', async () => {
+    execaMock.mockRejectedValue(Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' }));
+    const res = await detectOllamaMaxLoadedModels(HOME);
+    expect(res).toMatchObject({ ok: true, value: 3 });
+  });
+
+  it.each(['0', 'two', '1.5', '-1', '2 # comment'])('rejects a set but invalid value %j', async (bad) => {
+    hostWith({ [MXCL]: bad });
+    const res = await detectOllamaMaxLoadedModels(HOME);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.reason).toContain(MXCL);
+  });
+});
+
+describe('parseMaxLoadedModels', () => {
+  it('accepts positive integers, trimming whitespace', () => {
+    expect(parseMaxLoadedModels(' 1\n')).toBe(1);
+    expect(parseMaxLoadedModels('12')).toBe(12);
+  });
+
+  it.each(['', '0', '01', '1e2', 'abc', '99999'])('rejects %j', (raw) => {
+    expect(parseMaxLoadedModels(raw)).toBeNull();
   });
 });

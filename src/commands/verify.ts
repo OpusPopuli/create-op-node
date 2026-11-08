@@ -9,10 +9,18 @@ import { cosignVerifyImage, type CosignVerifyInput, type CosignVerifyResult } fr
 import { graphqlProbe, httpProbe, type GraphqlProbeInput, type GraphqlProbeResult, type HttpProbeInput, type HttpProbeResult } from '../lib/http.js';
 import { unwrap } from '../lib/prompts.js';
 import { tlsHandshake, type TlsProbeInput, type TlsHandshakeResult } from '../lib/tls.js';
-import { checkOllamaHealth, modelPresent, type EmbeddingsProvider, type OllamaHealth } from '../lib/ollama.js';
+import {
+  checkOllamaHealth,
+  detectOllamaMaxLoadedModels,
+  modelPresent,
+  type EmbeddingsProvider,
+  type MaxLoadedModels,
+  type OllamaHealth,
+} from '../lib/ollama.js';
 import { readEnvModelConfig, type NodeEnvModelConfig } from '../lib/env-file.js';
 import { looksLikeNodeRepo } from '../lib/noderepo.js';
 import { checkDiskSpace, formatGb, type DiskSpace } from '../lib/disk.js';
+import { HOST_MEMORY_PROBE_SCRIPT, HOST_MEMORY_PROBE_URL, parseHostMemoryBody } from '../lib/host-memory-probe.js';
 
 interface VerifyOptions {
   domain?: string;
@@ -75,6 +83,9 @@ export interface VerifyDeps {
   /** Free space on the filesystem holding the node repo. Injected so the
    *  thresholds can be tested without a full disk. */
   disk: (path: string) => Promise<DiskSpace>;
+  /** The host Ollama's effective OLLAMA_MAX_LOADED_MODELS. Injected so the
+   *  cross-check can be tested without reading launchd state. */
+  maxLoadedModels: () => Promise<MaxLoadedModels>;
   /** Called once per phase as it resolves — lets the CLI render spinners.
    *  Pass a no-op for tests that just want the report. */
   onPhase?: (phase: VerifyPhase) => void;
@@ -120,6 +131,11 @@ export interface VerifyInput {
   /** How many civic regions this node syncs. Each one archives its own bulk
    *  exports, so the disk requirement scales with it. Defaults to 1. */
   regionCount?: number;
+  /** LLM_HOST_MEMORY_URL from the node `.env`, when set. Empty = the backend's
+   *  host-memory gate is off, so the probe check is skipped. */
+  hostMemoryUrl?: string;
+  /** LLM_HOST_MAX_LOADED_MODELS from the node `.env`, when present. */
+  hostMaxLoadedModels?: string;
 }
 
 const DEFAULT_DEPS: VerifyDeps = {
@@ -130,6 +146,7 @@ const DEFAULT_DEPS: VerifyDeps = {
   cosign: cosignVerifyImage,
   ollama: checkOllamaHealth,
   disk: checkDiskSpace,
+  maxLoadedModels: () => detectOllamaMaxLoadedModels(),
 };
 
 type PushVerifyPhase = (ph: VerifyPhase) => void;
@@ -152,6 +169,8 @@ export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_D
   verifySupabaseUrlPhase(input, push);
   verifyBackupsPhase(input, push);
   await verifyDiskPhase(input, deps, push);
+  await verifyHostMemoryProbePhase(input, deps, push);
+  await verifyMaxLoadedModelsPhase(input, deps, push);
   await verifyCloudflarePhase(input, deps, push);
   await verifyCosignPhase(input, deps, push);
 
@@ -398,6 +417,110 @@ async function verifyDiskPhase(input: VerifyInput, deps: VerifyDeps, push: PushV
   push({ name, status: 'ok', detail: `${free} free of ${formatGb(space.totalBytes)}` });
 }
 
+// ---- Phase 4e: host memory probe (node-local, optional) ------------
+//
+// The backend asks this probe before loading a model and fails CLOSED when it
+// is configured but silent: every AI generation stops (opuspopuli#1435). It
+// listens on the node's loopback, so the check is only meaningful on the node.
+async function verifyHostMemoryProbePhase(
+  input: VerifyInput,
+  deps: VerifyDeps,
+  push: PushVerifyPhase,
+): Promise<void> {
+  const name = 'Host memory probe';
+  if (!input.envRead) {
+    push({ name, status: 'skipped', detail: 'run on the node (or pass --repo-dir) to probe it' });
+    return;
+  }
+  if (input.hostMemoryUrl === '') {
+    push({ name, status: 'skipped', detail: 'LLM_HOST_MEMORY_URL is empty in .env — the gate is off' });
+    return;
+  }
+  const remedy =
+    `install it with \`${input.repoDir ?? '<node repo>'}/${HOST_MEMORY_PROBE_SCRIPT}\` ` +
+    '(or re-run bootstrap); until then no model loads';
+  const res = await deps.http({ url: HOST_MEMORY_PROBE_URL });
+  if (!res.ok) {
+    push({ name, status: 'fail', detail: `${HOST_MEMORY_PROBE_URL}: ${res.reason} — ${remedy}` });
+    return;
+  }
+  const reading = parseHostMemoryBody(res.bodyPreview);
+  if (!reading.ok) {
+    push({ name, status: 'fail', detail: `${HOST_MEMORY_PROBE_URL}: ${reading.reason} — ${remedy}` });
+    return;
+  }
+  const gib = (reading.reclaimableBytes / 2 ** 30).toFixed(1);
+  push({ name, status: 'ok', detail: `${gib} GiB reclaimable` });
+}
+
+// ---- Phase 4f: gate's model limit matches Ollama's (node-local) ----
+//
+// The gate counts the memory Ollama frees by evicting a resident model once
+// LLM_HOST_MAX_LOADED_MODELS are loaded. If that differs from Ollama's real
+// OLLAMA_MAX_LOADED_MODELS the gate counts evictions that never happen (and
+// admits a load that freezes the host) or misses ones that do (and stalls).
+
+/** What compose falls back to when the `.env` has no LLM_HOST_MAX_LOADED_MODELS. */
+const COMPOSE_DEFAULT_MAX_LOADED_MODELS = '3';
+
+const MAX_LOADED_PHASE = 'Model limit (gate ↔ Ollama)';
+
+/** Compare the `.env` value (absent = compose default) with Ollama's. Pure. */
+export function compareMaxLoadedModels(
+  envValue: string | undefined,
+  ollama: { value: number; source: string },
+): VerifyPhase {
+  const name = MAX_LOADED_PHASE;
+  const want = String(ollama.value);
+  const ollamaSide = `OLLAMA_MAX_LOADED_MODELS=${want} (${ollama.source})`;
+  if (envValue === undefined) {
+    if (want === COMPOSE_DEFAULT_MAX_LOADED_MODELS) {
+      return { name, status: 'ok', detail: `${ollamaSide}; .env unset, compose default ${want} matches` };
+    }
+    return {
+      name,
+      status: 'warn',
+      detail:
+        `LLM_HOST_MAX_LOADED_MODELS absent from .env (older bootstrap; compose defaults to ` +
+        `${COMPOSE_DEFAULT_MAX_LOADED_MODELS}) but ${ollamaSide} — re-run create-op-node bootstrap, ` +
+        `or set LLM_HOST_MAX_LOADED_MODELS=${want} in the managed block`,
+    };
+  }
+  if (envValue.trim() === want) {
+    return { name, status: 'ok', detail: `LLM_HOST_MAX_LOADED_MODELS=${want} matches ${ollamaSide}` };
+  }
+  return {
+    name,
+    status: 'fail',
+    detail:
+      `.env LLM_HOST_MAX_LOADED_MODELS=${envValue} but ${ollamaSide} — the gate will count ` +
+      `evictions Ollama doesn't make (or miss ones it does). Re-run create-op-node bootstrap, ` +
+      `or set LLM_HOST_MAX_LOADED_MODELS=${want} in the managed block`,
+  };
+}
+
+async function verifyMaxLoadedModelsPhase(
+  input: VerifyInput,
+  deps: VerifyDeps,
+  push: PushVerifyPhase,
+): Promise<void> {
+  const name = MAX_LOADED_PHASE;
+  if (!input.envRead) {
+    push({ name, status: 'skipped', detail: 'run on the node (or pass --repo-dir) so its .env is read' });
+    return;
+  }
+  if (input.hostMemoryUrl === '') {
+    push({ name, status: 'skipped', detail: 'LLM_HOST_MEMORY_URL is empty in .env — the gate is off' });
+    return;
+  }
+  const ollama = await deps.maxLoadedModels();
+  if (!ollama.ok) {
+    push({ name, status: 'fail', detail: ollama.reason });
+    return;
+  }
+  push(compareMaxLoadedModels(input.hostMaxLoadedModels, ollama));
+}
+
 // ---- Phase 5: Cloudflare Tunnel status (optional) ------------------
 async function verifyCloudflarePhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   if (input.localOnly) return skipLocalOnly('Cloudflare Tunnel', 'local-only node — no tunnel', push);
@@ -554,10 +677,10 @@ export const verifyCommand = new Command('verify')
     const ollama = await resolveOllamaVerifyInput(opts);
     const nodeEnv = await resolveNodeEnvVerifyInput(opts);
     // Fixed phases: TLS, health, GraphQL, Ollama, SUPABASE_URL, Backups,
-    // Disk, Cloudflare (8) + cosign (one line when no --image, else one per
-    // image). Keep in step with runVerify — the renderer numbers phases
-    // against this, so a missed bump prints "[9/8]".
-    const totalPhases = 8 + (images.length === 0 ? 1 : images.length);
+    // Disk, Host memory probe, Model limit, Cloudflare (10) + cosign (one line
+    // when no --image, else one per image). Keep in step with runVerify — the
+    // renderer numbers phases against this, so a missed bump prints "[11/10]".
+    const totalPhases = 10 + (images.length === 0 ? 1 : images.length);
 
     const report = await runVerifyWithSpinner({
       apiHost,
@@ -575,6 +698,10 @@ export const verifyCommand = new Command('verify')
       ...(ollama ? { ollama } : {}),
       ...(nodeEnv.supabaseUrl !== undefined ? { supabaseUrl: nodeEnv.supabaseUrl } : {}),
       ...(nodeEnv.backupsDirHost !== undefined ? { backupsDirHost: nodeEnv.backupsDirHost } : {}),
+      ...(nodeEnv.hostMemoryUrl !== undefined ? { hostMemoryUrl: nodeEnv.hostMemoryUrl } : {}),
+      ...(nodeEnv.hostMaxLoadedModels !== undefined
+        ? { hostMaxLoadedModels: nodeEnv.hostMaxLoadedModels }
+        : {}),
     });
 
     renderVerifySummary(report, { opts, totalPhases });
@@ -722,6 +849,8 @@ async function resolveNodeEnvVerifyInput(
   supabaseUrl?: string;
   backupsDirHost?: string;
   repoDir?: string;
+  hostMemoryUrl?: string;
+  hostMaxLoadedModels?: string;
 }> {
   const explicit = opts.repoDir !== undefined;
   const dir = opts.repoDir ?? process.cwd();
@@ -732,6 +861,8 @@ async function resolveNodeEnvVerifyInput(
     envRead: true,
     ...(cfg.supabaseUrl !== undefined ? { supabaseUrl: cfg.supabaseUrl } : {}),
     ...(cfg.backupsDirHost !== undefined ? { backupsDirHost: cfg.backupsDirHost } : {}),
+    ...(cfg.hostMemoryUrl !== undefined ? { hostMemoryUrl: cfg.hostMemoryUrl } : {}),
+    ...(cfg.hostMaxLoadedModels !== undefined ? { hostMaxLoadedModels: cfg.hostMaxLoadedModels } : {}),
   };
 }
 
@@ -748,6 +879,9 @@ async function runVerifyWithSpinner(args: {
   envRead?: boolean;
   supabaseUrl?: string;
   backupsDirHost?: string;
+  repoDir?: string;
+  hostMemoryUrl?: string;
+  hostMaxLoadedModels?: string;
 }): Promise<VerifyReport> {
   const {
     apiHost,
@@ -761,6 +895,9 @@ async function runVerifyWithSpinner(args: {
     envRead,
     supabaseUrl,
     backupsDirHost,
+    repoDir,
+    hostMemoryUrl,
+    hostMaxLoadedModels,
   } = args;
 
   let phaseIndex = 0;
@@ -792,6 +929,9 @@ async function runVerifyWithSpinner(args: {
       ...(ollama ? { ollama } : {}),
       ...(supabaseUrl !== undefined ? { supabaseUrl } : {}),
       ...(backupsDirHost !== undefined ? { backupsDirHost } : {}),
+      ...(repoDir !== undefined ? { repoDir } : {}),
+      ...(hostMemoryUrl !== undefined ? { hostMemoryUrl } : {}),
+      ...(hostMaxLoadedModels !== undefined ? { hostMaxLoadedModels } : {}),
     },
     deps,
   );

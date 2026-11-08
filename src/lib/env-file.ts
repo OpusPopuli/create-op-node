@@ -13,7 +13,7 @@
  *
  * This file deliberately carries ONLY non-secret substitution config
  * (`LLM_ANALYSIS_MODEL`, `LLM_INGESTION_MODEL`, `EMBEDDINGS_PROVIDER`,
- * `EMBEDDINGS_OLLAMA_MODEL`, `NODE_ENV`).
+ * `EMBEDDINGS_OLLAMA_MODEL`, `NODE_ENV`, `LLM_HOST_MAX_LOADED_MODELS`, …).
  * Bootstrap-critical SECRETS stay in the macOS Keychain and are hydrated into
  * the compose subprocess by `bin/op-compose` (see `op-compose-script.ts`) —
  * they never touch a plaintext `.env`, preserving the vault-first principle.
@@ -55,6 +55,7 @@ export const MANAGED_KEYS = [
   'RETENTION_DAYS',
   'BACKUP_SCHEDULE',
   'GRAFANA_BIND_ADDR',
+  'LLM_HOST_MAX_LOADED_MODELS',
 ] as const;
 export type ManagedKey = (typeof MANAGED_KEYS)[number];
 
@@ -69,12 +70,16 @@ const CRON_RE = /^\S+ \S+ \S+ \S+ \S+$/;
  *  alphanumeric-first anchor rejects). Spaces allowed for volume names. */
 const PATH_KEYS = new Set<ManagedKey>(['BACKUPS_DIR_HOST']);
 const PATH_RE = /^\/[A-Za-z0-9 ._/-]*$/;
+/** Managed keys holding a positive integer count. */
+const POSITIVE_INT_KEYS = new Set<ManagedKey>(['LLM_HOST_MAX_LOADED_MODELS']);
+const POSITIVE_INT_RE = /^[1-9]\d*$/;
 
 /** Per-key `.env`-safety check: cron keys allow the 5-field form, path keys an
  *  absolute path, everything else the strict simple-token rule. */
 function valueOkForKey(key: ManagedKey, value: string): boolean {
   if (CRON_KEYS.has(key)) return CRON_RE.test(value);
   if (PATH_KEYS.has(key)) return PATH_RE.test(value);
+  if (POSITIVE_INT_KEYS.has(key)) return POSITIVE_INT_RE.test(value);
   return ENV_VALUE_RE.test(value);
 }
 
@@ -135,6 +140,12 @@ export interface ManagedEnvSelection {
    *  into tailnet exposure explicitly at bootstrap. Emitted so the node's
    *  compose can bind without hard-coding a per-node IP. */
   grafanaBindAddr?: string;
+  /** The host Ollama's effective OLLAMA_MAX_LOADED_MODELS, written as
+   *  `LLM_HOST_MAX_LOADED_MODELS`. The backend's host-memory gate counts the
+   *  memory Ollama frees by evicting a resident model once this many are
+   *  loaded (opuspopuli#1435), so it must match what Ollama actually runs
+   *  with — bootstrap reads it from the host rather than asking. */
+  hostMaxLoadedModels?: string;
 }
 
 /** The managed keys mapped from the caller's selection. */
@@ -150,6 +161,7 @@ function selectionToPairs(sel: ManagedEnvSelection): ReadonlyArray<[ManagedKey, 
     ['RETENTION_DAYS', sel.retentionDays],
     ['BACKUP_SCHEDULE', sel.backupSchedule],
     ['GRAFANA_BIND_ADDR', sel.grafanaBindAddr],
+    ['LLM_HOST_MAX_LOADED_MODELS', sel.hostMaxLoadedModels],
   ];
 }
 
@@ -342,6 +354,13 @@ export interface NodeEnvModelConfig {
   /** Effective BACKUPS_DIR_HOST — read so `verify` can flag a node with no
    *  scheduled backups configured (#111). */
   backupsDirHost?: string;
+  /** Effective LLM_HOST_MEMORY_URL, when the operator set it. An empty value
+   *  turns the backend's host-memory gate off, so `verify` skips the probe
+   *  check rather than fail a node that deliberately runs without it. */
+  hostMemoryUrl?: string;
+  /** Effective LLM_HOST_MAX_LOADED_MODELS — `verify` compares it with the
+   *  host Ollama's OLLAMA_MAX_LOADED_MODELS. */
+  hostMaxLoadedModels?: string;
 }
 
 /**
@@ -376,6 +395,10 @@ export async function readEnvModelConfig(repoDir: string): Promise<NodeEnvModelC
   if (node !== undefined) cfg.nodeEnv = node;
   if (supa !== undefined) cfg.supabaseUrl = supa;
   if (backupsDir !== undefined) cfg.backupsDirHost = backupsDir;
+  const hostMemoryUrl = map.get('LLM_HOST_MEMORY_URL');
+  if (hostMemoryUrl !== undefined) cfg.hostMemoryUrl = hostMemoryUrl;
+  const maxLoaded = map.get('LLM_HOST_MAX_LOADED_MODELS');
+  if (maxLoaded !== undefined) cfg.hostMaxLoadedModels = maxLoaded;
   return cfg;
 }
 

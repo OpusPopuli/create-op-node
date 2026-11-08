@@ -65,12 +65,14 @@ import {
   DEFAULT_LLM_MODEL,
   RECOMMENDED_INGESTION_MODEL,
   checkOllamaHealth,
+  detectOllamaMaxLoadedModels,
   probeHostDockerInternal,
   setupModels,
   startOllamaService,
   type EmbeddingsProvider,
 } from '../lib/ollama.js';
 import { writeManagedEnv } from '../lib/env-file.js';
+import { installHostMemoryProbe, type ProbeScriptOutcome } from '../lib/host-memory-probe.js';
 import { locateOrCloneRepo, type LocateOutcome } from '../lib/noderepo.js';
 import { safeExeca } from '../lib/exec.js';
 import { unwrap } from '../lib/prompts.js';
@@ -315,8 +317,13 @@ export const bootstrapCommand = new Command('bootstrap')
       ...(opts.ingestionModel ? { ingestionModel: opts.ingestionModel } : {}),
       embeddingsProvider,
     });
+    // Before the stack: the backend fails closed (no model loads) when the
+    // probe URL is set and nothing answers.
+    await runHostMemoryProbePhase(repoPath);
+    const hostMaxLoadedModels = await resolveHostMaxLoadedModels();
     await runEnvFilePhase({
       repoPath,
+      hostMaxLoadedModels,
       analysisModel,
       ...(opts.ingestionModel ? { ingestionModel: opts.ingestionModel } : {}),
       embeddingModel,
@@ -1207,6 +1214,45 @@ async function runOllamaPhase(args: {
   }
 }
 
+// ---- Phase 8a: host memory probe ----
+//
+// The backend refuses to load a model the host has no room for, and asks a
+// host-side probe how much room there is (opuspopuli#1435). The installer
+// ships in the node repo so the probe matches the compose it serves.
+
+/** The operator-facing message for a failed probe install. Pure. */
+export function hostMemoryProbeFailure(outcome: ProbeScriptOutcome): string | null {
+  if (outcome.ok) return null;
+  if (outcome.missing) return outcome.reason;
+  return `${outcome.script} failed: ${outcome.reason}`;
+}
+
+async function runHostMemoryProbePhase(repoPath: string): Promise<void> {
+  const spin = p.spinner();
+  spin.start('Installing the host memory probe…');
+  const outcome = await installHostMemoryProbe({ repoPath, nodePath: process.execPath });
+  const failure = hostMemoryProbeFailure(outcome);
+  if (failure !== null) {
+    spin.stop(pc.red('✗ Host memory probe install failed.'));
+    p.cancel(failure);
+    process.exit(1);
+  }
+  spin.stop(pc.green('✓ Host memory probe running (org.opuspopuli.host-memory-probe).'));
+}
+
+// Read, never set: Ollama's configuration belongs to the operator. The gate
+// needs the value Ollama really runs with, so a bad one stops bootstrap rather
+// than being papered over with a default.
+async function resolveHostMaxLoadedModels(): Promise<number> {
+  const res = await detectOllamaMaxLoadedModels();
+  if (!res.ok) {
+    p.cancel(res.reason);
+    process.exit(1);
+  }
+  p.log.info(`OLLAMA_MAX_LOADED_MODELS=${res.value} (${res.source}) → LLM_HOST_MAX_LOADED_MODELS`);
+  return res.value;
+}
+
 // ---- Phase 8c: write the single-source `.env` (model config) ----
 //
 // docker compose auto-loads `.env` from the compose file's directory, so the
@@ -1222,6 +1268,8 @@ async function runOllamaPhase(args: {
 // lines OUTSIDE the managed block are always preserved.
 async function runEnvFilePhase(args: {
   repoPath: string;
+  /** The host Ollama's effective OLLAMA_MAX_LOADED_MODELS. */
+  hostMaxLoadedModels: number;
   analysisModel: string;
   /** Ingestion-lane model, when the operator asked for one (§6.4). */
   ingestionModel?: string;
@@ -1236,6 +1284,7 @@ async function runEnvFilePhase(args: {
 }): Promise<void> {
   const {
     repoPath,
+    hostMaxLoadedModels,
     analysisModel,
     ingestionModel,
     embeddingModel,
@@ -1277,6 +1326,8 @@ async function runEnvFilePhase(args: {
       // Only emitted when the operator opted into tailnet exposure; absent
       // leaves the compose default (127.0.0.1) in force.
       ...(grafanaBindAddr ? { grafanaBindAddr } : {}),
+      // Always written, and overwritten: it must track Ollama's real value.
+      hostMaxLoadedModels: String(hostMaxLoadedModels),
     },
     { overwrite: true },
   );

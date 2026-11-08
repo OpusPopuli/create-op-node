@@ -1,6 +1,7 @@
 /**
- * `create-op-node reset` — reverse of bootstrap. Stops the stack, unloads
- * the LaunchAgent, removes the pgsodium key file. By default the docker
+ * `create-op-node reset` — reverse of bootstrap. Stops the stack, removes the
+ * host memory probe agent, unloads the LaunchAgent, removes the pgsodium key
+ * file. By default the docker
  * volumes (and therefore the database) are PRESERVED. Pass `--wipe-data`
  * for the destructive variant; it requires retyping the region label as
  * confirmation.
@@ -30,6 +31,7 @@ import pc from 'picocolors';
 import { composeDown, composePs, dockerLogout, GHCR_REGISTRY } from '../lib/docker.js';
 import { defaultPaths as defaultLaunchAgentPaths, teardownLaunchAgent } from '../lib/launchagent.js';
 import { locateOrCloneRepo, NODE_REPO_MARKERS } from '../lib/noderepo.js';
+import { uninstallHostMemoryProbe } from '../lib/host-memory-probe.js';
 import { unwrap } from '../lib/prompts.js';
 import { assertNever } from '../lib/assert.js';
 import type { ContainerSnapshot } from '../lib/docker.js';
@@ -68,6 +70,7 @@ const REGION_RE = /^[a-z0-9-]{2,32}$/;
 
 export const RESET_PHASES = {
   STOP_STACK: 'Stop stack',
+  HOST_MEMORY_PROBE: 'Host memory probe',
   LAUNCH_AGENT: 'LaunchAgent',
   DOCKER_LOGOUT: 'docker logout',
 } as const;
@@ -94,6 +97,7 @@ export interface ResetReport {
 export interface ResetDeps {
   composeDown: typeof composeDown;
   teardownLaunchAgent: typeof teardownLaunchAgent;
+  uninstallHostMemoryProbe: typeof uninstallHostMemoryProbe;
   dockerLogout: typeof dockerLogout;
   /** Notification fan-out — lets the CLI render spinners. */
   onPhase?: (phase: ResetPhase) => void;
@@ -122,6 +126,9 @@ export interface ResetInput {
     paths: LaunchAgentPaths;
     keepKeyFile: boolean;
   };
+  /** Set when a node repo was resolved: its `install.sh --uninstall` removes
+   *  the probe agent. Best-effort — never fails the reset. */
+  hostMemoryProbe?: { repoPath: string };
   /** Set when the docker-logout phase should run. The registry value is
    *  the argument passed to `docker logout <registry>`. */
   dockerLogout?: { registry: string };
@@ -131,6 +138,7 @@ export interface ResetInput {
 const DEFAULT_DEPS: ResetDeps = {
   composeDown,
   teardownLaunchAgent,
+  uninstallHostMemoryProbe,
   dockerLogout,
 };
 
@@ -158,6 +166,7 @@ export async function runReset(input: ResetInput, deps: ResetDeps = DEFAULT_DEPS
   };
 
   push(await resetStopStackPhase(input, deps));
+  push(await resetHostMemoryProbePhase(input, deps));
   push(await resetLaunchAgentPhase(input, deps));
   push(await resetDockerLogoutPhase(input, deps));
 
@@ -199,6 +208,23 @@ async function resetStopStackPhase(input: ResetInput, deps: ResetDeps): Promise<
     input.stack.wipeImages ? 'images removed (next bootstrap will re-pull)' : null,
   ].filter(Boolean);
   return { name: RESET_PHASES.STOP_STACK, status: 'ok', detail: bits.join('; ') };
+}
+
+// ---- Phase 1b: host memory probe agent -----------------------------
+// Best-effort: an older node repo without the script, or an uninstall that
+// errors, is reported but never fails the reset.
+async function resetHostMemoryProbePhase(input: ResetInput, deps: ResetDeps): Promise<ResetPhase> {
+  const name = RESET_PHASES.HOST_MEMORY_PROBE;
+  if (!input.hostMemoryProbe) {
+    return { name, status: 'skipped', detail: '--skip-stack or no repo path resolved' };
+  }
+  if (input.dryRun) {
+    return { name, status: 'dry-run', detail: 'would run: scripts/host-memory-probe/install.sh --uninstall' };
+  }
+  const res = await deps.uninstallHostMemoryProbe(input.hostMemoryProbe.repoPath);
+  if (res.ok) return { name, status: 'ok', detail: res.output || 'removed' };
+  if (res.missing) return { name, status: 'skipped', detail: 'node repo has no host memory probe installer' };
+  return { name, status: 'warn', detail: res.reason };
 }
 
 // ---- Phase 2: LaunchAgent ------------------------------------------
@@ -640,6 +666,7 @@ export function buildResetInput(args: {
     : undefined;
   return {
     ...(stack ? { stack } : {}),
+    ...(repoPath ? { hostMemoryProbe: { repoPath } } : {}),
     ...(launchAgent ? { launchAgent } : {}),
     ...(dockerLogoutInput ? { dockerLogout: dockerLogoutInput } : {}),
     dryRun: opts.dryRun ?? false,
@@ -661,6 +688,7 @@ async function runResetWithSpinners(args: {
   const phaseSpins = new Map<ResetPhaseName, ReturnType<typeof p.spinner>>();
   const actingPhases: ResetPhaseName[] = [];
   if (input.stack && !input.dryRun) actingPhases.push(RESET_PHASES.STOP_STACK);
+  if (input.hostMemoryProbe && !input.dryRun) actingPhases.push(RESET_PHASES.HOST_MEMORY_PROBE);
   if (input.launchAgent && !input.dryRun) actingPhases.push(RESET_PHASES.LAUNCH_AGENT);
   if (input.dockerLogout && !input.dryRun) actingPhases.push(RESET_PHASES.DOCKER_LOGOUT);
   for (const name of actingPhases) {

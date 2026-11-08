@@ -15,6 +15,9 @@
  *     `host.docker.internal` — common Docker Desktop configuration mistake.
  */
 
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 import { safeExeca } from './exec.js';
 
 export const OLLAMA_URL = 'http://localhost:11434';
@@ -348,4 +351,94 @@ export async function setupModels(
   }
 
   return report;
+}
+
+// ----------------------------------------------------------------------------
+// OLLAMA_MAX_LOADED_MODELS — read, never written
+// ----------------------------------------------------------------------------
+
+/** Ollama's own default when OLLAMA_MAX_LOADED_MODELS is unset: 3 per GPU, and
+ *  Apple silicon has one. */
+export const OLLAMA_DEFAULT_MAX_LOADED_MODELS = 3;
+
+const MAX_LOADED_KEY = 'OLLAMA_MAX_LOADED_MODELS';
+
+/** The plists `brew services` writes for Ollama, newest naming first. */
+export function brewOllamaPlists(home: string = homedir()): string[] {
+  return [
+    join(home, 'Library', 'LaunchAgents', 'homebrew.mxcl.ollama.plist'),
+    join(home, 'Library', 'LaunchAgents', 'sh.brew.ollama.plist'),
+  ];
+}
+
+/** A positive integer, or null. Pure. Rejects `0` (Ollama reads it as "use
+ *  the default", which would make the value we report a lie), signs, decimals
+ *  and anything with trailing text. */
+export function parseMaxLoadedModels(raw: string): number | null {
+  const v = raw.trim();
+  if (!/^[1-9]\d{0,3}$/.test(v)) return null;
+  return Number.parseInt(v, 10);
+}
+
+export type MaxLoadedModels =
+  | { ok: true; value: number; source: string }
+  | { ok: false; reason: string };
+
+/** A set value from one source, or undefined when that source leaves it unset. */
+async function readPlistMaxLoaded(plist: string): Promise<string | undefined> {
+  // Non-zero = no such file or no such key; either way, unset here.
+  const res = await safeExeca('plutil', [
+    '-extract',
+    `EnvironmentVariables.${MAX_LOADED_KEY}`,
+    'raw',
+    '-o',
+    '-',
+    plist,
+  ]);
+  if (res?.exitCode !== 0) return undefined;
+  const v = res.stdout.trim();
+  return v.length > 0 ? v : undefined;
+}
+
+async function readLaunchctlMaxLoaded(): Promise<string | undefined> {
+  const res = await safeExeca('launchctl', ['getenv', MAX_LOADED_KEY]);
+  if (res?.exitCode !== 0) return undefined;
+  const v = res.stdout.trim();
+  return v.length > 0 ? v : undefined;
+}
+
+/**
+ * The OLLAMA_MAX_LOADED_MODELS the host's Ollama runs with.
+ *
+ * The backend's host-memory gate counts the memory Ollama frees by evicting a
+ * resident model once this many are loaded, so `LLM_HOST_MAX_LOADED_MODELS`
+ * must equal it. Precedence follows launchd: a job's own EnvironmentVariables
+ * (the brew-services plist) override the session-wide `launchctl setenv`.
+ * Unset everywhere → Ollama's default of 3. A value that is set but is not a
+ * positive integer is an error rather than a guess.
+ *
+ * Read-only: Ollama's configuration is the operator's, not ours.
+ */
+export async function detectOllamaMaxLoadedModels(
+  home: string = homedir(),
+): Promise<MaxLoadedModels> {
+  const sources: Array<[string, () => Promise<string | undefined>]> = [
+    ...brewOllamaPlists(home).map(
+      (plist): [string, () => Promise<string | undefined>] => [plist, () => readPlistMaxLoaded(plist)],
+    ),
+    ['launchctl getenv', readLaunchctlMaxLoaded],
+  ];
+  for (const [source, read] of sources) {
+    const raw = await read();
+    if (raw === undefined) continue;
+    const value = parseMaxLoadedModels(raw);
+    if (value === null) {
+      return {
+        ok: false,
+        reason: `${MAX_LOADED_KEY}=${JSON.stringify(raw)} (from ${source}) is not a positive integer — fix it there, restart Ollama, and re-run.`,
+      };
+    }
+    return { ok: true, value, source };
+  }
+  return { ok: true, value: OLLAMA_DEFAULT_MAX_LOADED_MODELS, source: 'Ollama default' };
 }

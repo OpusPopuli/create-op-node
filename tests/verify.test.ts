@@ -43,6 +43,9 @@ function depsFor(overrides: Partial<VerifyDeps> = {}): VerifyDeps {
     // Ample by default so existing expectations are unaffected; the disk
     // tests override it.
     disk: vi.fn(() => Promise.resolve({ freeBytes: 500e9, totalBytes: 1000e9 })),
+    maxLoadedModels: vi.fn(() =>
+      Promise.resolve({ ok: true as const, value: 3, source: 'Ollama default' }),
+    ),
     ...overrides,
   };
 }
@@ -164,7 +167,7 @@ describe('summarize', () => {
 });
 
 describe('runVerify orchestration', () => {
-  it('returns 9 phases on a clean run with no images', async () => {
+  it('returns 11 phases on a clean run with no images', async () => {
     const report = await runVerify(baseInput, depsFor());
     // Order and count are pinned deliberately: the renderer numbers phases
     // against `totalPhases`, so adding one here without bumping that constant
@@ -177,6 +180,8 @@ describe('runVerify orchestration', () => {
       'SUPABASE_URL',
       'Backups configured',
       'Disk headroom',
+      'Host memory probe',
+      'Model limit (gate ↔ Ollama)',
       'Cloudflare Tunnel',
       'cosign verify',
     ]);
@@ -524,5 +529,131 @@ describe('runVerify — disk headroom', () => {
     );
     expect(phase(report)?.status).toBe('warn');
     expect(phase(report)?.detail).toContain('EACCES');
+  });
+});
+
+/* The backend fails CLOSED when its host-memory probe is configured but
+ * silent: no model loads (opuspopuli#1435). verify is where an operator finds
+ * out, so a node without the probe has to fail here, not pass. */
+describe('runVerify — host memory probe', () => {
+  const onNode = { ...baseInput, repoDir: '/opt/node', envRead: true };
+  const phase = (report: Awaited<ReturnType<typeof runVerify>>) =>
+    report.phases.find((ph) => ph.name === 'Host memory probe');
+  const probeHttp = (result: Awaited<ReturnType<VerifyDeps['http']>>) =>
+    vi.fn((input: { url: string }) =>
+      Promise.resolve(input.url.includes('11500') ? result : okHealth()),
+    );
+
+  it('skips when not running on the node', async () => {
+    const http = probeHttp({ ok: true, status: 200, bodyPreview: '{}' });
+    const report = await runVerify(baseInput, depsFor({ http }));
+    expect(phase(report)?.status).toBe('skipped');
+    expect(http).not.toHaveBeenCalledWith(expect.objectContaining({ url: expect.stringContaining('11500') }));
+  });
+
+  it('skips when the operator turned the gate off with an empty LLM_HOST_MEMORY_URL', async () => {
+    const report = await runVerify({ ...onNode, hostMemoryUrl: '' }, depsFor());
+    expect(phase(report)?.status).toBe('skipped');
+  });
+
+  it('passes on a numeric reclaimableBytes and reports GiB', async () => {
+    const body = JSON.stringify({
+      reclaimableBytes: 24 * 2 ** 30,
+      swapUsedBytes: 0,
+      swapTotalBytes: 0,
+      at: '2026-11-07T19:40:00.000Z',
+    });
+    const http = probeHttp({ ok: true, status: 200, bodyPreview: body });
+    const report = await runVerify(onNode, depsFor({ http }));
+    expect(http).toHaveBeenCalledWith({ url: 'http://127.0.0.1:11500/memory' });
+    expect(phase(report)?.status).toBe('ok');
+    expect(phase(report)?.detail).toBe('24.0 GiB reclaimable');
+  });
+
+  it('fails with the installer path when the probe is unreachable', async () => {
+    const http = probeHttp({ ok: false, reason: 'GET http://127.0.0.1:11500/memory failed: ECONNREFUSED' });
+    const report = await runVerify(onNode, depsFor({ http }));
+    expect(phase(report)?.status).toBe('fail');
+    expect(phase(report)?.detail).toContain('/opt/node/scripts/host-memory-probe/install.sh');
+  });
+
+  it.each([
+    ['not JSON', '<html>'],
+    ['missing field', '{"swapUsedBytes":0}'],
+    ['string field', '{"reclaimableBytes":"lots"}'],
+  ])('fails on a 200 with %s', async (_label, body) => {
+    const http = probeHttp({ ok: true, status: 200, bodyPreview: body });
+    const report = await runVerify(onNode, depsFor({ http }));
+    expect(phase(report)?.status).toBe('fail');
+  });
+});
+
+/* The gate counts the memory Ollama frees by evicting a model once
+ * LLM_HOST_MAX_LOADED_MODELS are loaded; a value that disagrees with Ollama's
+ * makes it count evictions that never happen (the freeze returns) or miss ones
+ * that do. */
+describe('runVerify — model limit cross-check', () => {
+  const onNode = { ...baseInput, repoDir: '/opt/node', envRead: true };
+  const phase = (report: Awaited<ReturnType<typeof runVerify>>) =>
+    report.phases.find((ph) => ph.name === 'Model limit (gate ↔ Ollama)');
+  const ollamaSays = (value: number, source = '/Users/op/Library/LaunchAgents/sh.brew.ollama.plist') =>
+    vi.fn(() => Promise.resolve({ ok: true as const, value, source }));
+
+  it('passes when .env matches Ollama', async () => {
+    const report = await runVerify(
+      { ...onNode, hostMaxLoadedModels: '1' },
+      depsFor({ maxLoadedModels: ollamaSays(1) }),
+    );
+    expect(phase(report)?.status).toBe('ok');
+  });
+
+  it('fails on a mismatch, naming both values, the source and the fix', async () => {
+    const report = await runVerify(
+      { ...onNode, hostMaxLoadedModels: '3' },
+      depsFor({ maxLoadedModels: ollamaSays(1) }),
+    );
+    const ph = phase(report);
+    expect(ph?.status).toBe('fail');
+    expect(ph?.detail).toContain('LLM_HOST_MAX_LOADED_MODELS=3');
+    expect(ph?.detail).toContain('OLLAMA_MAX_LOADED_MODELS=1 (/Users/op/Library/LaunchAgents/sh.brew.ollama.plist)');
+    expect(ph?.detail).toContain('set LLM_HOST_MAX_LOADED_MODELS=1 in the managed block');
+  });
+
+  it('warns when the key is absent and Ollama is not at the compose default of 3', async () => {
+    const report = await runVerify(onNode, depsFor({ maxLoadedModels: ollamaSays(1) }));
+    expect(phase(report)?.status).toBe('warn');
+    expect(phase(report)?.detail).toContain('re-run create-op-node bootstrap');
+  });
+
+  it('passes when the key is absent and Ollama is at 3', async () => {
+    const report = await runVerify(onNode, depsFor({ maxLoadedModels: ollamaSays(3, 'Ollama default') }));
+    expect(phase(report)?.status).toBe('ok');
+  });
+
+  it('skips when the gate is off, without detecting', async () => {
+    const maxLoadedModels = ollamaSays(1);
+    const report = await runVerify({ ...onNode, hostMemoryUrl: '' }, depsFor({ maxLoadedModels }));
+    expect(phase(report)?.status).toBe('skipped');
+    expect(maxLoadedModels).not.toHaveBeenCalled();
+  });
+
+  it('skips off the node', async () => {
+    const maxLoadedModels = ollamaSays(1);
+    const report = await runVerify(baseInput, depsFor({ maxLoadedModels }));
+    expect(phase(report)?.status).toBe('skipped');
+    expect(maxLoadedModels).not.toHaveBeenCalled();
+  });
+
+  it('fails with the detection error', async () => {
+    const report = await runVerify(
+      { ...onNode, hostMaxLoadedModels: '1' },
+      depsFor({
+        maxLoadedModels: vi.fn(() =>
+          Promise.resolve({ ok: false as const, reason: 'OLLAMA_MAX_LOADED_MODELS="two" is not a positive integer' }),
+        ),
+      }),
+    );
+    expect(phase(report)?.status).toBe('fail');
+    expect(phase(report)?.detail).toContain('"two"');
   });
 });
