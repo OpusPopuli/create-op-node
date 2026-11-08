@@ -358,6 +358,9 @@ export interface NodeEnvModelConfig {
    *  turns the backend's host-memory gate off, so `verify` skips the probe
    *  check rather than fail a node that deliberately runs without it. */
   hostMemoryUrl?: string;
+  /** Effective LLM_HOST_MAX_LOADED_MODELS — `verify` compares it with the
+   *  host Ollama's OLLAMA_MAX_LOADED_MODELS. */
+  hostMaxLoadedModels?: string;
 }
 
 /**
@@ -394,6 +397,8 @@ export async function readEnvModelConfig(repoDir: string): Promise<NodeEnvModelC
   if (backupsDir !== undefined) cfg.backupsDirHost = backupsDir;
   const hostMemoryUrl = map.get('LLM_HOST_MEMORY_URL');
   if (hostMemoryUrl !== undefined) cfg.hostMemoryUrl = hostMemoryUrl;
+  const maxLoaded = map.get('LLM_HOST_MAX_LOADED_MODELS');
+  if (maxLoaded !== undefined) cfg.hostMaxLoadedModels = maxLoaded;
   return cfg;
 }
 

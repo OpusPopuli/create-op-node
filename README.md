@@ -351,12 +351,19 @@ access. The main phases (alongside the node-local `.env` checks for
    reclaimable GiB. Fails with the `scripts/host-memory-probe/install.sh`
    remedy otherwise, because without it no model loads. **Skipped** off the
    node, and when `LLM_HOST_MEMORY_URL` is set empty in `.env` (gate off).
-6. **Cloudflare Tunnel status** (optional) — looks up `connections` via
+6. **Model limit (gate ↔ Ollama)** (node-local) — compares the `.env`'s
+   `LLM_HOST_MAX_LOADED_MODELS` with the host Ollama's effective
+   `OLLAMA_MAX_LOADED_MODELS` (same detection as bootstrap). Fails on a
+   mismatch, naming both values and where Ollama's came from: the gate would
+   count evictions that never happen, or miss ones that do. Warns when the key
+   is absent from `.env` (older bootstrap; compose defaults to 3) and Ollama
+   is not at 3. Skipped off the node and when the gate is off.
+7. **Cloudflare Tunnel status** (optional) — looks up `connections` via
    the CF API. Zero connectors registered → warning that cloudflared on
    the Studio is offline. Requires all three of `--cf-token` (or
    `--cf-token-file`), `--cf-account-id`, `--tunnel-id`; partial
    configuration warns + names the missing flag.
-7. **`cosign verify`** (optional, repeatable `--image`) — keyless
+8. **`cosign verify`** (optional, repeatable `--image`) — keyless
    verification against the GitHub Actions OIDC issuer + Fulcio +
    the Rekor transparency log. Silently skipped when `cosign` isn't on
    `PATH` (install with `brew install cosign` to enable).

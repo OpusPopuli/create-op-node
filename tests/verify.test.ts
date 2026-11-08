@@ -43,6 +43,9 @@ function depsFor(overrides: Partial<VerifyDeps> = {}): VerifyDeps {
     // Ample by default so existing expectations are unaffected; the disk
     // tests override it.
     disk: vi.fn(() => Promise.resolve({ freeBytes: 500e9, totalBytes: 1000e9 })),
+    maxLoadedModels: vi.fn(() =>
+      Promise.resolve({ ok: true as const, value: 3, source: 'Ollama default' }),
+    ),
     ...overrides,
   };
 }
@@ -164,7 +167,7 @@ describe('summarize', () => {
 });
 
 describe('runVerify orchestration', () => {
-  it('returns 10 phases on a clean run with no images', async () => {
+  it('returns 11 phases on a clean run with no images', async () => {
     const report = await runVerify(baseInput, depsFor());
     // Order and count are pinned deliberately: the renderer numbers phases
     // against `totalPhases`, so adding one here without bumping that constant
@@ -178,6 +181,7 @@ describe('runVerify orchestration', () => {
       'Backups configured',
       'Disk headroom',
       'Host memory probe',
+      'Model limit (gate ↔ Ollama)',
       'Cloudflare Tunnel',
       'cosign verify',
     ]);
@@ -581,5 +585,75 @@ describe('runVerify — host memory probe', () => {
     const http = probeHttp({ ok: true, status: 200, bodyPreview: body });
     const report = await runVerify(onNode, depsFor({ http }));
     expect(phase(report)?.status).toBe('fail');
+  });
+});
+
+/* The gate counts the memory Ollama frees by evicting a model once
+ * LLM_HOST_MAX_LOADED_MODELS are loaded; a value that disagrees with Ollama's
+ * makes it count evictions that never happen (the freeze returns) or miss ones
+ * that do. */
+describe('runVerify — model limit cross-check', () => {
+  const onNode = { ...baseInput, repoDir: '/opt/node', envRead: true };
+  const phase = (report: Awaited<ReturnType<typeof runVerify>>) =>
+    report.phases.find((ph) => ph.name === 'Model limit (gate ↔ Ollama)');
+  const ollamaSays = (value: number, source = '/Users/op/Library/LaunchAgents/sh.brew.ollama.plist') =>
+    vi.fn(() => Promise.resolve({ ok: true as const, value, source }));
+
+  it('passes when .env matches Ollama', async () => {
+    const report = await runVerify(
+      { ...onNode, hostMaxLoadedModels: '1' },
+      depsFor({ maxLoadedModels: ollamaSays(1) }),
+    );
+    expect(phase(report)?.status).toBe('ok');
+  });
+
+  it('fails on a mismatch, naming both values, the source and the fix', async () => {
+    const report = await runVerify(
+      { ...onNode, hostMaxLoadedModels: '3' },
+      depsFor({ maxLoadedModels: ollamaSays(1) }),
+    );
+    const ph = phase(report);
+    expect(ph?.status).toBe('fail');
+    expect(ph?.detail).toContain('LLM_HOST_MAX_LOADED_MODELS=3');
+    expect(ph?.detail).toContain('OLLAMA_MAX_LOADED_MODELS=1 (/Users/op/Library/LaunchAgents/sh.brew.ollama.plist)');
+    expect(ph?.detail).toContain('set LLM_HOST_MAX_LOADED_MODELS=1 in the managed block');
+  });
+
+  it('warns when the key is absent and Ollama is not at the compose default of 3', async () => {
+    const report = await runVerify(onNode, depsFor({ maxLoadedModels: ollamaSays(1) }));
+    expect(phase(report)?.status).toBe('warn');
+    expect(phase(report)?.detail).toContain('re-run create-op-node bootstrap');
+  });
+
+  it('passes when the key is absent and Ollama is at 3', async () => {
+    const report = await runVerify(onNode, depsFor({ maxLoadedModels: ollamaSays(3, 'Ollama default') }));
+    expect(phase(report)?.status).toBe('ok');
+  });
+
+  it('skips when the gate is off, without detecting', async () => {
+    const maxLoadedModels = ollamaSays(1);
+    const report = await runVerify({ ...onNode, hostMemoryUrl: '' }, depsFor({ maxLoadedModels }));
+    expect(phase(report)?.status).toBe('skipped');
+    expect(maxLoadedModels).not.toHaveBeenCalled();
+  });
+
+  it('skips off the node', async () => {
+    const maxLoadedModels = ollamaSays(1);
+    const report = await runVerify(baseInput, depsFor({ maxLoadedModels }));
+    expect(phase(report)?.status).toBe('skipped');
+    expect(maxLoadedModels).not.toHaveBeenCalled();
+  });
+
+  it('fails with the detection error', async () => {
+    const report = await runVerify(
+      { ...onNode, hostMaxLoadedModels: '1' },
+      depsFor({
+        maxLoadedModels: vi.fn(() =>
+          Promise.resolve({ ok: false as const, reason: 'OLLAMA_MAX_LOADED_MODELS="two" is not a positive integer' }),
+        ),
+      }),
+    );
+    expect(phase(report)?.status).toBe('fail');
+    expect(phase(report)?.detail).toContain('"two"');
   });
 });
