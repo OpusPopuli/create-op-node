@@ -23,6 +23,9 @@ function depsFor(overrides: Partial<ResetDeps> = {}): ResetDeps {
         ],
       }),
     ),
+    uninstallHostMemoryProbe: vi.fn(() =>
+      Promise.resolve({ ok: true as const, output: 'Removed org.opuspopuli.host-memory-probe' }),
+    ),
     dockerLogout: vi.fn(() => Promise.resolve({ ok: true })),
     ...overrides,
   };
@@ -36,6 +39,7 @@ const fullInput = (): ResetInput => ({
     wipeImages: false,
     removeOrphans: true,
   },
+  hostMemoryProbe: { repoPath: '/repo' },
   launchAgent: {
     paths: { keyFile: '/k', plistFile: '/p.plist' },
     keepKeyFile: false,
@@ -48,6 +52,7 @@ describe('RESET_PHASES', () => {
   it('exports stable phase names', () => {
     expect(RESET_PHASES).toEqual({
       STOP_STACK: 'Stop stack',
+      HOST_MEMORY_PROBE: 'Host memory probe',
       LAUNCH_AGENT: 'LaunchAgent',
       DOCKER_LOGOUT: 'docker logout',
     });
@@ -84,6 +89,11 @@ describe('buildResetInput', () => {
 
   it('omits the stack when no repo path is resolved', () => {
     expect(buildResetInput({ ...base, repoPath: undefined }).stack).toBeUndefined();
+  });
+
+  it('targets the host memory probe only when a repo path is resolved', () => {
+    expect(buildResetInput({ ...base, repoPath: '/repo' }).hostMemoryProbe).toEqual({ repoPath: '/repo' });
+    expect(buildResetInput(base).hostMemoryProbe).toBeUndefined();
   });
 
   it('includes the LaunchAgent only when the plist exists and it is not skipped', () => {
@@ -178,18 +188,57 @@ describe('buildTeardownEnv (#85)', () => {
 });
 
 describe('runReset', () => {
-  it('runs all three phases on a clean default reset', async () => {
+  it('runs every phase on a clean default reset', async () => {
     const deps = depsFor();
     const report = await runReset(fullInput(), deps);
     expect(report.phases.map((ph) => ph.name)).toEqual([
       RESET_PHASES.STOP_STACK,
+      RESET_PHASES.HOST_MEMORY_PROBE,
       RESET_PHASES.LAUNCH_AGENT,
       RESET_PHASES.DOCKER_LOGOUT,
     ]);
     expect(report.phases.every((ph) => ph.status === 'ok')).toBe(true);
     expect(deps.composeDown).toHaveBeenCalledTimes(1);
     expect(deps.teardownLaunchAgent).toHaveBeenCalledTimes(1);
+    expect(deps.uninstallHostMemoryProbe).toHaveBeenCalledWith('/repo');
     expect(deps.dockerLogout).toHaveBeenCalledTimes(1);
+  });
+
+  describe('host memory probe (best-effort)', () => {
+    const probePhase = (r: Awaited<ReturnType<typeof runReset>>) =>
+      r.phases.find((ph) => ph.name === RESET_PHASES.HOST_MEMORY_PROBE);
+
+    it('skips, without failing, when the node repo has no installer', async () => {
+      const deps = depsFor({
+        uninstallHostMemoryProbe: vi.fn(() =>
+          Promise.resolve({ ok: false as const, missing: true as const, script: '/repo/x', reason: 'not found' }),
+        ),
+      });
+      expect(probePhase(await runReset(fullInput(), deps))?.status).toBe('skipped');
+    });
+
+    it('warns, never fails, when the uninstall errors', async () => {
+      const deps = depsFor({
+        uninstallHostMemoryProbe: vi.fn(() =>
+          Promise.resolve({ ok: false as const, missing: false as const, script: '/repo/x', reason: 'boom' }),
+        ),
+      });
+      const ph = probePhase(await runReset(fullInput(), deps));
+      expect(ph?.status).toBe('warn');
+      expect(ph?.detail).toBe('boom');
+    });
+
+    it('is skipped when no repo was resolved, and not run under --dry-run', async () => {
+      const deps = depsFor();
+      const noRepo = fullInput();
+      delete (noRepo as Partial<ResetInput>).hostMemoryProbe;
+      expect(probePhase(await runReset(noRepo, deps))?.status).toBe('skipped');
+
+      const dry = fullInput();
+      dry.dryRun = true;
+      expect(probePhase(await runReset(dry, deps))?.status).toBe('dry-run');
+      expect(deps.uninstallHostMemoryProbe).not.toHaveBeenCalled();
+    });
   });
 
   it('passes stack.env through to composeDown so down can interpolate ${VAR:?} (#85)', async () => {

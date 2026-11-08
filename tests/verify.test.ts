@@ -164,7 +164,7 @@ describe('summarize', () => {
 });
 
 describe('runVerify orchestration', () => {
-  it('returns 9 phases on a clean run with no images', async () => {
+  it('returns 10 phases on a clean run with no images', async () => {
     const report = await runVerify(baseInput, depsFor());
     // Order and count are pinned deliberately: the renderer numbers phases
     // against `totalPhases`, so adding one here without bumping that constant
@@ -177,6 +177,7 @@ describe('runVerify orchestration', () => {
       'SUPABASE_URL',
       'Backups configured',
       'Disk headroom',
+      'Host memory probe',
       'Cloudflare Tunnel',
       'cosign verify',
     ]);
@@ -524,5 +525,61 @@ describe('runVerify — disk headroom', () => {
     );
     expect(phase(report)?.status).toBe('warn');
     expect(phase(report)?.detail).toContain('EACCES');
+  });
+});
+
+/* The backend fails CLOSED when its host-memory probe is configured but
+ * silent: no model loads (opuspopuli#1435). verify is where an operator finds
+ * out, so a node without the probe has to fail here, not pass. */
+describe('runVerify — host memory probe', () => {
+  const onNode = { ...baseInput, repoDir: '/opt/node', envRead: true };
+  const phase = (report: Awaited<ReturnType<typeof runVerify>>) =>
+    report.phases.find((ph) => ph.name === 'Host memory probe');
+  const probeHttp = (result: Awaited<ReturnType<VerifyDeps['http']>>) =>
+    vi.fn((input: { url: string }) =>
+      Promise.resolve(input.url.includes('11500') ? result : okHealth()),
+    );
+
+  it('skips when not running on the node', async () => {
+    const http = probeHttp({ ok: true, status: 200, bodyPreview: '{}' });
+    const report = await runVerify(baseInput, depsFor({ http }));
+    expect(phase(report)?.status).toBe('skipped');
+    expect(http).not.toHaveBeenCalledWith(expect.objectContaining({ url: expect.stringContaining('11500') }));
+  });
+
+  it('skips when the operator turned the gate off with an empty LLM_HOST_MEMORY_URL', async () => {
+    const report = await runVerify({ ...onNode, hostMemoryUrl: '' }, depsFor());
+    expect(phase(report)?.status).toBe('skipped');
+  });
+
+  it('passes on a numeric reclaimableBytes and reports GiB', async () => {
+    const body = JSON.stringify({
+      reclaimableBytes: 24 * 2 ** 30,
+      swapUsedBytes: 0,
+      swapTotalBytes: 0,
+      at: '2026-11-07T19:40:00.000Z',
+    });
+    const http = probeHttp({ ok: true, status: 200, bodyPreview: body });
+    const report = await runVerify(onNode, depsFor({ http }));
+    expect(http).toHaveBeenCalledWith({ url: 'http://127.0.0.1:11500/memory' });
+    expect(phase(report)?.status).toBe('ok');
+    expect(phase(report)?.detail).toBe('24.0 GiB reclaimable');
+  });
+
+  it('fails with the installer path when the probe is unreachable', async () => {
+    const http = probeHttp({ ok: false, reason: 'GET http://127.0.0.1:11500/memory failed: ECONNREFUSED' });
+    const report = await runVerify(onNode, depsFor({ http }));
+    expect(phase(report)?.status).toBe('fail');
+    expect(phase(report)?.detail).toContain('/opt/node/scripts/host-memory-probe/install.sh');
+  });
+
+  it.each([
+    ['not JSON', '<html>'],
+    ['missing field', '{"swapUsedBytes":0}'],
+    ['string field', '{"reclaimableBytes":"lots"}'],
+  ])('fails on a 200 with %s', async (_label, body) => {
+    const http = probeHttp({ ok: true, status: 200, bodyPreview: body });
+    const report = await runVerify(onNode, depsFor({ http }));
+    expect(phase(report)?.status).toBe('fail');
   });
 });

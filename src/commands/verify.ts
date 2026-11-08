@@ -13,6 +13,7 @@ import { checkOllamaHealth, modelPresent, type EmbeddingsProvider, type OllamaHe
 import { readEnvModelConfig, type NodeEnvModelConfig } from '../lib/env-file.js';
 import { looksLikeNodeRepo } from '../lib/noderepo.js';
 import { checkDiskSpace, formatGb, type DiskSpace } from '../lib/disk.js';
+import { HOST_MEMORY_PROBE_SCRIPT, HOST_MEMORY_PROBE_URL, parseHostMemoryBody } from '../lib/host-memory-probe.js';
 
 interface VerifyOptions {
   domain?: string;
@@ -120,6 +121,9 @@ export interface VerifyInput {
   /** How many civic regions this node syncs. Each one archives its own bulk
    *  exports, so the disk requirement scales with it. Defaults to 1. */
   regionCount?: number;
+  /** LLM_HOST_MEMORY_URL from the node `.env`, when set. Empty = the backend's
+   *  host-memory gate is off, so the probe check is skipped. */
+  hostMemoryUrl?: string;
 }
 
 const DEFAULT_DEPS: VerifyDeps = {
@@ -152,6 +156,7 @@ export async function runVerify(input: VerifyInput, deps: VerifyDeps = DEFAULT_D
   verifySupabaseUrlPhase(input, push);
   verifyBackupsPhase(input, push);
   await verifyDiskPhase(input, deps, push);
+  await verifyHostMemoryProbePhase(input, deps, push);
   await verifyCloudflarePhase(input, deps, push);
   await verifyCosignPhase(input, deps, push);
 
@@ -398,6 +403,42 @@ async function verifyDiskPhase(input: VerifyInput, deps: VerifyDeps, push: PushV
   push({ name, status: 'ok', detail: `${free} free of ${formatGb(space.totalBytes)}` });
 }
 
+// ---- Phase 4e: host memory probe (node-local, optional) ------------
+//
+// The backend asks this probe before loading a model and fails CLOSED when it
+// is configured but silent: every AI generation stops (opuspopuli#1435). It
+// listens on the node's loopback, so the check is only meaningful on the node.
+async function verifyHostMemoryProbePhase(
+  input: VerifyInput,
+  deps: VerifyDeps,
+  push: PushVerifyPhase,
+): Promise<void> {
+  const name = 'Host memory probe';
+  if (!input.envRead) {
+    push({ name, status: 'skipped', detail: 'run on the node (or pass --repo-dir) to probe it' });
+    return;
+  }
+  if (input.hostMemoryUrl === '') {
+    push({ name, status: 'skipped', detail: 'LLM_HOST_MEMORY_URL is empty in .env — the gate is off' });
+    return;
+  }
+  const remedy =
+    `install it with \`${input.repoDir ?? '<node repo>'}/${HOST_MEMORY_PROBE_SCRIPT}\` ` +
+    '(or re-run bootstrap); until then no model loads';
+  const res = await deps.http({ url: HOST_MEMORY_PROBE_URL });
+  if (!res.ok) {
+    push({ name, status: 'fail', detail: `${HOST_MEMORY_PROBE_URL}: ${res.reason} — ${remedy}` });
+    return;
+  }
+  const reading = parseHostMemoryBody(res.bodyPreview);
+  if (!reading.ok) {
+    push({ name, status: 'fail', detail: `${HOST_MEMORY_PROBE_URL}: ${reading.reason} — ${remedy}` });
+    return;
+  }
+  const gib = (reading.reclaimableBytes / 2 ** 30).toFixed(1);
+  push({ name, status: 'ok', detail: `${gib} GiB reclaimable` });
+}
+
 // ---- Phase 5: Cloudflare Tunnel status (optional) ------------------
 async function verifyCloudflarePhase(input: VerifyInput, deps: VerifyDeps, push: PushVerifyPhase): Promise<void> {
   if (input.localOnly) return skipLocalOnly('Cloudflare Tunnel', 'local-only node — no tunnel', push);
@@ -554,10 +595,10 @@ export const verifyCommand = new Command('verify')
     const ollama = await resolveOllamaVerifyInput(opts);
     const nodeEnv = await resolveNodeEnvVerifyInput(opts);
     // Fixed phases: TLS, health, GraphQL, Ollama, SUPABASE_URL, Backups,
-    // Disk, Cloudflare (8) + cosign (one line when no --image, else one per
-    // image). Keep in step with runVerify — the renderer numbers phases
-    // against this, so a missed bump prints "[9/8]".
-    const totalPhases = 8 + (images.length === 0 ? 1 : images.length);
+    // Disk, Host memory probe, Cloudflare (9) + cosign (one line when no
+    // --image, else one per image). Keep in step with runVerify — the renderer
+    // numbers phases against this, so a missed bump prints "[10/9]".
+    const totalPhases = 9 + (images.length === 0 ? 1 : images.length);
 
     const report = await runVerifyWithSpinner({
       apiHost,
@@ -575,6 +616,7 @@ export const verifyCommand = new Command('verify')
       ...(ollama ? { ollama } : {}),
       ...(nodeEnv.supabaseUrl !== undefined ? { supabaseUrl: nodeEnv.supabaseUrl } : {}),
       ...(nodeEnv.backupsDirHost !== undefined ? { backupsDirHost: nodeEnv.backupsDirHost } : {}),
+      ...(nodeEnv.hostMemoryUrl !== undefined ? { hostMemoryUrl: nodeEnv.hostMemoryUrl } : {}),
     });
 
     renderVerifySummary(report, { opts, totalPhases });
@@ -722,6 +764,7 @@ async function resolveNodeEnvVerifyInput(
   supabaseUrl?: string;
   backupsDirHost?: string;
   repoDir?: string;
+  hostMemoryUrl?: string;
 }> {
   const explicit = opts.repoDir !== undefined;
   const dir = opts.repoDir ?? process.cwd();
@@ -732,6 +775,7 @@ async function resolveNodeEnvVerifyInput(
     envRead: true,
     ...(cfg.supabaseUrl !== undefined ? { supabaseUrl: cfg.supabaseUrl } : {}),
     ...(cfg.backupsDirHost !== undefined ? { backupsDirHost: cfg.backupsDirHost } : {}),
+    ...(cfg.hostMemoryUrl !== undefined ? { hostMemoryUrl: cfg.hostMemoryUrl } : {}),
   };
 }
 
@@ -748,6 +792,8 @@ async function runVerifyWithSpinner(args: {
   envRead?: boolean;
   supabaseUrl?: string;
   backupsDirHost?: string;
+  repoDir?: string;
+  hostMemoryUrl?: string;
 }): Promise<VerifyReport> {
   const {
     apiHost,
@@ -761,6 +807,8 @@ async function runVerifyWithSpinner(args: {
     envRead,
     supabaseUrl,
     backupsDirHost,
+    repoDir,
+    hostMemoryUrl,
   } = args;
 
   let phaseIndex = 0;
@@ -792,6 +840,8 @@ async function runVerifyWithSpinner(args: {
       ...(ollama ? { ollama } : {}),
       ...(supabaseUrl !== undefined ? { supabaseUrl } : {}),
       ...(backupsDirHost !== undefined ? { backupsDirHost } : {}),
+      ...(repoDir !== undefined ? { repoDir } : {}),
+      ...(hostMemoryUrl !== undefined ? { hostMemoryUrl } : {}),
     },
     deps,
   );

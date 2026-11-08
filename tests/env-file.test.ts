@@ -74,6 +74,29 @@ describe('buildManagedEnvContent — fresh file', () => {
     expect(parseEnvContent(built.content).get('GRAFANA_BIND_ADDR')).toBe('100.87.52.26');
   });
 
+  it('emits LLM_HOST_MAX_LOADED_MODELS, overwriting a stale value (#1435)', () => {
+    const existing = `${MANAGED_BEGIN}\nLLM_HOST_MAX_LOADED_MODELS=3\n${MANAGED_END}\n`;
+    const built = buildManagedEnvContent(
+      existing,
+      { analysisModel: 'qwen2.5:7b', hostMaxLoadedModels: '1' },
+      { overwrite: true },
+    );
+    if (!('content' in built)) throw new Error('expected content');
+    expect(parseEnvContent(built.content).get('LLM_HOST_MAX_LOADED_MODELS')).toBe('1');
+    expect(countAssignments(built.content, 'LLM_HOST_MAX_LOADED_MODELS')).toBe(1);
+  });
+
+  it.each(['0', '-1', '1.5', 'two', '01'])(
+    'rejects LLM_HOST_MAX_LOADED_MODELS=%s (must be a positive integer)',
+    (bad) => {
+      const built = buildManagedEnvContent('', {
+        analysisModel: 'qwen2.5:7b',
+        hostMaxLoadedModels: bad,
+      });
+      expect('error' in built).toBe(true);
+    },
+  );
+
   it('omits GRAFANA_BIND_ADDR entirely when not opted in', () => {
     const built = buildManagedEnvContent('', { analysisModel: 'qwen2.5:7b' });
     if (!('content' in built)) throw new Error('expected content');
